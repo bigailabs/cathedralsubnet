@@ -76,10 +76,10 @@ async def _verify_one(
         log.info("claim_rejected", reason=str(e))
         return
 
-    card = _decode_card_from_bundle(bundle, stored.payload.work_unit, stored.miner_hotkey)
+    card = _decode_card(stored.payload, bundle, stored.miner_hotkey)
     if card is None:
-        await queue.mark_rejected(conn, stored.id, "no_card_artifact")
-        log.info("claim_rejected", reason="no_card_artifact")
+        await queue.mark_rejected(conn, stored.id, "no_card")
+        log.info("claim_rejected", reason="no_card")
         return
 
     try:
@@ -91,19 +91,46 @@ async def _verify_one(
 
     entry = registry.lookup(card.id)
     parts = score_card(card, entry)
-    await queue.mark_verified(conn, stored.id, stored.miner_hotkey, bundle, parts)
+    await queue.mark_verified(conn, stored.id, stored.miner_hotkey, bundle, parts, card)
     log.info("claim_verified", weighted=parts.weighted())
 
 
-def _decode_card_from_bundle(bundle, work_unit: str, miner_hotkey: str) -> Card | None:  # type: ignore[no-untyped-def]
-    """Decode a Card from the first artifact whose `report_hash` is set.
+def _decode_card(claim, bundle, miner_hotkey: str) -> Card | None:  # type: ignore[no-untyped-def]
+    """Resolve the Card from a verified claim.
 
-    `work_unit` follows the `card:<id>` convention; we fill `id` from there if
-    the artifact JSON omits it. The artifact JSON is expected to match the
-    Card schema (minus `worker_owner_hotkey` and `polaris_agent_id`, which
-    are filled from the claim).
+    Prefers the inline `card_payload` on the claim — cards live on
+    Cathedral and miners submit them inline. Falls back to decoding
+    from `bundle.artifacts[*].report_hash` for backward compatibility
+    with earlier-spec miners that pushed the card through Polaris.
+
+    Returns None if neither path produces a valid Card.
     """
+    if claim.card_payload is not None:
+        return _coerce_card(claim.card_payload, claim.work_unit, miner_hotkey, bundle)
+    return _decode_card_from_bundle(bundle, claim.work_unit, miner_hotkey)
+
+
+def _coerce_card(  # type: ignore[no-untyped-def]
+    raw: dict, work_unit: str, miner_hotkey: str, bundle
+) -> Card | None:
+    """Fill in the three fields that come from claim context, then validate."""
+    if not isinstance(raw, dict):
+        return None
     card_id = work_unit.removeprefix("card:") if work_unit.startswith("card:") else work_unit
+    raw = dict(raw)
+    raw.setdefault("id", card_id)
+    raw.setdefault("worker_owner_hotkey", miner_hotkey)
+    raw.setdefault("polaris_agent_id", bundle.manifest.polaris_agent_id)
+    try:
+        return Card.model_validate(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _decode_card_from_bundle(bundle, work_unit: str, miner_hotkey: str) -> Card | None:  # type: ignore[no-untyped-def]
+    """Legacy path: decode a Card from the first artifact whose
+    `report_hash` parses. Kept for backward compatibility while in-flight
+    miners still submit cards via the Polaris artifact endpoint."""
     for art in bundle.artifacts:
         if not art.report_hash:
             continue
@@ -113,11 +140,7 @@ def _decode_card_from_bundle(bundle, work_unit: str, miner_hotkey: str) -> Card 
             raw = None
         if raw is None:
             continue
-        raw.setdefault("id", card_id)
-        raw.setdefault("worker_owner_hotkey", miner_hotkey)
-        raw.setdefault("polaris_agent_id", bundle.manifest.polaris_agent_id)
-        try:
-            return Card.model_validate(raw)
-        except (ValueError, TypeError):
-            continue
+        card = _coerce_card(raw, work_unit, miner_hotkey, bundle)
+        if card is not None:
+            return card
     return None

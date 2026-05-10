@@ -16,7 +16,7 @@ from cathedral.cards.registry import CardRegistry
 from cathedral.chain import BittensorChain, Chain
 from cathedral.evidence import EvidenceCollector, HttpPolarisFetcher
 from cathedral.types import PolarisAgentClaim
-from cathedral.validator import queue, weight_loop, worker
+from cathedral.validator import cards as cards_store, queue, weight_loop, worker
 from cathedral.validator.auth import make_bearer_dep
 from cathedral.validator.config_runtime import RuntimeContext
 from cathedral.validator.db import connect
@@ -91,6 +91,27 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
         except aiosqlite.IntegrityError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"id": claim_id, "status": "pending"}
+
+    @app.get("/v1/cards/{card_id}")
+    async def get_card(card_id: str) -> dict:
+        """Return the highest-scoring verified version of `card_id`.
+
+        Public read — cards are public information. Used by
+        cathedral.computer to display the canonical view of each card.
+        404 if no miner has produced a verified version yet.
+        """
+        row = await cards_store.best_card(app.state.db, card_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="card not found")
+        return row
+
+    @app.get("/v1/cards/{card_id}/history")
+    async def get_card_history(card_id: str) -> list[dict]:
+        """Return all verified versions of `card_id` across miners,
+        newest verification first. Used by cathedral.computer to show
+        which miners are maintaining a card and how their entries
+        compare."""
+        return await cards_store.card_history(app.state.db, card_id)
 
     return app
 

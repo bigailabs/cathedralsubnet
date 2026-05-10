@@ -63,16 +63,23 @@ class EvidenceCollector:
             except (MissingRecordError, FetchError, verify.VerificationError) as e:
                 logger.info("dropped_run", run_id=run_id, reason=str(e))
 
+        # Artifact fetching is the legacy path: cards live on Cathedral
+        # now and miners submit them inline via `claim.card_payload`.
+        # Only fall back to fetching artifacts from Polaris if the
+        # claim DOESN'T carry an inline payload — preserves backward
+        # compatibility with earlier-spec miners. New deployments will
+        # always set `card_payload` and skip the fetch entirely.
         artifacts: list[PolarisArtifactRecord] = []
-        for artifact_id in claim.polaris_artifact_ids:
-            try:
-                art_rec = await self.fetcher.fetch_artifact(artifact_id)
-                verify.verify_artifact_record(art_rec, self.pubkey)
-                raw = await self.fetcher.fetch_artifact_bytes(art_rec.content_url)
-                verify.verify_artifact_bytes(art_rec, raw)
-                artifacts.append(art_rec)
-            except (MissingRecordError, FetchError, verify.VerificationError) as e:
-                logger.info("dropped_artifact", artifact_id=artifact_id, reason=str(e))
+        if claim.card_payload is None:
+            for artifact_id in claim.polaris_artifact_ids:
+                try:
+                    art_rec = await self.fetcher.fetch_artifact(artifact_id)
+                    verify.verify_artifact_record(art_rec, self.pubkey)
+                    raw = await self.fetcher.fetch_artifact_bytes(art_rec.content_url)
+                    verify.verify_artifact_bytes(art_rec, raw)
+                    artifacts.append(art_rec)
+                except (MissingRecordError, FetchError, verify.VerificationError) as e:
+                    logger.info("dropped_artifact", artifact_id=artifact_id, reason=str(e))
 
         try:
             raw_usage = await self.fetcher.fetch_usage(claim.polaris_agent_id)
