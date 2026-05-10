@@ -1,6 +1,6 @@
 # Scoring
 
-Implements issue #78. The card scorer is in `cathedral-cards::score`.
+Implements issue #3. The card scorer is in `cathedral.cards.score`.
 
 ## Six dimensions
 
@@ -15,11 +15,11 @@ Each in `[0.0, 1.0]`:
 | `usefulness` | Action notes + risks + confidence | 0.10 |
 | `clarity` | Summary length and sentence count | 0.10 |
 
-Sum of weights = 1.0.
+Sum of weights = 1.0. Tunable via `cathedral.types.ScoreParts.weighted` (subclass to override).
 
 ## Official source classes
 
-`Government`, `Regulator`, `Court`, `Parliament`, `LawText`, `OfficialJournal`.
+`government`, `regulator`, `court`, `parliament`, `law_text`, `official_journal`.
 
 A card whose citations are 100% official scores `1.0` on the base; non-official citations dilute it linearly. Required-class coverage adds up to `+0.20` when the card matches the registry entry's required classes.
 
@@ -27,9 +27,9 @@ A card whose citations are 100% official scores `1.0` on the base; non-official 
 
 ```
 ratio = age_hours / cadence_hours
-ratio <= 1.0  →  1.0
-ratio >= 4.0  →  0.0
-otherwise     →  1.0 - (ratio - 1.0) / 3.0
+ratio <= 1.0  ->  1.0
+ratio >= 4.0  ->  0.0
+otherwise     ->  1.0 - (ratio - 1.0) / 3.0
 ```
 
 ## Maintenance bands
@@ -51,4 +51,8 @@ Cards fail before scoring if:
 - Empty `summary`, `what_changed`, or `why_it_matters`
 - Legal-advice framing (`you should`, `we recommend`, `as your lawyer`, etc.)
 
-A failed card receives weight `0.0`.
+A failed card receives no score; the claim is rejected with `preflight: <reason>`.
+
+## Baseline registry
+
+`CardRegistry.baseline()` seeds five cards: `eu-ai-act`, `us-ai-executive-order`, `uk-aisi`, `eu-gdpr-enforcement`, `us-ccpa`. Operators can override via TOML in a future config field; for now, edit `cathedral.cards.registry` directly.

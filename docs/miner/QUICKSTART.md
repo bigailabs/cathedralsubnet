@@ -6,15 +6,17 @@ You operate a Polaris-hosted Hermes worker that maintains one regulatory card. C
 
 - Bittensor coldkey + hotkey (registered on SN39 mainnet or SN292 testnet)
 - A Polaris account with a deployed agent producing a card
-- Your Polaris agent ID (looks like `agt_01H...`)
-- The validator URL and bearer token (from the operator running the validator)
+- Your Polaris agent ID (`agt_01H...`)
+- The validator URL and bearer token from the operator running the validator
 
 ## Install
 
 ```bash
 git clone https://github.com/bigailabs/cathedralsubnet
 cd cathedralsubnet
-cargo build --release -p cathedral-miner
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
 ## Configure
@@ -23,10 +25,10 @@ Copy `config/miner.toml` and fill in:
 
 - `miner_hotkey` — your hotkey ss58
 - `owner_wallet` — your coldkey ss58 (used by Cathedral to filter self-loop usage)
-- `validator_url` — the validator endpoint
-- `validator_bearer_env` — name of the env var that holds your bearer token
+- `validator_url` — the validator endpoint (e.g. `https://validator.cathedral.computer`)
+- `validator_bearer_env` — env var holding your bearer token
 
-Set the bearer in your shell:
+Set the bearer:
 
 ```bash
 export CATHEDRAL_VALIDATOR_BEARER=...
@@ -35,14 +37,14 @@ export CATHEDRAL_VALIDATOR_BEARER=...
 ## Submit a claim
 
 ```bash
-target/release/cathedral-miner submit \
+cathedral-miner submit \
   --work-unit "card:eu-ai-act" \
   --polaris-agent-id agt_01H1234567890ABCDEF \
   --polaris-run-ids run_01H...,run_01H... \
   --polaris-artifact-ids art_01H...,art_01H...
 ```
 
-The validator returns `202 Accepted` if the claim shape is valid. Verification is async — check your card on cathedral.computer or run `cathedral health` against the validator URL to see queue depth.
+The validator returns `202 Accepted` if the claim shape is valid. Verification is async — check your card on cathedral.computer or query the validator's `/health` to see queue depth.
 
 ## What gets rewarded
 
@@ -56,3 +58,5 @@ The validator scores your card on six dimensions:
 6. **Maintenance** — kept current over time
 
 Broken sources, uncited claims, and legal-advice framing fail preflight before scoring.
+
+Detailed rules: [../protocol/SCORING.md](../protocol/SCORING.md)

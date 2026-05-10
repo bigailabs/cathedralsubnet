@@ -1,5 +1,3 @@
-<p align="center"><img src="docs/logo.svg" alt="Cathedral" width="180" /></p>
-
 <h1 align="center">Cathedral Subnet</h1>
 
 <p align="center"><em>A subnet that verifies signed evidence about useful work.</em></p>
@@ -14,54 +12,83 @@
 
 Cathedral is a Bittensor subnet. Miners maintain regulatory and legal intelligence cards via Polaris-hosted Hermes workers. The validator pulls signed Polaris evidence by identifier, verifies it, scores card quality, and sets weights.
 
-This repository is the validator and miner reference implementation.
+This repository is the validator and miner reference implementation in Python.
 
 - **Mainnet:** SN39 (`finney`)
 - **Testnet:** SN292 (`test`)
 
 ## Status
 
-Pre-1.0. Validator and miner skeletons are in place. Active development tracked in [open issues](https://github.com/bigailabs/cathedralsubnet/issues).
+Pre-1.0. Validator and miner are functional in dry mode. Active work is tracked in [open issues](https://github.com/bigailabs/cathedralsubnet/issues).
 
 ## Layout
 
 ```
 cathedralsubnet/
-├── crates/
-│   ├── cathedral-types/       # Shared types: claims, manifests, evidence
-│   ├── cathedral-chain/       # Bittensor: register, metagraph, weights
-│   ├── cathedral-evidence/    # Polaris evidence: fetch, verify, filter
-│   ├── cathedral-cards/       # Card registry and scoring rules
-│   ├── cathedral-validator/   # Validator service: REST, loop, persistence
-│   ├── cathedral-miner/       # Miner service: claim submission, health
-│   └── cathedral-cli/         # Operator CLI: start, stop, status
-├── docs/
-│   ├── validator/             # Validator runbook, deploy, recovery
-│   ├── miner/                 # Miner setup, claim submission
-│   ├── protocol/              # Wire formats, signatures, scoring
-│   └── runbooks/              # Operational handoff
-├── config/                    # TOML defaults for testnet/mainnet
-├── scripts/                   # Deploy, register, weights
-└── tests/                     # Integration tests
+├── src/cathedral/
+│   ├── types.py               # Pydantic wire models (claim, manifest, card)
+│   ├── config.py              # ValidatorSettings, MinerSettings
+│   ├── chain/                 # Bittensor: metagraph, weights
+│   ├── evidence/              # Polaris: fetch, verify (Ed25519), filter
+│   ├── cards/                 # Registry, preflight, six-dimension scorer
+│   ├── validator/             # FastAPI, sqlite queue, worker, weight loop, watchdog
+│   ├── miner/                 # Claim submission client
+│   └── cli/                   # `cathedral`, `cathedral-validator`, `cathedral-miner`
+├── docs/                      # Runbooks, protocol specs, architecture
+├── config/                    # TOML defaults for testnet/mainnet/miner
+├── scripts/                   # Systemd unit, install, dev helpers
+└── tests/                     # pytest suite (23 tests, all passing)
 ```
 
-## Lay a stone
-
-Quick start: [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md)
+## Quick start (miner)
 
 ```bash
-cathedral-cli miner submit \
+git clone https://github.com/bigailabs/cathedralsubnet
+cd cathedralsubnet
+pip install -e .
+
+# Edit config/miner.toml with your hotkey/wallet/validator URL
+export CATHEDRAL_VALIDATOR_BEARER=<token>
+
+cathedral-miner submit \
+  --work-unit "card:eu-ai-act" \
   --polaris-agent-id agt_01H... \
-  --work-unit "card:eu-ai-act"
+  --polaris-run-ids run_01H... \
+  --polaris-artifact-ids art_01H...
 ```
+
+Full guide: [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md)
 
 ## Running a validator
 
-[docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md)
+```bash
+pip install -e .[dev]
+export CATHEDRAL_BEARER=<token>
+cathedral-validator migrate --config config/testnet.toml
+cathedral-validator serve   --config config/testnet.toml
+```
+
+In another terminal:
 
 ```bash
-cathedral-cli validator start --config config/mainnet.toml
+cathedral health        # full snapshot as JSON
+cathedral weights       # weight-set status word
+cathedral registration  # is the validator on the metagraph
 ```
+
+Full runbook: [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md)
+
+## Architecture
+
+Three asyncio loops sharing a sqlite database and a `Health` snapshot:
+
+1. **HTTP** — `POST /v1/claim` (bearer-protected), `GET /health` (public)
+2. **Verification worker** — drains pending claims, runs `EvidenceCollector`, scores, persists
+3. **Weight loop** — joins latest scores by hotkey to metagraph uids, normalizes, calls `subtensor.set_weights`
+
+A stall watchdog surfaces silent loops in `/health`.
+
+Detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/protocol/CLAIM.md](docs/protocol/CLAIM.md) · [docs/protocol/SCORING.md](docs/protocol/SCORING.md)
 
 ## License
 

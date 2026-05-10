@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# Build release binaries and lay them out under /opt/cathedral.
-# Idempotent. Safe to re-run after `git pull`.
+# Install Cathedral validator under /opt/cathedral with a venv.
+# Idempotent — safe to re-run after `git pull`.
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/cathedral}"
+PYTHON="${PYTHON:-python3.11}"
 
-cargo build --release -p cathedral-validator
-cargo build --release -p cathedral-miner
-cargo build --release -p cathedral-cli
+sudo install -d "${PREFIX}"
+sudo cp -r . "${PREFIX}/source"
+sudo "${PYTHON}" -m venv "${PREFIX}/.venv"
+sudo "${PREFIX}/.venv/bin/pip" install --upgrade pip
+sudo "${PREFIX}/.venv/bin/pip" install -e "${PREFIX}/source"
 
-sudo install -d "${PREFIX}/bin"
-sudo install -m 0755 target/release/cathedral-validator "${PREFIX}/bin/"
-sudo install -m 0755 target/release/cathedral-miner    "${PREFIX}/bin/"
-sudo install -m 0755 target/release/cathedral          "${PREFIX}/bin/"
-
-echo "Installed to ${PREFIX}/bin"
+echo "Installed to ${PREFIX}"
 echo "Configure: /etc/cathedral/<network>.toml"
 echo "Service:   scripts/cathedral-validator.service"
+echo "Migrate:   ${PREFIX}/.venv/bin/cathedral-validator migrate --config /etc/cathedral/<network>.toml"

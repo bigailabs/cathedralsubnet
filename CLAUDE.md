@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repo is the Cathedral Bittensor subnet validator + miner — a fresh implementation scoped to evidence verification.
+This repo is the Cathedral Bittensor subnet validator + miner — a fresh implementation in Python scoped to evidence verification.
 
 ## What Cathedral verifies
 
@@ -20,30 +20,35 @@ If a request implies any of the above, push back. They are explicitly parked.
 
 ## Active stories (mirrors github.com/bigailabs/cathedral issues)
 
-- **#77** Verify Polaris worker evidence by identifier — `cathedral-evidence`
-- **#78** Regulatory cards useful and verifiable — `cathedral-cards`
-- **#79** Validator ops safe and observable — `cathedral-validator` + `docs/validator/RUNBOOK.md`
+- **#2** Verify Polaris worker evidence by identifier — `cathedral.evidence`, `cathedral.validator.worker`
+- **#3** Regulatory cards useful and verifiable — `cathedral.cards`
+- **#1** Validator ops safe and observable — `cathedral.validator.{auth,health,stall}` + `docs/validator/RUNBOOK.md`
 
 ## Conventions
 
-- Rust 2021, edition pinned in workspace `Cargo.toml`
-- All crates `#![forbid(unsafe_code)]` unless justified inline
-- Errors: `thiserror` for libraries, `anyhow` only at binary edges
-- Logging: `tracing` everywhere, JSON in production
-- Configuration: `figment` (TOML + env), one config struct per crate
-- DB: `sqlx` with sqlite (dev) and postgres (production)
-- Public types live in `cathedral-types`; do not duplicate
+- Python 3.11+
+- Pydantic v2 for all wire types
+- Errors: domain-specific exception classes from each module's `__init__`
+- Logging: `structlog` JSON in production, console renderer in dev
+- Configuration: pydantic-settings (TOML + `CATHEDRAL_` env, nested `__`)
+- DB: aiosqlite with WAL; single writer (the worker), readers tolerated
+- Public types live in `cathedral.types`; do not duplicate
 
 ## Testing
 
-- Unit tests inline (`#[cfg(test)]` modules)
-- Integration tests in `tests/` at workspace root
-- Mock Polaris via fixture JSON in `tests/fixtures/polaris/`
-- No live network in unit tests
+- pytest with `pytest-asyncio` (auto mode)
+- StubFetcher in `tests/conftest.py` simulates Polaris with a real Ed25519 keypair
+- Integration tests use FastAPI's `TestClient`
+
+## Lint, format, type
+
+- `ruff check src tests` — must pass
+- `ruff format src tests` — must be clean
+- `mypy --strict` (config in pyproject.toml) — must pass
 
 ## Commits and PRs
 
 - Branch from `main` with `feature/`, `fix/`, `docs/` prefixes
 - Never push to main directly
-- Reference issue numbers when applicable (cross-repo: `bigailabs/cathedral#77`)
+- Reference issue numbers when applicable (cross-repo: `bigailabs/cathedral#2`)
 - Never add AI attribution to commits or PRs
