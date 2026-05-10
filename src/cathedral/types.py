@@ -80,12 +80,21 @@ class PolarisAgentClaim(BaseModel):
 
 
 class PolarisManifest(BaseModel):
+    """Per CONTRACTS.md L3, runtime_image and runtime_mode allow Cathedral to
+    verify that a miner's claimed agent is actually running the canonical
+    Hermes image in card-mode. Both default None for backward compatibility
+    with manifests signed before these fields existed; canonicalization on
+    both sides uses exclude_none=True so the absent fields don't affect the
+    signature payload."""
+
     model_config = ConfigDict(extra="allow")
 
     polaris_agent_id: str
     owner_wallet: str
     created_at: datetime
     schema_: str = Field(alias="schema")
+    runtime_image: str | None = None
+    runtime_mode: str | None = None
     signature: str
 
 
@@ -153,6 +162,9 @@ class EvidenceBundle(BaseModel):
 
 
 class Jurisdiction(str, Enum):
+    """Per CONTRACTS.md L2: SG (Singapore) and JP (Japan) added for the
+    launch content (singapore-pdpc + japan-meti-mic cards)."""
+
     EU = "eu"
     US = "us"
     UK = "uk"
@@ -160,6 +172,8 @@ class Jurisdiction(str, Enum):
     AU = "au"
     IN = "in"
     BR = "br"
+    SG = "sg"
+    JP = "jp"
     OTHER = "other"
 
 
@@ -248,6 +262,13 @@ def canonical_json_for_signing(record: dict[str, Any]) -> bytes:
     Drops the `signature` key and serializes with sorted keys + no whitespace.
     Both Polaris (signer) and Cathedral (verifier) must agree on this exact
     canonicalization or all verification fails.
+
+    Mirrors `polaris.services.cathedral_signing.canonical_json_for_signing`
+    exactly: no exclude_none on raw dicts. The exclude_none behavior happens
+    one layer up, in the Pydantic-model path (verify_manifest etc. call
+    model_dump(by_alias=True, mode="json", exclude_none=True)). That asymmetry
+    matches Polaris: Pydantic models drop None fields before signing/verifying;
+    raw dicts pass through verbatim.
     """
     import json
 

@@ -30,8 +30,15 @@ def keypair() -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
 
 
 def _sign_model(sk: Ed25519PrivateKey, model_obj: Any) -> str:
-    """Sign exactly the bytes the verifier will reconstruct from the model."""
-    dumped = model_obj.model_dump(by_alias=True, mode="json")
+    """Sign exactly the bytes the verifier will reconstruct from the model.
+
+    Per CONTRACTS.md L3: must use exclude_none=True to match the verifier
+    in cathedral.evidence.verify (which uses exclude_none) and the Polaris
+    signer (polaris.services.cathedral_signing._to_canonical_dict, also
+    exclude_none). This makes the manifest contract additive — new optional
+    fields default to None and don't break old signatures.
+    """
+    dumped = model_obj.model_dump(by_alias=True, mode="json", exclude_none=True)
     payload = canonical_json_for_signing(dumped)
     return base64.b64encode(sk.sign(payload)).decode()
 
