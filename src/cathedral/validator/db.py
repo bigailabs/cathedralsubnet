@@ -71,6 +71,105 @@ CREATE TABLE IF NOT EXISTS cards (
 );
 CREATE INDEX IF NOT EXISTS idx_cards_card_id ON cards(card_id);
 CREATE INDEX IF NOT EXISTS idx_cards_verified_at ON cards(verified_at DESC);
+
+-- ----------------------------------------------------------------------
+-- V1 launch tables (CONTRACTS.md Section 3)
+-- ----------------------------------------------------------------------
+
+-- Curated card metadata. Populated by ops from the cathedral-eval-spec
+-- content repo. Read by every public read endpoint and by the eval
+-- task generator.
+CREATE TABLE IF NOT EXISTS card_definitions (
+    id              TEXT PRIMARY KEY,
+    display_name    TEXT NOT NULL,
+    jurisdiction    TEXT NOT NULL,
+    topic           TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    eval_spec_md    TEXT NOT NULL,
+    source_pool     TEXT NOT NULL,
+    task_templates  TEXT NOT NULL,
+    scoring_rubric  TEXT NOT NULL,
+    refresh_cadence_hours INTEGER NOT NULL DEFAULT 24,
+    status          TEXT NOT NULL CHECK (status IN ('active','archived')),
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+-- Miner-uploaded agent submissions. Bundles live encrypted in Hippius.
+CREATE TABLE IF NOT EXISTS agent_submissions (
+    id                       TEXT PRIMARY KEY,
+    miner_hotkey             TEXT NOT NULL,
+    card_id                  TEXT NOT NULL REFERENCES card_definitions(id),
+    bundle_blob_key          TEXT NOT NULL,
+    bundle_hash              TEXT NOT NULL,
+    bundle_size_bytes        INTEGER NOT NULL,
+    encryption_key_id        TEXT NOT NULL,
+    bundle_signature         TEXT NOT NULL,
+    display_name             TEXT NOT NULL,
+    bio                      TEXT,
+    logo_url                 TEXT,
+    soul_md_preview          TEXT,
+    metadata_fingerprint     TEXT NOT NULL,
+    similarity_check_passed  INTEGER NOT NULL,
+    rejection_reason         TEXT,
+    submitted_at             TEXT NOT NULL,
+    status                   TEXT NOT NULL CHECK (status IN
+                               ('pending_check','queued','evaluating',
+                                'ranked','rejected','withdrawn')),
+    current_score            REAL,
+    current_rank             INTEGER,
+    first_mover_at           TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique
+    ON agent_submissions(miner_hotkey, card_id, bundle_hash);
+CREATE INDEX IF NOT EXISTS idx_agent_card_status
+    ON agent_submissions(card_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_card_score
+    ON agent_submissions(card_id, current_score DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_first_mover
+    ON agent_submissions(card_id, first_mover_at);
+
+-- Each individual eval execution.
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id                  TEXT PRIMARY KEY,
+    submission_id       TEXT NOT NULL REFERENCES agent_submissions(id) ON DELETE CASCADE,
+    epoch               INTEGER NOT NULL,
+    round_index         INTEGER NOT NULL,
+    polaris_agent_id    TEXT NOT NULL,
+    polaris_run_id      TEXT NOT NULL,
+    task_json           TEXT NOT NULL,
+    output_card_json    TEXT NOT NULL,
+    output_card_hash    TEXT NOT NULL,
+    score_parts         TEXT NOT NULL,
+    weighted_score      REAL NOT NULL,
+    ran_at              TEXT NOT NULL,
+    duration_ms         INTEGER NOT NULL,
+    errors              TEXT,
+    cathedral_signature TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_submission_time
+    ON eval_runs(submission_id, ran_at DESC);
+CREATE INDEX IF NOT EXISTS idx_eval_epoch ON eval_runs(epoch);
+CREATE INDEX IF NOT EXISTS idx_eval_card_score
+    ON eval_runs(submission_id, weighted_score DESC);
+CREATE INDEX IF NOT EXISTS idx_eval_ran_at ON eval_runs(ran_at DESC);
+
+-- Weekly Merkle anchors of eval results.
+CREATE TABLE IF NOT EXISTS merkle_anchors (
+    epoch                    INTEGER PRIMARY KEY,
+    merkle_root              TEXT NOT NULL,
+    eval_count               INTEGER NOT NULL,
+    leaf_hashes_json         TEXT NOT NULL,
+    computed_at              TEXT NOT NULL,
+    on_chain_block           INTEGER,
+    on_chain_extrinsic_index INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS eval_run_to_epoch (
+    eval_run_id TEXT PRIMARY KEY REFERENCES eval_runs(id) ON DELETE CASCADE,
+    epoch       INTEGER NOT NULL REFERENCES merkle_anchors(epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_eval_run_epoch ON eval_run_to_epoch(epoch);
 """
 
 
