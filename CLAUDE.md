@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repo is the Cathedral Bittensor subnet validator + miner. It is **not** a fork of Basilica. It is a fresh implementation scoped to evidence verification.
+This repo is the Cathedral Bittensor subnet validator + miner — a fresh implementation scoped to evidence verification.
 
 ## What Cathedral verifies
 

@@ -63,10 +63,6 @@ cathedral-cli miner submit \
 cathedral-cli validator start --config config/mainnet.toml
 ```
 
-## Lineage
-
-Cathedral was first prototyped against a fork of [Basilica](https://github.com/one-covenant/basilica) (MIT). The current implementation in this repository is a fresh build, scoped to evidence verification rather than compute attestation. None of the prototype code is carried forward here.
-
 ## License
 
 MIT — see [LICENSE](LICENSE). © 2026 bigailabs.
