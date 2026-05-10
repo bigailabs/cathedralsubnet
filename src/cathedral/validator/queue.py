@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
-from cathedral.types import EvidenceBundle, PolarisAgentClaim, ScoreParts
+from cathedral.types import Card, EvidenceBundle, PolarisAgentClaim, ScoreParts
 
 
 @dataclass
@@ -91,6 +91,7 @@ async def mark_verified(
     miner_hotkey: str,
     bundle: EvidenceBundle,
     score: ScoreParts,
+    card: Card,
 ) -> None:
     now = datetime.now(UTC).isoformat()
     await conn.execute(
@@ -134,6 +135,34 @@ async def mark_verified(
             score.clarity,
             score.maintenance,
             score.weighted(),
+            now,
+        ),
+    )
+    await conn.execute(
+        """
+        INSERT INTO cards (
+            card_id, miner_hotkey, polaris_agent_id, owner_wallet,
+            claim_id, card_json, weighted_score, last_refreshed_at, verified_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(card_id, miner_hotkey) DO UPDATE SET
+            polaris_agent_id=excluded.polaris_agent_id,
+            owner_wallet=excluded.owner_wallet,
+            claim_id=excluded.claim_id,
+            card_json=excluded.card_json,
+            weighted_score=excluded.weighted_score,
+            last_refreshed_at=excluded.last_refreshed_at,
+            verified_at=excluded.verified_at
+        """,
+        (
+            card.id,
+            miner_hotkey,
+            card.polaris_agent_id,
+            bundle.manifest.owner_wallet,
+            claim_id,
+            card.model_dump_json(),
+            score.weighted(),
+            card.last_refreshed_at.isoformat(),
             now,
         ),
     )

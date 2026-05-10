@@ -36,8 +36,15 @@ class PolarisAgentClaim(BaseModel):
     """`cathedral.polaris_agent_claim.v1`.
 
     Submitted by miners to `POST /v1/claim`. The validator queues the claim,
-    fetches Polaris evidence by identifier, verifies signatures, and scores
-    the resulting card.
+    fetches Polaris evidence by identifier (manifest, runs, usage), verifies
+    signatures, and scores the card carried in `card_payload`.
+
+    Cards live on Cathedral, not Polaris. Miners submit the card body inline
+    so Cathedral never has to hop back to Polaris for artifact bytes — and
+    so cards remain available even if Polaris is unreachable. The
+    `polaris_artifact_ids` field stays for backward compatibility with
+    earlier-spec miners; if `card_payload` is null, the worker falls back
+    to decoding from the first artifact whose `report_hash` parses.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -51,6 +58,12 @@ class PolarisAgentClaim(BaseModel):
     polaris_deployment_id: str | None = None
     polaris_run_ids: list[str] = Field(default_factory=list)
     polaris_artifact_ids: list[str] = Field(default_factory=list)
+    # Card payload — Cathedral-side storage of the work product. Miners
+    # produce this from Hermes (or any compatible runtime) and submit it
+    # inline. The id, worker_owner_hotkey, and polaris_agent_id fields
+    # may be omitted from the payload — the worker fills them from the
+    # surrounding claim context before validating against Card.
+    card_payload: dict | None = None
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_validator("miner_hotkey", "owner_wallet", "work_unit", "polaris_agent_id")

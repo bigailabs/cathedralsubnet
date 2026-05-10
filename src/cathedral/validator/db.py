@@ -52,6 +52,25 @@ CREATE TABLE IF NOT EXISTS health_kv (
     value_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Cards live on Cathedral (not Polaris). One row per (card_id, miner_hotkey)
+-- — the miner's latest verified version of that card. The validator writes
+-- here on every verified claim; cathedral.computer reads from here to
+-- display "what miner X currently says about card Y."
+CREATE TABLE IF NOT EXISTS cards (
+    card_id TEXT NOT NULL,
+    miner_hotkey TEXT NOT NULL,
+    polaris_agent_id TEXT NOT NULL,
+    owner_wallet TEXT NOT NULL,
+    claim_id INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    card_json TEXT NOT NULL,
+    weighted_score REAL NOT NULL,
+    last_refreshed_at TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    PRIMARY KEY (card_id, miner_hotkey)
+);
+CREATE INDEX IF NOT EXISTS idx_cards_card_id ON cards(card_id);
+CREATE INDEX IF NOT EXISTS idx_cards_verified_at ON cards(verified_at DESC);
 """
 
 
