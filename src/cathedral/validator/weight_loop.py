@@ -11,6 +11,7 @@ from cathedral.chain import Chain, normalize
 from cathedral.chain.client import WeightStatus
 from cathedral.validator import queue
 from cathedral.validator.health import Health
+from cathedral.validator.pull_loop import latest_pulled_score_per_hotkey
 
 logger = structlog.get_logger(__name__)
 
@@ -53,6 +54,13 @@ async def run_weight_loop(
             await health.heartbeat("last_metagraph_at")
 
             scores = await queue.latest_score_per_hotkey(conn)
+            # V1: blend pulled scores from publisher (canonical going forward).
+            # Pulled scores override legacy claim-derived scores per hotkey.
+            try:
+                pulled = await latest_pulled_score_per_hotkey(conn, since_days=30)
+                scores.update(pulled)
+            except Exception as ex:
+                logger.debug("pulled_scores_unavailable", error=str(ex))
             uid_by_hotkey = metagraph.hotkey_to_uid()
             raw = [(uid_by_hotkey[hk], s) for hk, s in scores.items() if hk in uid_by_hotkey]
             normalized = normalize(raw)

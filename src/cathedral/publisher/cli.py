@@ -1,0 +1,163 @@
+"""`cathedral-publisher` CLI."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+
+import structlog
+import typer
+import uvicorn
+
+from cathedral.logging import configure
+from cathedral.validator.db import connect
+
+logger = structlog.get_logger(__name__)
+
+
+app = typer.Typer(no_args_is_help=True, help="Cathedral publisher (api.cathedral.computer)")
+
+
+@app.command()
+def serve(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    host: str = typer.Option("0.0.0.0", "--host"),
+    port: int = typer.Option(9444, "--port"),
+    json_logs: bool = typer.Option(True, "--json-logs/--no-json-logs"),
+    log_level: str = typer.Option("info"),
+) -> None:
+    """Run the publisher HTTP server with the eval orchestrator background loop."""
+    configure(level=log_level.upper(), json_logs=json_logs)
+    from cathedral.publisher import from_settings
+
+    application = from_settings(database_path)
+    uvicorn.run(application, host=host, port=port, log_level=log_level)
+
+
+@app.command()
+def migrate(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+) -> None:
+    """Initialize the sqlite schema. Idempotent — safe to run on every deploy."""
+    configure()
+
+    async def _run() -> None:
+        conn = await connect(database_path)
+        await conn.close()
+
+    asyncio.run(_run())
+    typer.echo(f"schema ready at {database_path}")
+
+
+@app.command("merkle-close")
+def merkle_close(
+    epoch: int = typer.Option(..., "--epoch", "-e", help="ISO calendar epoch (year * 100 + week)"),
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    on_chain: bool = typer.Option(
+        False, "--on-chain", help="Submit anchor to chain"
+    ),
+    network: str = typer.Option("finney", "--network"),
+    wallet_name: str = typer.Option("default", "--wallet-name"),
+    wallet_hotkey: str = typer.Option("default", "--wallet-hotkey"),
+) -> None:
+    """Compute Merkle root for an epoch, persist anchor, optionally submit on-chain."""
+    configure()
+    from cathedral.publisher import merkle as merkle_mod
+
+    async def _run() -> None:
+        conn = await connect(database_path)
+        try:
+            anchorer = None
+            if on_chain:
+                from cathedral.chain.anchor import BittensorAnchorer
+
+                anchorer = BittensorAnchorer(
+                    network=network,
+                    wallet_name=wallet_name,
+                    wallet_hotkey=wallet_hotkey,
+                )
+            result = await merkle_mod.close_epoch(conn, epoch, anchorer=anchorer)
+            typer.echo(
+                f"epoch={epoch} root={result['merkle_root']} "
+                f"eval_count={result['eval_count']} "
+                f"on_chain_block={result['on_chain_block']}"
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+@app.command("seed-cards")
+def seed_cards(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+) -> None:
+    """Seed `card_definitions` with the v1 launch card IDs.
+
+    The full per-card content (eval_spec_md, source_pool, task_templates)
+    is owned by the cathedral-eval-spec content repo. This CLI command
+    seeds placeholder rows so a fresh database can accept submissions
+    immediately while the content team finalises the per-card YAML.
+    """
+    configure()
+
+    from cathedral.publisher import repository
+
+    launch_cards = [
+        ("eu-ai-act", "EU AI Act", "eu", "EU AI Act enforcement and guidance"),
+        ("us-ai-eo", "US AI Executive Order", "us", "Federal AI executive orders + guidance"),
+        ("uk-ai-whitepaper", "UK AI Whitepaper", "uk", "UK pro-innovation AI regulation framework"),
+        ("singapore-pdpc", "Singapore PDPC", "sg", "Singapore PDPC rulings + guidance"),
+        ("japan-meti-mic", "Japan METI/MIC", "jp", "Japan METI + MIC AI/data guidance"),
+    ]
+
+    async def _run() -> None:
+        conn = await connect(database_path)
+        try:
+            for card_id, name, juris, topic in launch_cards:
+                await repository.insert_card_definition(
+                    conn,
+                    id=card_id,
+                    display_name=name,
+                    jurisdiction=juris,
+                    topic=topic,
+                    description=(
+                        f"## {name}\n\n"
+                        "Placeholder definition. Owned by cathedral-eval-spec."
+                    ),
+                    eval_spec_md="Placeholder eval spec — owned by cathedral-eval-spec.",
+                    source_pool=[],
+                    task_templates=[
+                        f"Summarize material {name} developments in the last 24 hours.",
+                        f"What changed in {name} this week?",
+                    ],
+                    scoring_rubric={
+                        "source_quality_weight": 0.30,
+                        "maintenance_weight": 0.20,
+                        "freshness_weight": 0.15,
+                        "specificity_weight": 0.15,
+                        "usefulness_weight": 0.10,
+                        "clarity_weight": 0.10,
+                        "required_source_classes": ["official_journal", "regulator"],
+                        "min_summary_chars": 40,
+                        "max_summary_chars": 800,
+                        "min_citations": 1,
+                    },
+                    refresh_cadence_hours=24,
+                    status="active",
+                )
+                typer.echo(f"seeded {card_id}")
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+@app.callback()
+def _callback() -> None:
+    """Common config (no-op; lets typer build subcommand help cleanly)."""
+    _ = os.environ.get("CATHEDRAL_ENV", "")  # touch env so help docs hint at it
+
+
+if __name__ == "__main__":
+    app()
