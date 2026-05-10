@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cathedral-types",
+    "crates/cathedral-chain",
+    "crates/cathedral-evidence",
+    "crates/cathedral-cards",
+    "crates/cathedral-validator",
+    "crates/cathedral-miner",
+    "crates/cathedral-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["bigailabs"]
+repository = "https://github.com/bigailabs/cathedralsubnet"
+rust-version = "1.78"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+thiserror = "1"
+anyhow = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+ed25519-dalek = "2"
+blake3 = "1.5"
+hex = "0.4"
+base64 = "0.22"
+
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "json", "migrate"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+
+clap = { version = "4", features = ["derive", "env"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+
+cathedral-types = { path = "crates/cathedral-types" }
+cathedral-chain = { path = "crates/cathedral-chain" }
+cathedral-evidence = { path = "crates/cathedral-evidence" }
+cathedral-cards = { path = "crates/cathedral-cards" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

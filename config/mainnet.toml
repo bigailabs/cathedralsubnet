@@ -1,0 +1,20 @@
+[network]
+name = "finney"
+netuid = 39
+validator_hotkey = "REPLACE_ME"
+
+[polaris]
+base_url = "https://api.polaris.computer/"
+public_key_hex = "REPLACE_WITH_POLARIS_ED25519_PUBLIC_KEY_HEX"
+fetch_timeout_secs = 30
+
+[http]
+listen = "0.0.0.0:9333"
+bearer_token_env = "CATHEDRAL_BEARER"
+
+[weights]
+interval_secs = 1200
+disabled = false
+
+[storage]
+database_url = "sqlite://data/validator-mainnet.db"

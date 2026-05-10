@@ -1,0 +1,24 @@
+[Unit]
+Description=Cathedral Subnet Validator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cathedral
+Group=cathedral
+WorkingDirectory=/opt/cathedral
+EnvironmentFile=/etc/cathedral/validator.env
+ExecStart=/opt/cathedral/bin/cathedral-validator --config /etc/cathedral/mainnet.toml
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cathedral-validator
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cathedral
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,54 @@
+# Scoring
+
+Implements issue #78. The card scorer is in `cathedral-cards::score`.
+
+## Six dimensions
+
+Each in `[0.0, 1.0]`:
+
+| Dimension | What it measures | Default weight |
+|---|---|---|
+| `source_quality` | Share of citations from official classes; required-class coverage bonus | 0.30 |
+| `maintenance` | Time since last refresh vs cadence | 0.20 |
+| `freshness` | Continuous decay from cadence to 4× cadence | 0.15 |
+| `specificity` | Length of `what_changed` + `why_it_matters` | 0.15 |
+| `usefulness` | Action notes + risks + confidence | 0.10 |
+| `clarity` | Summary length and sentence count | 0.10 |
+
+Sum of weights = 1.0.
+
+## Official source classes
+
+`Government`, `Regulator`, `Court`, `Parliament`, `LawText`, `OfficialJournal`.
+
+A card whose citations are 100% official scores `1.0` on the base; non-official citations dilute it linearly. Required-class coverage adds up to `+0.20` when the card matches the registry entry's required classes.
+
+## Freshness curve
+
+```
+ratio = age_hours / cadence_hours
+ratio <= 1.0  →  1.0
+ratio >= 4.0  →  0.0
+otherwise     →  1.0 - (ratio - 1.0) / 3.0
+```
+
+## Maintenance bands
+
+| Age | Score |
+|---|---|
+| `<= cadence` | 1.0 |
+| `<= 2× cadence` | 0.6 |
+| `<= 4× cadence` | 0.2 |
+| `> 4× cadence` | 0.0 |
+
+## Preflight (failure modes)
+
+Cards fail before scoring if:
+
+- No citations
+- Any citation HTTP status outside `200..400`
+- Missing `no_legal_advice` marker
+- Empty `summary`, `what_changed`, or `why_it_matters`
+- Legal-advice framing (`you should`, `we recommend`, `as your lawyer`, etc.)
+
+A failed card receives weight `0.0`.

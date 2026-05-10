@@ -1,0 +1,15 @@
+target/
+Cargo.lock.bak
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+*.log
+.DS_Store
+.idea/
+.vscode/
+data/
+secrets/
+*.key
+*.pem

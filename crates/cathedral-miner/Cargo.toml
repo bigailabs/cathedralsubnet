@@ -1,0 +1,28 @@
+[package]
+name = "cathedral-miner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cathedral-miner"
+path = "src/main.rs"
+
+[dependencies]
+cathedral-types = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+clap = { workspace = true }
+figment = { workspace = true }
