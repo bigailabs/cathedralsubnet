@@ -22,6 +22,9 @@ class MockChain:
     async def current_block(self) -> int:
         return self._block
 
+    async def is_registered(self) -> bool:
+        return True
+
     def set_metagraph(self, metagraph: Metagraph) -> None:
         self._metagraph = metagraph
         self._block = metagraph.block

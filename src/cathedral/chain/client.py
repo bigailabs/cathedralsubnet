@@ -1,6 +1,6 @@
 """Bittensor chain integration.
 
-Wraps the official `bittensor` SDK. Blocking SDK calls run inside
+Wraps the official `bittensor` SDK (v10.x). Blocking SDK calls run inside
 `asyncio.to_thread` so the validator's async loop is not stalled.
 
 The `Chain` Protocol lets tests substitute `MockChain` without touching
@@ -42,6 +42,7 @@ class Chain(Protocol):
     async def metagraph(self) -> Metagraph: ...
     async def set_weights(self, weights: list[tuple[int, float]]) -> WeightStatus: ...
     async def current_block(self) -> int: ...
+    async def is_registered(self) -> bool: ...
 
 
 def network_endpoint(name: str) -> str:
@@ -54,12 +55,19 @@ def network_endpoint(name: str) -> str:
     raise ValueError(f"unknown network {name!r}")
 
 
-class BittensorChain:
-    """Production chain client backed by the bittensor SDK.
+# Substring fragments of bittensor error messages that indicate the validator
+# is below the permit-stake threshold. The SDK does not expose a structured
+# error code for this, so we match on text.
+_STAKE_BLOCK_FRAGMENTS = (
+    "stake",
+    "permit",
+    "min_allowed_weights",
+    "validator permit",
+)
 
-    Imports are lazy so tests that don't need bittensor (the heavy install)
-    can run on environments where the package isn't available.
-    """
+
+class BittensorChain:
+    """Production chain client backed by the bittensor SDK."""
 
     def __init__(
         self,
@@ -78,30 +86,52 @@ class BittensorChain:
         self._wallet: Any = None
 
     def _ensure_clients(self) -> None:
-        if self._subtensor is None:
-            import bittensor as bt  # local import; heavy
+        if self._subtensor is not None:
+            return
+        import bittensor as bt  # local import; heavy
 
-            kwargs: dict[str, Any] = {"name": self.wallet_name, "hotkey": self.wallet_hotkey}
-            if self.wallet_path:
-                kwargs["path"] = self.wallet_path
-            self._wallet = bt.wallet(**kwargs)
-            self._subtensor = bt.subtensor(network=self.network)
+        wallet_kwargs: dict[str, Any] = {
+            "name": self.wallet_name,
+            "hotkey": self.wallet_hotkey,
+        }
+        if self.wallet_path:
+            wallet_kwargs["path"] = self.wallet_path
+        self._wallet = bt.Wallet(**wallet_kwargs)
+        self._subtensor = bt.Subtensor(network=self.network)
 
     async def metagraph(self) -> Metagraph:
         def _read() -> Metagraph:
             self._ensure_clients()
-            mg = self._subtensor.metagraph(netuid=self.netuid)
+            mg = self._subtensor.metagraph(netuid=self.netuid, lite=True)
+            uids = mg.uids.tolist()
+            hotkeys = list(mg.hotkeys)
+            last_update = mg.last_update.tolist() if hasattr(mg, "last_update") else [0] * len(uids)
             miners = tuple(
                 MinerNode(
                     uid=int(uid),
                     hotkey=str(hk),
-                    last_update_block=int(mg.last_update[i]) if hasattr(mg, "last_update") else 0,
+                    last_update_block=int(lu) if i < len(last_update) else 0,
                 )
-                for i, (uid, hk) in enumerate(zip(mg.uids.tolist(), mg.hotkeys, strict=False))
+                for i, (uid, hk, lu) in enumerate(
+                    zip(uids, hotkeys, last_update + [0] * len(uids), strict=False)
+                )
             )
-            return Metagraph(block=int(mg.block.item()), miners=miners)
+            block = int(mg.block.item()) if hasattr(mg.block, "item") else int(mg.block[0])
+            return Metagraph(block=block, miners=miners)
 
         return await asyncio.to_thread(_read)
+
+    async def is_registered(self) -> bool:
+        def _check() -> bool:
+            self._ensure_clients()
+            return bool(
+                self._subtensor.is_hotkey_registered_on_subnet(
+                    hotkey_ss58=self._wallet.hotkey.ss58_address,
+                    netuid=self.netuid,
+                )
+            )
+
+        return await asyncio.to_thread(_check)
 
     async def set_weights(self, weights: list[tuple[int, float]]) -> WeightStatus:
         if not weights:
@@ -112,19 +142,21 @@ class BittensorChain:
             uids = [u for u, _ in weights]
             values = [v for _, v in weights]
             try:
-                ok, _msg = self._subtensor.set_weights(
+                resp = self._subtensor.set_weights(
                     wallet=self._wallet,
                     netuid=self.netuid,
                     uids=uids,
                     weights=values,
-                    wait_for_inclusion=False,
+                    wait_for_inclusion=True,
+                    wait_for_finalization=False,
+                    raise_error=False,
                 )
-                return WeightStatus.HEALTHY if ok else WeightStatus.BLOCKED_BY_TRANSACTION_ERROR
             except Exception as e:
-                msg = str(e).lower()
-                if "stake" in msg or "permit" in msg:
-                    return WeightStatus.BLOCKED_BY_STAKE
-                return WeightStatus.BLOCKED_BY_TRANSACTION_ERROR
+                return _classify_error(str(e))
+
+            if getattr(resp, "success", False):
+                return WeightStatus.HEALTHY
+            return _classify_error(str(getattr(resp, "message", "")))
 
         return await asyncio.to_thread(_send)
 
@@ -134,3 +166,11 @@ class BittensorChain:
             return int(self._subtensor.get_current_block())
 
         return await asyncio.to_thread(_read)
+
+
+def _classify_error(message: str) -> WeightStatus:
+    lc = message.lower()
+    for frag in _STAKE_BLOCK_FRAGMENTS:
+        if frag in lc:
+            return WeightStatus.BLOCKED_BY_STAKE
+    return WeightStatus.BLOCKED_BY_TRANSACTION_ERROR

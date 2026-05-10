@@ -41,6 +41,34 @@ cathedral-validator migrate --config config/testnet.toml
 
 Idempotent. Safe to re-run.
 
+## Smoke-test the chain connection
+
+Before starting the validator for the first time, confirm wallet + Subtensor
+both work:
+
+```bash
+cathedral chain-check --config config/testnet.toml
+```
+
+Expected output:
+
+```json
+{
+  "network": "test",
+  "netuid": 292,
+  "wallet_hotkey": "<your-hotkey-name>",
+  "current_block": 5123456,
+  "registered": true,
+  "metagraph_block": 5123456,
+  "metagraph_size": 64
+}
+```
+
+If `registered` is `false`, register the hotkey on the subnet first
+(`btcli s register --netuid <n> --network <net>`). The validator will run
+without weights set until registration is detected, and the runbook surfaces
+this via `health.registered`.
+
 ## Start, stop, restart
 
 Foreground (testing):
