@@ -13,6 +13,11 @@ from cathedral.miner import submit_claim
 app = typer.Typer(no_args_is_help=True, help="Cathedral subnet miner")
 
 
+@app.callback()
+def _root() -> None:
+    """Cathedral miner — submit Polaris agent claims to a validator."""
+
+
 @app.command()
 def submit(
     work_unit: str = typer.Option(..., help="e.g. 'card:eu-ai-act'"),
