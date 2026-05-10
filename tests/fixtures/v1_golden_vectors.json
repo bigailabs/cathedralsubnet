@@ -1,0 +1,96 @@
+{
+  "eval_run": {
+    "expected_cathedral_signature_b64": "4oWGtITTNUosOiX88r/tSlbpB5uTIuk+cdRKdqQA6jQrpjcvKG/La9VS7i5tLJr17ieNEa7AHoOtsLSqkAsSAA==",
+    "expected_output_card_hash": "36c39434bc5c624dff3c64b2fad9b628e19f4c61aa7cd581cb3c766951e14b88",
+    "record": {
+      "duration_ms": 1234,
+      "epoch": 1,
+      "errors": null,
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "output_card_json": {
+        "action_notes": "...",
+        "citations": [],
+        "confidence": 0.7,
+        "id": "eu-ai-act",
+        "jurisdiction": "eu",
+        "last_refreshed_at": "2026-05-10T12:00:00Z",
+        "no_legal_advice": true,
+        "polaris_agent_id": "agt_test_eu_ai_act",
+        "refresh_cadence_hours": 24,
+        "risks": "...",
+        "summary": "...",
+        "title": "...",
+        "topic": "AI regulation",
+        "what_changed": "...",
+        "why_it_matters": "...",
+        "worker_owner_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+      },
+      "polaris_agent_id": "agt_test_eu_ai_act",
+      "polaris_run_id": "run_test_001",
+      "ran_at": "2026-05-10T12:30:00.000Z",
+      "round_index": 0,
+      "score_parts": {
+        "clarity": 1.0,
+        "freshness": 1.0,
+        "maintenance": 1.0,
+        "source_quality": 0.0,
+        "specificity": 0.6,
+        "usefulness": 0.5
+      },
+      "submission_id": "11111111-2222-3333-4444-555555555555",
+      "task_json": {
+        "card_id": "eu-ai-act",
+        "deadline_minutes": 25,
+        "epoch": 1,
+        "prompt": "Summarize material AI Act developments in the last 24 hours.",
+        "round_index": 0,
+        "sources": []
+      },
+      "weighted_score": 0.535
+    },
+    "test_only_cathedral_seed_hex": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  },
+  "merkle": {
+    "epoch": 1,
+    "expected_leaf_hashes_sorted": [
+      "4b216e5d121a343ce4c5444dcc595bb1e72ea0ea562075ea9fa4c867c74599c8",
+      "3d58818306b92a1c956bf63c6b5544d05268b6b2cda90c00fbb0281ac1da36c6",
+      "ca0624f50582192164c1011d94ad8fe988b9f4106b576746c2f25a31b0bdbfbe"
+    ],
+    "expected_merkle_root": "468ac866859b656ed3bf9b6ec3ea79bf3c6c1a0243f6cddb40a1534809e9bed2",
+    "leaves_input": [
+      {
+        "cathedral_signature": "sig1",
+        "id": "00000000-0000-0000-0000-000000000001",
+        "output_card_hash": "aa",
+        "weighted_score": 0.5
+      },
+      {
+        "cathedral_signature": "sig2",
+        "id": "00000000-0000-0000-0000-000000000002",
+        "output_card_hash": "bb",
+        "weighted_score": 0.7
+      },
+      {
+        "cathedral_signature": "sig3",
+        "id": "00000000-0000-0000-0000-000000000003",
+        "output_card_hash": "cc",
+        "weighted_score": 0.9
+      }
+    ]
+  },
+  "meta": {
+    "description": "Cathedral v1 cross-repo golden vectors. Generated from CONTRACTS.md \u00a78 spec. Test-only keys; never use in prod.",
+    "spec_version": "CONTRACTS.md 2026-05-10"
+  },
+  "submission": {
+    "expected_signature_b64": "El+oqqNp7DoVGrIMLVXHsTGh5Jk/Xq1YjTZy+A8+gjQC0DPanMJcg+suNUoGiI7CTiw2sd3wTUvbonBJ3k/ahA==",
+    "payload": {
+      "bundle_hash": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+      "card_id": "eu-ai-act",
+      "miner_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+      "submitted_at": "2026-05-10T12:00:00.000Z"
+    },
+    "test_only_keypair_uri": "//Alice"
+  }
+}
