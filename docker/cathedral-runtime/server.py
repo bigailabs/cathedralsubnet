@@ -68,7 +68,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.4")
+VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.5")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -440,6 +440,7 @@ async def _call_llm(
         min_cits=min_cits,
         required_classes=required_classes,
         cadence=cadence,
+        task=task,
     )
     user_msg = f"Task: {task}\n\nReturn only the Card JSON. No prose."
 
