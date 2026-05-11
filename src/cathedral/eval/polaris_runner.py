@@ -652,6 +652,13 @@ class PolarisRuntimeRunner:
         if (base_url := _os.environ.get("CHUTES_BASE_URL")):
             env_overrides["CHUTES_BASE_URL"] = base_url
 
+        logger.info(
+            "polaris_runtime_dispatch",
+            task_id=task_id,
+            bundle_url_host=bundle_url.split("?")[0][:120],
+            env_keys=sorted(env_overrides.keys()),
+        )
+
         body = {
             "task": task.prompt,
             "task_id": task_id,
