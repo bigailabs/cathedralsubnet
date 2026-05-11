@@ -174,8 +174,25 @@ async def score_and_sign(
             parts = score_card(card, entry)
             score_dict = parts.model_dump()
             weighted_pre = parts.weighted()
+            logger.info(
+                "scoring_dimensions",
+                submission_id=submission_id,
+                card_id=card_id,
+                weighted_pre=weighted_pre,
+                parts=parts.model_dump(),
+                entry_found=entry is not None,
+            )
         except PreflightError as e:
             errors.append(f"preflight: {e}")
+            logger.warning(
+                "preflight_rejected", submission_id=submission_id, error=str(e),
+            )
+    else:
+        logger.warning(
+            "card_validation_failed",
+            submission_id=submission_id,
+            errors=[e for e in errors if "card validation" in e],
+        )
 
     # First-mover delta lookup
     multiplier = await _first_mover_multiplier(
