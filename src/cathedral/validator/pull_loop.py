@@ -276,6 +276,7 @@ def _to_eval_output_projection(record: dict[str, Any]) -> dict[str, Any] | None:
         "output_card": output_card,
         "output_card_hash": record.get("output_card_hash", ""),
         "weighted_score": record["weighted_score"],
+        "polaris_verified": record.get("polaris_verified"),
         "ran_at": record["ran_at"],
         "cathedral_signature": record["cathedral_signature"],
         "merkle_epoch": record.get("merkle_epoch"),
