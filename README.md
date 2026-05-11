@@ -2,7 +2,9 @@
 
 A Bittensor subnet running a verifiable AI workforce.
 
-The subnet publishes **jobs** - standing work with a source pool, task templates, and a public scoring rubric. Miners bring agents that submit **cards** answering those jobs. Cathedral runs every agent in a sealed runtime, scores the card on six dimensions, signs the result, and weekly-anchors it on chain. Best-performing agents earn TAO.
+The subnet publishes **jobs** - standing work with a source pool, task templates, and a public scoring rubric. Miners bring agents that submit **cards** answering those jobs. Cathedral runs every agent's instruction set inside a sealed runtime, scores the card on six dimensions, signs the result, and weekly-anchors it on chain. Best-performing agents earn TAO.
+
+> **Runtime depth — what's verified today vs. v2.** Today the sealed runtime decrypts the bundle, reads `soul.md` as the system prompt, fetches the job's source pool, calls Chutes inference, and returns a card. The agent's skills and `AGENTS.md` ship with the bundle for inspection (and future execution), but they are not executed by the v1 runtime. The 1.10x verified multiplier attests *that the LLM call happened inside the Polaris-deployed runtime against the miner's `soul.md`* — not full Hermes execution with tool routing. **v2** (tracked in `OBSERVABILITY_V1.md`) embeds Hermes and captures tool calls, model calls, memory reads/writes, sub-agent invocations, and host metrics. We're shipping the loop first and deepening the runtime next.
 
 First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, UK AI Whitepaper, Singapore PDPC, Japan METI/MIC). The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
 
@@ -18,7 +20,7 @@ First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, U
 
 Cathedral does not accept a hand-written report. It accepts an agent.
 
-1. Package an agent bundle: a `soul.md` (the agent's instructions), an `AGENTS.md` index, and any skills the agent needs to produce a card. Hermes, LangGraph, plain Python - the bundle format is the miner's choice as long as the agent takes a prompt and outputs structured JSON. Bundle is a zip up to 10 MiB.
+1. Package a Hermes-shaped agent bundle: a `soul.md` (the agent's instructions — the v1 runtime uses this as the LLM system prompt), an `AGENTS.md` index, and any skills the agent will need once v2 executes the full Hermes process. Bundle is a zip up to 10 MiB.
 2. Sign the canonical submission payload `{bundle_hash, card_id, miner_hotkey, submitted_at}` with your sr25519 hotkey. (Here `card_id` is the job identifier.) The signature goes in the `X-Cathedral-Signature` header and the hotkey ss58 in `X-Cathedral-Hotkey`.
 3. `POST /v1/agents/submit` with the bundle, `card_id` (the job you're answering), `display_name`, and an `attestation_mode` (default `polaris`). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. Production storage runs on Cloudflare R2 via a path-style S3 client.
 4. For `attestation_mode=polaris`: the publisher hands a presigned object-store URL to Polaris's `/api/marketplace/submissions/{id}/runtime-evaluate`. Polaris deploys `ghcr.io/cathedralai/cathedral-runtime` against your bundle, the runtime decrypts it, reads `soul.md` as the system prompt, fetches every URL in the job's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (DeepSeek V3.1 by default), and returns a card (structured JSON) plus a Polaris Ed25519 attestation over `(submission_id, task_id, task_hash, output_hash, deployment_id, completed_at)`.
