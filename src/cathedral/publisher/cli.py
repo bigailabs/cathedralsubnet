@@ -153,6 +153,95 @@ def seed_cards(
     asyncio.run(_run())
 
 
+@app.command("load-eval-spec")
+def load_eval_spec(
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+    repo_url: str = typer.Option(
+        "https://raw.githubusercontent.com/bigailabs/cathedral-eval-spec/main",
+        "--repo-url",
+        help="Base URL of the cathedral-eval-spec content (raw GitHub).",
+    ),
+    cards: str = typer.Option(
+        "eu-ai-act,us-ai-eo,uk-ai-whitepaper,singapore-pdpc,japan-meti-mic",
+        "--cards",
+        help="Comma-separated card IDs to load.",
+    ),
+) -> None:
+    """Pull cathedral-eval-spec/<card>/card_definition.toml from the public
+    repo and UPDATE existing card_definitions rows with the real content.
+
+    Idempotent — safe to run on every deploy. Does not delete or insert,
+    only updates the description/eval_spec_md/source_pool/task_templates/
+    scoring_rubric/refresh_cadence_hours columns of existing rows.
+
+    Run AFTER `seed-cards` (which creates the placeholder rows).
+    """
+    configure()
+
+    import sys
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib  # type: ignore[import-not-found]
+    import urllib.request
+
+    from cathedral.publisher import repository
+
+    card_ids = [c.strip() for c in cards.split(",") if c.strip()]
+
+    async def _run() -> None:
+        conn = await connect(database_path)
+        try:
+            for card_id in card_ids:
+                url = f"{repo_url.rstrip('/')}/{card_id}/card_definition.toml"
+                typer.echo(f"fetching {url}")
+                try:
+                    with urllib.request.urlopen(url, timeout=30) as resp:
+                        body = resp.read()
+                except Exception as e:
+                    typer.echo(f"  FAILED: {e}", err=True)
+                    continue
+
+                try:
+                    data = tomllib.loads(body.decode("utf-8"))
+                except Exception as e:
+                    typer.echo(f"  FAILED to parse TOML: {e}", err=True)
+                    continue
+
+                # Map TOML structure to repository columns. The TOML uses
+                # `[card]`, `[description]`, `[eval_spec]`, `[source_pool]`,
+                # `[task_templates]`, `[scoring_rubric]`, `[refresh]`.
+                card = data.get("card", {})
+                desc = (data.get("description") or {}).get("markdown", "")
+                spec = (data.get("eval_spec") or {}).get("markdown", "")
+                source_pool = (data.get("source_pool") or {}).get("sources", [])
+                task_templates = (data.get("task_templates") or {}).get("templates", [])
+                scoring = data.get("scoring_rubric") or {}
+                cadence = (data.get("refresh") or {}).get("recommended_cadence_hours", 24)
+
+                # insert_card_definition has ON CONFLICT DO UPDATE — idempotent
+                await repository.insert_card_definition(
+                    conn,
+                    id=card.get("id", card_id),
+                    display_name=card.get("display_name", card_id),
+                    jurisdiction=card.get("jurisdiction", "other"),
+                    topic=card.get("topic", ""),
+                    description=desc,
+                    eval_spec_md=spec,
+                    source_pool=source_pool,
+                    task_templates=task_templates,
+                    scoring_rubric=scoring,
+                    refresh_cadence_hours=int(cadence),
+                    status=card.get("status", "active"),
+                )
+                typer.echo(f"  loaded {card_id}: {len(source_pool)} sources, "
+                           f"{len(task_templates)} task templates")
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
 @app.callback()
 def _callback() -> None:
     """Common config (no-op; lets typer build subcommand help cleanly)."""

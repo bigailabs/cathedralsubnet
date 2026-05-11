@@ -351,17 +351,34 @@ async def get_health(request: Request) -> dict[str, Any]:
     except Exception:
         checks["db"] = "fail"
 
+    # Storage check: weak by design. We probe whether the client is
+    # constructed (== env vars are set), not whether HeadBucket succeeds.
+    # The HeadBucket variant gated deploys on bucket-list scope, which
+    # tokens scoped to a single bucket (the common case for shared S3
+    # tenants like Hippius's per-account buckets) lack — even though
+    # PutObject works fine. Submission failures surface at write time
+    # with a clear 5xx, not at deploy time as a silent crash.
     if ctx.hippius is not None:
-        checks["hippius"] = "ok" if await ctx.hippius.healthcheck() else "fail"
+        try:
+            healthy = await ctx.hippius.healthcheck()
+            checks["hippius"] = "ok" if healthy else "degraded"
+        except Exception:
+            # Healthcheck shouldn't itself fail the request; just mark degraded.
+            checks["hippius"] = "degraded"
     else:
         checks["hippius"] = "skipped"
 
     checks["polaris"] = "ok"  # publisher does not poll Polaris directly
 
-    overall_ok = all(v in ("ok", "skipped") for v in checks.values())
-    payload = {"status": "ok" if overall_ok else "degraded", "checks": checks}
-    if not overall_ok:
-        # Return 503 explicitly so load balancers can drain.
+    # Only DB failure is fatal for /health. Storage degradation is
+    # surfaced in the response body but does NOT 503 — the publisher can
+    # still serve reads (cards, leaderboard, skill.md) without storage.
+    fatal = checks["db"] != "ok"
+    payload = {
+        "status": "ok" if all(v in ("ok", "skipped") for v in checks.values()) else "degraded",
+        "checks": checks,
+    }
+    if fatal:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=payload,  # type: ignore[arg-type]
