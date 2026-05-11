@@ -107,6 +107,11 @@ class PolarisRunResult:
     duration_ms: int
     errors: list[str] = field(default_factory=list)
     attestation: PolarisAttestation | None = None
+    # Stage B.4: long-lived probe runs sign with the miner's sr25519 hotkey
+    # rather than the Polaris attestation key. When this field is set, the
+    # orchestrator persists it alongside the Polaris attestation on the
+    # eval_runs row.
+    probe_attestation: dict[str, Any] | None = None
 
 
 class PolarisRunner(Protocol):
@@ -157,7 +162,6 @@ class StubPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
-
         submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         self._counter += 1
@@ -219,7 +223,6 @@ class FailingStubPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
-
         submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_bytes, bundle_hash, task, miner_hotkey
@@ -236,7 +239,6 @@ class MalformedStubPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
-
         submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_bytes, bundle_hash
@@ -337,7 +339,6 @@ class BundleCardRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
-
         submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_hash, miner_hotkey  # not needed; scoring_pipeline re-pins attribution
@@ -429,7 +430,6 @@ class HttpPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
-
         submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         import base64
@@ -628,7 +628,6 @@ class PolarisRuntimeRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
-
         submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_bytes  # Polaris fetches the bundle itself via presigned URL.
@@ -669,9 +668,10 @@ class PolarisRuntimeRunner:
         # operator scope (we are the trusted-service principal), so
         # this doesn't leak outside our control plane.
         import os as _os
-        if (chutes := _os.environ.get("CHUTES_API_KEY")):
+
+        if chutes := _os.environ.get("CHUTES_API_KEY"):
             env_overrides["CHUTES_API_KEY"] = chutes
-        if (base_url := _os.environ.get("CHUTES_BASE_URL")):
+        if base_url := _os.environ.get("CHUTES_BASE_URL"):
             env_overrides["CHUTES_BASE_URL"] = base_url
 
         logger.info(
@@ -885,9 +885,7 @@ class PolarisRuntimeRunner:
             # schema requires `last_refreshed_at` and `refresh_cadence_hours`,
             # so any dict missing those is almost certainly the runtime's
             # envelope, not the Card.
-            if isinstance(inner, dict) and (
-                "last_refreshed_at" in inner or "citations" in inner
-            ):
+            if isinstance(inner, dict) and ("last_refreshed_at" in inner or "citations" in inner):
                 return dict(inner)
             return dict(oj)
         raw = self._raw_output_bytes(payload)
@@ -903,9 +901,7 @@ class PolarisRuntimeRunner:
             )
         # Also handle the wrapped shape via the bytes path.
         inner = decoded.get("output_json")
-        if isinstance(inner, dict) and (
-            "last_refreshed_at" in inner or "citations" in inner
-        ):
+        if isinstance(inner, dict) and ("last_refreshed_at" in inner or "citations" in inner):
             return dict(inner)
         return decoded
 
