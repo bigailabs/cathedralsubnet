@@ -258,7 +258,19 @@ async def list_submissions_for_card(
     sort: str = "score",
     limit: int = 50,
     offset: int = 0,
+    verified_only: bool = True,
 ) -> list[dict[str, Any]]:
+    """List submissions for a card.
+
+    `verified_only=True` (default) restricts to the leaderboard surface:
+    attestation_mode IN ('polaris','tee'), status NOT 'discovery',
+    discovery_only=0. The public read endpoints all rely on this filter
+    so unverified submissions never appear on the leaderboard, card
+    overview, or recent-eval feeds.
+
+    Pass `verified_only=False` only from internal callers that need the
+    full set (e.g. discovery-counting helpers, miner-profile fan-out).
+    """
     if sort == "score":
         order = "current_score DESC NULLS LAST, submitted_at DESC"
     elif sort == "recent":
@@ -267,12 +279,22 @@ async def list_submissions_for_card(
         order = "submitted_at ASC"
     else:
         raise ValueError(f"invalid sort: {sort}")
-    cur = await conn.execute(
-        f"SELECT * FROM agent_submissions WHERE card_id = ? "
-        f"AND status IN ('queued','evaluating','ranked') "
-        f"ORDER BY {order} LIMIT ? OFFSET ?",
-        (card_id, limit, offset),
-    )
+    if verified_only:
+        cur = await conn.execute(
+            f"SELECT * FROM agent_submissions WHERE card_id = ? "
+            f"AND status IN ('queued','evaluating','ranked') "
+            f"AND attestation_mode IN ('polaris','tee') "
+            f"AND discovery_only = 0 "
+            f"ORDER BY {order} LIMIT ? OFFSET ?",
+            (card_id, limit, offset),
+        )
+    else:
+        cur = await conn.execute(
+            f"SELECT * FROM agent_submissions WHERE card_id = ? "
+            f"AND status IN ('queued','evaluating','ranked') "
+            f"ORDER BY {order} LIMIT ? OFFSET ?",
+            (card_id, limit, offset),
+        )
     rows = await cur.fetchall()
     return [_row_to_submission(r, cur.description) for r in rows]
 
@@ -283,7 +305,14 @@ async def list_submissions_all(
     sort: str = "score",
     limit: int = 50,
     offset: int = 0,
+    verified_only: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
+    """List all submissions across cards (paginated, with total).
+
+    Same verified_only semantics as `list_submissions_for_card`: defaults
+    to the leaderboard surface; callers that want the full table must
+    explicitly opt out.
+    """
     if sort == "score":
         order = "current_score DESC NULLS LAST, submitted_at DESC"
     elif sort == "recent":
@@ -292,19 +321,95 @@ async def list_submissions_all(
         order = "submitted_at ASC"
     else:
         raise ValueError(f"invalid sort: {sort}")
+    if verified_only:
+        where = (
+            "WHERE status IN ('queued','evaluating','ranked') "
+            "AND attestation_mode IN ('polaris','tee') "
+            "AND discovery_only = 0"
+        )
+    else:
+        where = "WHERE status IN ('queued','evaluating','ranked')"
     cur = await conn.execute(
-        f"SELECT * FROM agent_submissions "
-        f"WHERE status IN ('queued','evaluating','ranked') "
-        f"ORDER BY {order} LIMIT ? OFFSET ?",
+        f"SELECT * FROM agent_submissions {where} ORDER BY {order} LIMIT ? OFFSET ?",
         (limit, offset),
     )
     rows = await cur.fetchall()
-    cur2 = await conn.execute(
-        "SELECT COUNT(*) FROM agent_submissions WHERE status IN ('queued','evaluating','ranked')"
-    )
+    cur2 = await conn.execute(f"SELECT COUNT(*) FROM agent_submissions {where}")
     total_row = await cur2.fetchone()
     total = int(total_row[0]) if total_row else 0
     return [_row_to_submission(r, cur.description) for r in rows], total
+
+
+# --------------------------------------------------------------------------
+# Discovery surface (unverified submissions)
+# --------------------------------------------------------------------------
+
+
+async def list_discovery_submissions_for_card(
+    conn: aiosqlite.Connection,
+    card_id: str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List unverified / discovery-only submissions for a card.
+
+    The inverse of the verified leaderboard surface: only rows with
+    ``attestation_mode='unverified'`` and ``status='discovery'``. Ordered
+    by ``submitted_at DESC`` because discovery rows carry no score.
+    """
+    cur = await conn.execute(
+        "SELECT * FROM agent_submissions WHERE card_id = ? "
+        "AND attestation_mode = 'unverified' AND status = 'discovery' "
+        "ORDER BY submitted_at DESC LIMIT ? OFFSET ?",
+        (card_id, limit, offset),
+    )
+    rows = await cur.fetchall()
+    return [_row_to_submission(r, cur.description) for r in rows]
+
+
+async def count_discovery_submissions_for_card(conn: aiosqlite.Connection, card_id: str) -> int:
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM agent_submissions WHERE card_id = ? "
+        "AND attestation_mode = 'unverified' AND status = 'discovery'",
+        (card_id,),
+    )
+    row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def list_discovery_submissions_recent(
+    conn: aiosqlite.Connection,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Cross-card discovery feed for the top-level /research page."""
+    cur = await conn.execute(
+        "SELECT * FROM agent_submissions "
+        "WHERE attestation_mode = 'unverified' AND status = 'discovery' "
+        "ORDER BY submitted_at DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    )
+    rows = await cur.fetchall()
+    return [_row_to_submission(r, cur.description) for r in rows]
+
+
+async def count_verified_agents_for_card(conn: aiosqlite.Connection, card_id: str) -> int:
+    """Count verified (non-discovery, attested) submissions for a card.
+
+    Used by `/v1/cards/{card_id}` `agent_count` so the public card overview
+    reflects only verified agents — the same surface the leaderboard does.
+    """
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM agent_submissions WHERE card_id = ? "
+        "AND status IN ('queued','evaluating','ranked') "
+        "AND attestation_mode IN ('polaris','tee') "
+        "AND discovery_only = 0",
+        (card_id,),
+    )
+    row = await cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 async def update_submission_status(
@@ -507,13 +612,22 @@ async def list_eval_runs_for_card(
     since: datetime | None = None,
     limit: int = 30,
 ) -> list[dict[str, Any]]:
-    """Used for `/v1/cards/{id}/feed` and `/v1/cards/{id}/history`."""
+    """Used for `/v1/cards/{id}/feed` and `/v1/cards/{id}/history`.
+
+    Joined against `agent_submissions` and filtered to the verified
+    surface — discovery rows can never produce eval_runs in the first
+    place (status='discovery' never enters the eval queue), but the
+    join is gated for defense-in-depth.
+    """
     if since:
         cur = await conn.execute(
             """
             SELECT er.* FROM eval_runs er
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE sub.card_id = ? AND er.ran_at >= ?
+              AND sub.status != 'discovery'
+              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.discovery_only = 0
             ORDER BY er.ran_at DESC LIMIT ?
             """,
             (card_id, since.isoformat(), limit),
@@ -524,6 +638,9 @@ async def list_eval_runs_for_card(
             SELECT er.* FROM eval_runs er
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE sub.card_id = ?
+              AND sub.status != 'discovery'
+              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.discovery_only = 0
             ORDER BY er.ran_at DESC LIMIT ?
             """,
             (card_id, limit),
@@ -538,9 +655,24 @@ async def list_eval_runs_recent(
     since: datetime,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
-    """Cross-card recent feed for the validator pull endpoint."""
+    """Cross-card recent feed used by the validator pull loop AND the
+    public `/v1/leaderboard/recent` endpoint.
+
+    Joined against `agent_submissions` and gated on the verified surface
+    so unverified discovery submissions never appear on the leaderboard
+    feed. Discovery rows never produce eval_runs at all, but the join
+    is defense-in-depth in case a future code path inserts one.
+    """
     cur = await conn.execute(
-        "SELECT * FROM eval_runs WHERE ran_at >= ? ORDER BY ran_at ASC LIMIT ?",
+        """
+        SELECT er.* FROM eval_runs er
+        JOIN agent_submissions sub ON sub.id = er.submission_id
+        WHERE er.ran_at >= ?
+          AND sub.status != 'discovery'
+          AND sub.attestation_mode IN ('polaris','tee')
+          AND sub.discovery_only = 0
+        ORDER BY er.ran_at ASC LIMIT ?
+        """,
         (since.isoformat(), limit),
     )
     rows = await cur.fetchall()
@@ -576,11 +708,21 @@ async def rolling_avg_score(
 
 
 async def best_eval_run_for_card(conn: aiosqlite.Connection, card_id: str) -> dict[str, Any] | None:
+    """Best (highest-scoring) eval run for a card — verified surface only.
+
+    Discovery / unverified submissions never enter the eval queue, so
+    they never have eval_runs rows. But the join is still gated on
+    attestation_mode for defense-in-depth: the public `best_eval` field
+    on `/v1/cards/{id}` must reflect only attested runs.
+    """
     cur = await conn.execute(
         """
         SELECT er.* FROM eval_runs er
         JOIN agent_submissions sub ON sub.id = er.submission_id
         WHERE sub.card_id = ?
+          AND sub.status != 'discovery'
+          AND sub.attestation_mode IN ('polaris','tee')
+          AND sub.discovery_only = 0
         ORDER BY er.weighted_score DESC, er.ran_at DESC LIMIT 1
         """,
         (card_id,),
