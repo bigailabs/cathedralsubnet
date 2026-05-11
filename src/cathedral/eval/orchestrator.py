@@ -331,7 +331,8 @@ async def run_eval_loop(
     *,
     db: aiosqlite.Connection,
     hippius: HippiusClient,
-    polaris: PolarisRunner,
+    polaris: PolarisRunner | None = None,
+    runner_for: Callable[[dict[str, Any]], PolarisRunner] | None = None,
     signer: EvalSigner,
     registry: CardRegistry,
     poll_interval_secs: float = 10.0,
@@ -340,13 +341,23 @@ async def run_eval_loop(
 ) -> None:
     """Long-running scheduler — picks queued submissions and evals them.
 
+    Pass either `polaris=` (legacy single runner) OR `runner_for=` (a
+    callable that returns a runner per submission). Production wants
+    `runner_for=` so polaris-tier submissions route to
+    `PolarisRuntimeRunner` while BYO go to `BundleCardRunner` etc.
+
     Single-writer design: each submission is updated to 'evaluating'
     atomically before the work begins, so two concurrent loop iterations
     never pick the same row.
     """
     stop = stop or asyncio.Event()
     orchestrator = EvalOrchestrator(
-        db=db, hippius=hippius, polaris=polaris, signer=signer, registry=registry
+        db=db,
+        hippius=hippius,
+        polaris=polaris,
+        runner_for=runner_for,
+        signer=signer,
+        registry=registry,
     )
     sem = asyncio.Semaphore(max_concurrent)
 

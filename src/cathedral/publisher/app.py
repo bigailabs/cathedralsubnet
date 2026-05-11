@@ -79,11 +79,32 @@ def build_publisher_app(
 
         stop = asyncio.Event()
         if start_eval_loop:
+            # Per-submission runner dispatch: polaris-tier rows go to
+            # PolarisRuntimeRunner (Tier A), TEE-tier rows are pre-verified
+            # at submit and only need the bundled card scored, everything
+            # else falls back to CATHEDRAL_EVAL_MODE.
+            from cathedral.eval.orchestrator import (
+                _resolve_polaris_runner_for_mode,
+                _resolve_polaris_runner_from_env,
+            )
+
+            def _runner_for(submission: dict[str, Any]) -> Any:
+                mode = (submission.get("attestation_mode") or "").lower()
+                env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+                has_key = bool(os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"))
+                if env_mode.startswith("stub"):
+                    return _resolve_polaris_runner_from_env()
+                if mode == "polaris" and has_key:
+                    return _resolve_polaris_runner_for_mode("polaris")
+                if mode == "tee":
+                    return _resolve_polaris_runner_for_mode("bundle")
+                return _resolve_polaris_runner_from_env()
+
             eval_task = asyncio.create_task(
                 run_eval_loop(
                     db=ctx.db,
                     hippius=ctx.hippius,
-                    polaris=ctx.polaris,
+                    runner_for=_runner_for,
                     signer=ctx.signer,
                     registry=ctx.registry,
                     poll_interval_secs=10.0,
