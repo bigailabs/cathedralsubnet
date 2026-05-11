@@ -56,9 +56,7 @@ def migrate(
 @app.command("pull")
 def pull(
     config: str = typer.Option("config/testnet.toml", "--config", "-c"),
-    publisher_url: str = typer.Option(
-        "https://api.cathedral.computer", "--publisher-url"
-    ),
+    publisher_url: str = typer.Option("https://api.cathedral.computer", "--publisher-url"),
     public_key_env: str = typer.Option(
         "CATHEDRAL_PUBLIC_KEY_HEX",
         "--public-key-env",
@@ -122,6 +120,8 @@ def pull(
                     health,
                     interval_secs=settings.weights.interval_secs,
                     disabled=settings.weights.disabled,
+                    burn_uid=settings.weights.burn_uid,
+                    forced_burn_percentage=settings.weights.forced_burn_percentage,
                     stop=stop,
                 )
             ),
