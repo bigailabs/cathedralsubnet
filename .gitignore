@@ -26,3 +26,7 @@ secrets/
 *.key
 *.pem
 .claude/worktrees/
+.venv-int/
+.venv-byo/
+.venv-fix/
+.venv-prefix/
