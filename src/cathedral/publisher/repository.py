@@ -161,12 +161,23 @@ async def insert_agent_submission(
     submitted_at: datetime,
     first_mover_at: datetime | None,
     submitted_at_iso: str | None = None,
+    attestation_mode: str = "polaris",
+    attestation_type: str | None = None,
+    attestation_blob: bytes | None = None,
+    attestation_verified_at: datetime | None = None,
+    discovery_only: bool = False,
 ) -> None:
     """Insert an `agent_submissions` row.
 
     `submitted_at_iso` is the canonical wire-format timestamp (ms precision,
     trailing 'Z'). When omitted, derived from `submitted_at` (and may carry
     a `+00:00` offset rather than `Z`).
+
+    The attestation fields default to the back-compat ``polaris`` mode so
+    existing call sites are unaffected. Callers explicitly write
+    ``attestation_mode='tee'`` (+ blob / type / verified_at) when a
+    miner submitted a TEE attestation, and ``attestation_mode='unverified'``
+    + ``discovery_only=True`` for discovery submissions.
     """
     await conn.execute(
         """
@@ -175,9 +186,12 @@ async def insert_agent_submission(
             bundle_size_bytes, encryption_key_id, bundle_signature,
             display_name, bio, logo_url, soul_md_preview,
             metadata_fingerprint, similarity_check_passed,
-            rejection_reason, submitted_at, status, first_mover_at
+            rejection_reason, submitted_at, status, first_mover_at,
+            attestation_mode, attestation_type, attestation_blob,
+            attestation_verified_at, discovery_only
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?)
         """,
         (
             id,
@@ -198,6 +212,11 @@ async def insert_agent_submission(
             submitted_at_iso or _to_z(submitted_at),
             status,
             _to_z(first_mover_at) if first_mover_at else None,
+            attestation_mode,
+            attestation_type,
+            attestation_blob,
+            _to_z(attestation_verified_at) if attestation_verified_at else None,
+            1 if discovery_only else 0,
         ),
     )
     await conn.commit()
@@ -389,6 +408,8 @@ def _row_to_submission(
     out = dict(zip(cols, row, strict=False))
     if "similarity_check_passed" in out:
         out["similarity_check_passed"] = bool(out["similarity_check_passed"])
+    if "discovery_only" in out:
+        out["discovery_only"] = bool(out["discovery_only"])
     return out
 
 

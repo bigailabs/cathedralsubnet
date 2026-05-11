@@ -96,6 +96,17 @@ CREATE TABLE IF NOT EXISTS card_definitions (
 );
 
 -- Miner-uploaded agent submissions. Bundles live encrypted in Hippius.
+--
+-- `attestation_mode` branches at intake (see cathedral.publisher.submit):
+--   * 'polaris'    — Cathedral re-runs eval on a Polaris-managed runtime.
+--                    No miner-side attestation needed at submission time.
+--   * 'tee'        — Miner attached a TEE attestation document (Nitro/
+--                    TDX/SEV-SNP). `attestation_blob` carries the raw
+--                    bytes; `attestation_type` carries the verifier
+--                    label; `attestation_verified_at` records when
+--                    Cathedral verified it.
+--   * 'unverified' — Discovery-only. No eval is run, no score persisted.
+--                    `status` is 'discovery'; `discovery_only` is true.
 CREATE TABLE IF NOT EXISTS agent_submissions (
     id                       TEXT PRIMARY KEY,
     miner_hotkey             TEXT NOT NULL,
@@ -115,10 +126,18 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     submitted_at             TEXT NOT NULL,
     status                   TEXT NOT NULL CHECK (status IN
                                ('pending_check','queued','evaluating',
-                                'ranked','rejected','withdrawn')),
+                                'ranked','rejected','withdrawn',
+                                'discovery')),
     current_score            REAL,
     current_rank             INTEGER,
-    first_mover_at           TEXT
+    first_mover_at           TEXT,
+    attestation_mode         TEXT NOT NULL DEFAULT 'polaris'
+                             CHECK (attestation_mode IN
+                               ('polaris','tee','unverified')),
+    attestation_type         TEXT,
+    attestation_blob         BLOB,
+    attestation_verified_at  TEXT,
+    discovery_only           INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique
     ON agent_submissions(miner_hotkey, card_id, bundle_hash);
@@ -214,3 +233,27 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     # verified attestation. Existing rows stay NULL.
     if "polaris_attestation" not in cols:
         await conn.execute("ALTER TABLE eval_runs ADD COLUMN polaris_attestation TEXT")
+
+    # agent_submissions: attestation_mode branching (polaris/tee/unverified).
+    # Existing rows default to 'polaris' so back-compat with pre-attestation
+    # miners holds — they were always on the verified path. SQLite cannot
+    # add a column WITH a CHECK constraint in ALTER TABLE, so the constraint
+    # is enforced at the application layer for existing tables; new tables
+    # created via SCHEMA above carry the CHECK natively.
+    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
+    sub_cols = {row[1] for row in await cur.fetchall()}
+    if "attestation_mode" not in sub_cols:
+        await conn.execute(
+            "ALTER TABLE agent_submissions ADD COLUMN attestation_mode "
+            "TEXT NOT NULL DEFAULT 'polaris'"
+        )
+    if "attestation_type" not in sub_cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_type TEXT")
+    if "attestation_blob" not in sub_cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_blob BLOB")
+    if "attestation_verified_at" not in sub_cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN attestation_verified_at TEXT")
+    if "discovery_only" not in sub_cols:
+        await conn.execute(
+            "ALTER TABLE agent_submissions ADD COLUMN discovery_only INTEGER NOT NULL DEFAULT 0"
+        )

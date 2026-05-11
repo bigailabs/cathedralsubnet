@@ -2,7 +2,8 @@
 
 Flow (CONTRACTS.md Section 6 step 1 + 2):
 
-    multipart upload
+    multipart upload  (bundle, card_id, display_name,
+                       attestation_mode, [attestation, attestation_type])
        │
        ▼
     auth header dep (X-Cathedral-Hotkey, X-Cathedral-Signature)
@@ -17,22 +18,35 @@ Flow (CONTRACTS.md Section 6 step 1 + 2):
        │   - signature mismatch       -> 401
        │   - card_id unknown          -> 404
        │   - bundle structure invalid -> 422
-       │   - bundle too large         -> 400
+       │   - bundle too large         -> 413
        ▼
-    similarity check (Section 7.1)
-       │   - duplicate                -> 409
-       ▼
-    encrypt bundle -> Hippius PUT
-       │   - storage failure          -> 503 (don't write DB row)
-       ▼
-    INSERT agent_submissions row, status='queued'
-       │   - UNIQUE violation         -> 409
-       ▼
-    202 Accepted { id, bundle_hash, status, submitted_at }
+    branch on attestation_mode:
+       │
+       ├── 'polaris' (default, back-compat) ────────────────────────────┐
+       │     run similarity + encrypt + Hippius PUT + INSERT 'queued'   │
+       │                                                                │
+       ├── 'tee' ─────────────────────────────────────────────────────┐ │
+       │     verify Nitro / TDX / SEV-SNP attestation chain + binding │ │
+       │       - chain / sig / binding bad -> 401                     │ │
+       │       - PCR not in approved list  -> 401                     │ │
+       │       - TDX / SEV-SNP unsupported -> 501                     │ │
+       │     run similarity + encrypt + Hippius PUT + INSERT          │ │
+       │     attestation_blob / verified_at persisted alongside       │ │
+       │                                                              │ │
+       └── 'unverified' ──────────────────────────────────────────────┘ │
+             skip similarity, encrypt + Hippius PUT,                    │
+             INSERT 'discovery' / discovery_only=true,                  │
+             do NOT enqueue eval                                        │
+                                                                        ▼
+       INSERT agent_submissions
+         │   - UNIQUE violation -> 409
+         ▼
+       202 Accepted { id, bundle_hash, status, submitted_at }
 """
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -43,6 +57,15 @@ import blake3
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 
+from cathedral.attestation import (
+    ATTESTATION_MODES,
+    ATTESTATION_TYPES,
+    AttestationResult,
+    InvalidAttestationError,
+    UnapprovedRuntimeError,
+    UnsupportedAttestationTypeError,
+    verify_attestation,
+)
 from cathedral.auth import InvalidSignatureError, verify_hotkey_signature
 from cathedral.publisher import repository, similarity
 from cathedral.publisher.auth_signature import HotkeyAuth, hotkey_auth_header
@@ -68,6 +91,11 @@ _ALLOWED_LOGO_TYPES = {"image/png", "image/jpeg", "image/webp"}
 _LOGO_EXT_BY_TYPE = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 _MAX_DISPLAY_NAME = 64
 _MAX_BIO = 280
+
+# Real Nitro attestation docs are typically 4-8 KiB; TDX / SEV-SNP are
+# bigger but still well under 64 KiB. Cap to keep the multipart cheap and
+# to refuse silly payloads early.
+_MAX_ATTESTATION_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -95,6 +123,14 @@ async def submit_agent(
     # response (or call the prospective /v1/server-time endpoint).
     submitted_at_form: str | None = Form(default=None, alias="submitted_at"),
     logo: UploadFile | None = File(default=None),
+    # Attestation-mode branching. Default 'polaris' for back-compat with
+    # miners that pre-date the contract — they were always on the
+    # Cathedral-re-runs-eval path. See `cathedral.attestation` for the
+    # verifier implementations and the docs in `skill_md.py` for the
+    # miner-facing contract.
+    attestation_mode: str = Form(default="polaris"),
+    attestation: str | None = Form(default=None),
+    attestation_type: str | None = Form(default=None),
     auth: HotkeyAuth = Depends(hotkey_auth_header),
 ) -> dict[str, str]:
     ctx: PublisherContext = request.app.state.ctx
@@ -103,6 +139,19 @@ async def submit_agent(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="submissions paused",
+        )
+
+    # ----- attestation_mode validation (cheap, do first) -----------------
+    # Reject bad mode values before we read 10 MiB of bundle. Type
+    # validation for `tee` happens after we've parsed the bundle so the
+    # 401 paths can include the bundle_hash in their structured logs.
+    if attestation_mode not in ATTESTATION_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid attestation_mode: {attestation_mode!r}; "
+                f"must be one of {sorted(ATTESTATION_MODES)}"
+            ),
         )
 
     # ----- form validation ---------------------------------------------
@@ -115,9 +164,7 @@ async def submit_agent(
             detail=f"display_name exceeds {_MAX_DISPLAY_NAME} chars",
         )
     if bio is not None and len(bio) > _MAX_BIO:
-        raise HTTPException(
-            status_code=400, detail=f"bio exceeds {_MAX_BIO} chars"
-        )
+        raise HTTPException(status_code=400, detail=f"bio exceeds {_MAX_BIO} chars")
 
     if not bundle.filename or not bundle.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="bundle must be a .zip file")
@@ -145,9 +192,7 @@ async def submit_agent(
     if card_def is None:
         raise HTTPException(status_code=404, detail=f"card not found: {card_id}")
     if card_def["status"] != "active":
-        raise HTTPException(
-            status_code=404, detail=f"card not active: {card_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"card not active: {card_id}")
 
     # ----- timestamp + signature verify --------------------------------
     # CONTRACTS.md §4.1 + CRIT-1: server clock is the SOLE source of truth
@@ -165,20 +210,14 @@ async def submit_agent(
 
     if submitted_at_form:
         try:
-            client_submitted_at = datetime.fromisoformat(
-                submitted_at_form.replace("Z", "+00:00")
-            )
+            client_submitted_at = datetime.fromisoformat(submitted_at_form.replace("Z", "+00:00"))
         except ValueError as e:
-            raise HTTPException(
-                status_code=400, detail="submitted_at must be ISO-8601"
-            ) from e
+            raise HTTPException(status_code=400, detail="submitted_at must be ISO-8601") from e
         if client_submitted_at.tzinfo is None:
             client_submitted_at = client_submitted_at.replace(tzinfo=UTC)
         # ±5 minute clock-skew window — anything wider is considered a
         # backdating / forward-dating attempt.
-        skew_secs = abs(
-            (server_submitted_at - client_submitted_at).total_seconds()
-        )
+        skew_secs = abs((server_submitted_at - client_submitted_at).total_seconds())
         if skew_secs > 300:
             logger.info(
                 "submission_clock_skew",
@@ -203,9 +242,7 @@ async def submit_agent(
         )
     except InvalidSignatureError as e:
         logger.info("submission_sig_failed", hotkey=auth.hotkey_ss58)
-        raise HTTPException(
-            status_code=401, detail="invalid hotkey signature"
-        ) from e
+        raise HTTPException(status_code=401, detail="invalid hotkey signature") from e
     _ = request  # keep for trace-id middleware compatibility
 
     # Bind the persisted timestamp to the server clock — this is what
@@ -214,39 +251,70 @@ async def submit_agent(
     submitted_at = server_submitted_at
     submitted_at_iso = server_submitted_at_iso
 
+    # ----- TEE attestation verification (mode='tee' only) ----------------
+    # Done after signature verification so a miner can't burn our crypto
+    # budget without a valid hotkey. Order:
+    #   1. validate the form fields are well-formed
+    #   2. decode the blob (base64)
+    #   3. dispatch to Nitro / TDX / SEV-SNP verifier
+    # Returns either an `AttestationResult` (tee mode) or None.
+    attestation_result: AttestationResult | None = None
+    attestation_blob_bytes: bytes | None = None
+    if attestation_mode == "tee":
+        attestation_result, attestation_blob_bytes = await _verify_tee_attestation(
+            attestation=attestation,
+            attestation_type=attestation_type,
+            bundle_hash=bundle_hash,
+            card_id=card_id,
+            hotkey=auth.hotkey_ss58,
+        )
+
     # ----- similarity check --------------------------------------------
     # CONTRACTS.md L7: similarity rejection returns 202 with status=rejected
     # + rejection_reason; EXCEPT for "exact bundle duplicate" which the
     # contract test pins as 409 (cross-hotkey same-bundle) and 409 for
     # same-hotkey duplicate (idx_agent_unique). Other similarity reasons
     # (fingerprint, fuzzy display name) go through the 202+rejected path.
+    #
+    # `unverified` (discovery) submissions skip similarity entirely:
+    # fingerprint clashes are expected and not meaningful for discovery
+    # since these never enter the eval queue. We still compute the
+    # fingerprint so the row is consistent with the rest of the table.
     rejection_reason: str | None = None
     sim_metadata_fingerprint: str
     sim_display_name_norm: str
-    try:
-        sim = await similarity.run_similarity_check(
-            ctx.db,
-            miner_hotkey=auth.hotkey_ss58,
-            card_id=card_id,
-            display_name=display_name,
-            bundle_hash=bundle_hash,
-            bundle_size_bytes=len(raw),
-        )
-        sim_metadata_fingerprint = sim.metadata_fingerprint
-        sim_display_name_norm = sim.display_name_norm
-        _ = sim_display_name_norm  # reserved for future use
-    except SimilarityRejection as e:
-        msg = str(e)
-        # "duplicate submission" = same hotkey same bundle (covered by UNIQUE
-        # index too); "exact bundle duplicate" = cross-hotkey. Both 409.
-        if msg in {"duplicate submission", "exact bundle duplicate"}:
-            raise HTTPException(status_code=409, detail=msg) from e
-        # Other similarity rejections: 202 + status=rejected.
-        rejection_reason = msg
+    if attestation_mode == "unverified":
         sim_metadata_fingerprint = similarity.metadata_fingerprint(
             display_name=display_name, bundle_size_bytes=len(raw)
         )
         sim_display_name_norm = similarity.normalize_display_name(display_name)
+        _ = sim_display_name_norm  # reserved for future use
+    else:
+        try:
+            sim = await similarity.run_similarity_check(
+                ctx.db,
+                miner_hotkey=auth.hotkey_ss58,
+                card_id=card_id,
+                display_name=display_name,
+                bundle_hash=bundle_hash,
+                bundle_size_bytes=len(raw),
+            )
+            sim_metadata_fingerprint = sim.metadata_fingerprint
+            sim_display_name_norm = sim.display_name_norm
+            _ = sim_display_name_norm  # reserved for future use
+        except SimilarityRejection as e:
+            msg = str(e)
+            # "duplicate submission" = same hotkey same bundle (covered by
+            # UNIQUE index too); "exact bundle duplicate" = cross-hotkey.
+            # Both 409.
+            if msg in {"duplicate submission", "exact bundle duplicate"}:
+                raise HTTPException(status_code=409, detail=msg) from e
+            # Other similarity rejections: 202 + status=rejected.
+            rejection_reason = msg
+            sim_metadata_fingerprint = similarity.metadata_fingerprint(
+                display_name=display_name, bundle_size_bytes=len(raw)
+            )
+            sim_display_name_norm = similarity.normalize_display_name(display_name)
 
     # ----- logo upload (optional, before bundle so we can reference URL) -
     submission_id = str(uuid4())
@@ -322,9 +390,7 @@ async def submit_agent(
         encrypted = encrypt_bundle(raw)
     except EncryptionError as e:
         logger.error("encrypt_failed", error=str(e))
-        raise HTTPException(
-            status_code=500, detail="bundle encryption failed"
-        ) from e
+        raise HTTPException(status_code=500, detail="bundle encryption failed") from e
 
     try:
         blob_key = await ctx.hippius.put_bundle(
@@ -334,30 +400,35 @@ async def submit_agent(
         )
     except HippiusError as e:
         logger.warning("bundle_upload_failed", error=str(e))
-        raise HTTPException(
-            status_code=503, detail="bundle storage unavailable"
-        ) from e
+        raise HTTPException(status_code=503, detail="bundle storage unavailable") from e
 
     # ----- first-mover anchor -----------------------------------------
-    existing_first = await repository.first_mover_for_fingerprint(
-        ctx.db, card_id, sim_metadata_fingerprint
-    )
-    first_mover_at = (
-        existing_first["first_mover_at"]
-        if existing_first
-        else submitted_at_iso
-    )
-    if isinstance(first_mover_at, str):
-        try:
-            first_mover_dt = datetime.fromisoformat(
-                first_mover_at.replace("Z", "+00:00")
-            )
-        except ValueError:
-            first_mover_dt = submitted_at
+    # Unverified (discovery) submissions never enter scoring, so the
+    # first-mover anchor does not apply — anchoring a discovery row would
+    # poison a later polaris/tee miner's first-mover claim on the same
+    # fingerprint. Skip the anchor and persist `first_mover_at = NULL`.
+    first_mover_dt: datetime | None
+    if attestation_mode == "unverified":
+        first_mover_dt = None
     else:
-        first_mover_dt = first_mover_at  # type: ignore[unreachable]
+        existing_first = await repository.first_mover_for_fingerprint(
+            ctx.db, card_id, sim_metadata_fingerprint
+        )
+        first_mover_at = existing_first["first_mover_at"] if existing_first else submitted_at_iso
+        if isinstance(first_mover_at, str):
+            try:
+                first_mover_dt = datetime.fromisoformat(first_mover_at.replace("Z", "+00:00"))
+            except ValueError:
+                first_mover_dt = submitted_at
+        else:
+            first_mover_dt = first_mover_at
 
     # ----- INSERT -----------------------------------------------------
+    # Status branches on attestation_mode:
+    #   * unverified -> 'discovery' (never enters eval queue)
+    #   * polaris/tee -> 'queued'   (existing eval pipeline picks up)
+    submission_status = "discovery" if attestation_mode == "unverified" else "queued"
+    discovery_only = attestation_mode == "unverified"
     try:
         await repository.insert_agent_submission(
             ctx.db,
@@ -376,10 +447,17 @@ async def submit_agent(
             metadata_fingerprint=sim_metadata_fingerprint,
             similarity_check_passed=True,
             rejection_reason=None,
-            status="queued",
+            status=submission_status,
             submitted_at=submitted_at,
             submitted_at_iso=submitted_at_iso,
             first_mover_at=first_mover_dt,
+            attestation_mode=attestation_mode,
+            attestation_type=(attestation_type if attestation_mode == "tee" else None),
+            attestation_blob=(attestation_blob_bytes if attestation_mode == "tee" else None),
+            attestation_verified_at=(
+                attestation_result.verified_at if attestation_result is not None else None
+            ),
+            discovery_only=discovery_only,
         )
     except aiosqlite.IntegrityError as e:
         # idx_agent_unique violation = same hotkey + same card + same bundle.
@@ -397,11 +475,17 @@ async def submit_agent(
         card_id=card_id,
         bundle_hash=bundle_hash,
         size=len(raw),
+        attestation_mode=attestation_mode,
     )
+
+    # Unverified responses surface 'discovery' so the miner sees clearly
+    # that no eval will run. Polaris / tee submissions keep the existing
+    # 'pending_check' soft state until the eval pipeline picks them up.
+    response_status = "discovery" if attestation_mode == "unverified" else "pending_check"
     return {
         "id": submission_id,
         "bundle_hash": bundle_hash,
-        "status": "pending_check",  # contract returns the soft state
+        "status": response_status,
         "submitted_at": submitted_at_iso,
     }
 
@@ -409,6 +493,95 @@ async def submit_agent(
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+
+async def _verify_tee_attestation(
+    *,
+    attestation: str | None,
+    attestation_type: str | None,
+    bundle_hash: str,
+    card_id: str,
+    hotkey: str,
+) -> tuple[AttestationResult, bytes]:
+    """Verify a TEE attestation submitted alongside the bundle.
+
+    Returns ``(result, blob_bytes)`` on success; raises HTTPException with
+    a contract-shaped detail on failure:
+
+      * 400 — missing fields / oversized blob / not base64
+      * 401 — bad signature / chain / binding / unapproved runtime
+      * 501 — TDX or SEV-SNP (verifier pending)
+    """
+    if not attestation:
+        raise HTTPException(
+            status_code=400,
+            detail="attestation_mode=tee requires the attestation form field",
+        )
+    if not attestation_type:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "attestation_mode=tee requires the attestation_type form field "
+                f"(one of {sorted(ATTESTATION_TYPES)})"
+            ),
+        )
+    if attestation_type not in ATTESTATION_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid attestation_type: {attestation_type!r}; "
+                f"must be one of {sorted(ATTESTATION_TYPES)}"
+            ),
+        )
+
+    try:
+        blob_bytes = base64.b64decode(attestation, validate=True)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"attestation is not valid base64: {e}",
+        ) from e
+
+    if len(blob_bytes) > _MAX_ATTESTATION_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"attestation exceeds {_MAX_ATTESTATION_BYTES // 1024} KiB limit"),
+        )
+
+    try:
+        result = verify_attestation(
+            attestation_type=attestation_type,
+            attestation_bytes=blob_bytes,
+            bundle_hash=bundle_hash,
+            card_id=card_id,
+        )
+    except UnsupportedAttestationTypeError as e:
+        # Surfaces 501 — explicit so the next agent (TDX / SEV-SNP) knows
+        # exactly which path to wire.
+        logger.info(
+            "tee_attestation_unsupported",
+            hotkey=hotkey,
+            attestation_type=attestation_type,
+        )
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    except UnapprovedRuntimeError as e:
+        logger.info(
+            "tee_attestation_unapproved_runtime",
+            hotkey=hotkey,
+            attestation_type=attestation_type,
+            error=str(e),
+        )
+        raise HTTPException(status_code=401, detail=f"tee attestation invalid: {e}") from e
+    except InvalidAttestationError as e:
+        logger.info(
+            "tee_attestation_invalid",
+            hotkey=hotkey,
+            attestation_type=attestation_type,
+            error=str(e),
+        )
+        raise HTTPException(status_code=401, detail=f"tee attestation invalid: {e}") from e
+
+    return result, blob_bytes
 
 
 async def _read_capped(upload: UploadFile, cap: int) -> bytes:
