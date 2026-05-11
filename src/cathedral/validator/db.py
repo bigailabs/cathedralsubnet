@@ -130,6 +130,13 @@ CREATE INDEX IF NOT EXISTS idx_agent_first_mover
     ON agent_submissions(card_id, first_mover_at);
 
 -- Each individual eval execution.
+--
+-- `polaris_verified` is true when the eval ran on a Polaris-managed
+-- runtime (manifest fetched and verified). False for BYO-compute miners
+-- and for failed Polaris runs. The verified-runtime multiplier
+-- (CONTRACTS.md §7.3) is applied at scoring time before the row is
+-- inserted; this column persists the verification status for downstream
+-- audit and frontend display.
 CREATE TABLE IF NOT EXISTS eval_runs (
     id                  TEXT PRIMARY KEY,
     submission_id       TEXT NOT NULL REFERENCES agent_submissions(id) ON DELETE CASCADE,
@@ -145,7 +152,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     ran_at              TEXT NOT NULL,
     duration_ms         INTEGER NOT NULL,
     errors              TEXT,
-    cathedral_signature TEXT NOT NULL
+    cathedral_signature TEXT NOT NULL,
+    polaris_verified    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_eval_submission_time
     ON eval_runs(submission_id, ran_at DESC);
@@ -179,5 +187,24 @@ async def connect(database_path: str) -> aiosqlite.Connection:
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.executescript(SCHEMA)
+    await _apply_migrations(conn)
     await conn.commit()
     return conn
+
+
+async def _apply_migrations(conn: aiosqlite.Connection) -> None:
+    """Idempotent column additions for tables created by an earlier schema.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op when the table already exists,
+    so new columns must be added via ALTER TABLE here. Each block guards
+    on the current column set so re-running the connect() bootstrap is safe.
+    """
+    # eval_runs.polaris_verified — added for the BYO-compute flow. Defaults
+    # to 0 (false) for any rows inserted before the column existed; the
+    # scoring pipeline writes the real value going forward.
+    cur = await conn.execute("PRAGMA table_info(eval_runs)")
+    cols = {row[1] for row in await cur.fetchall()}
+    if "polaris_verified" not in cols:
+        await conn.execute(
+            "ALTER TABLE eval_runs ADD COLUMN polaris_verified INTEGER NOT NULL DEFAULT 0"
+        )
