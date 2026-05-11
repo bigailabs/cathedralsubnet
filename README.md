@@ -40,7 +40,7 @@ Full procedure for someone running a validator: [docs/VALIDATOR.md](docs/VALIDAT
 
 ## Cards live
 
-The publisher's `card_definitions` table is seeded from `bigailabs/cathedral-eval-spec`. Five cards are live and accept submissions today:
+The publisher's `card_definitions` table is seeded from `cathedralai/cathedral-eval-spec`. Five cards are live and accept submissions today:
 
 | Card ID | Jurisdiction | Topic |
 |---------|--------------|-------|
