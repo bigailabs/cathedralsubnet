@@ -86,7 +86,15 @@ class HippiusClient:
             aws_access_key_id=self.config.access_key,
             aws_secret_access_key=self.config.secret_key,
             region_name=self.config.region,
-            config=Config(signature_version="s3v4", retries={"max_attempts": 3}),
+            config=Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 3},
+                # Cloudflare R2 (and several Hippius gateways) require path-
+                # style addressing. boto3 defaults to virtual-host, which
+                # rewrites the SNI to `<bucket>.<endpoint>` and trips an
+                # SSL handshake failure on R2's account-scoped wildcard.
+                s3={"addressing_style": "path"},
+            ),
         )
         return self._client
 
