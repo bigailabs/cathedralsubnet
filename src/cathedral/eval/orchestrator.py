@@ -516,17 +516,38 @@ async def _run_once_async() -> int:
     def runner_for(submission: dict[str, Any]) -> PolarisRunner:
         mode = (submission.get("attestation_mode") or "").lower()
         env_mode = _os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
-        # If the global env explicitly picks a stub/test runner, that wins
-        # so test fixtures keep behaving identically.
+        has_polaris_key = bool(_os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"))
         if env_mode.startswith("stub"):
-            return _resolve_polaris_runner_from_env()
-        if mode == "polaris" and _os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"):
-            return _resolve_polaris_runner_for_mode("polaris")
+            r = _resolve_polaris_runner_from_env()
+            logger.info(
+                "runner_dispatch", submission_id=submission.get("id"),
+                attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
+                reason="stub-env-wins",
+            )
+            return r
+        if mode == "polaris" and has_polaris_key:
+            r = _resolve_polaris_runner_for_mode("polaris")
+            logger.info(
+                "runner_dispatch", submission_id=submission.get("id"),
+                attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
+                reason="polaris-tier",
+            )
+            return r
         if mode == "tee":
-            # Tier B+ TEE submissions are pre-verified at submit time;
-            # the eval pipeline only needs the bundled card.
-            return _resolve_polaris_runner_for_mode("bundle")
-        return _resolve_polaris_runner_from_env()
+            r = _resolve_polaris_runner_for_mode("bundle")
+            logger.info(
+                "runner_dispatch", submission_id=submission.get("id"),
+                attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
+                reason="tee-pre-verified",
+            )
+            return r
+        r = _resolve_polaris_runner_from_env()
+        logger.info(
+            "runner_dispatch", submission_id=submission.get("id"),
+            attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
+            reason="env-fallback", polaris_key_present=has_polaris_key,
+        )
+        return r
 
     orch = EvalOrchestrator(
         db=ctx.db,
