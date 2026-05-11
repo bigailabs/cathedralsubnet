@@ -63,7 +63,7 @@ miner ─sign+POST─▶ cathedral publisher (Railway)
 
 ## Repositories + commits
 
-- **cathedralsubnet** main: `9bfaa03` (runtime v1.0.6)
+- **cathedral** main: `9bfaa03` (runtime v1.0.6)
 - **cathedral-site** main: includes PR #91 (design kit reskin)
 - **polariscomputer** main: includes #941 (trusted-service + runtime-evaluate) + #942 (TTL env) + #943 (force-evaluate)
 
@@ -72,7 +72,7 @@ miner ─sign+POST─▶ cathedral publisher (Railway)
 | Item | Severity | Notes |
 |---|---|---|
 | 1 verified card scored 0 due to LLM emitting action_notes as a list | low | Fixed in runtime v1.0.6; new submissions round-trip cleanly |
-| Africa card not yet seeded | tracked | https://github.com/bigailabs/cathedralsubnet/issues/24 |
+| Africa card not yet seeded | tracked | https://github.com/bigailabs/cathedral/issues/24 |
 | TEE attestation flow is spec-only | by design | no live TEE miners yet |
 | Plans page rubrics blank | by design | "RUBRIC PENDING" placeholders; Fred to fill |
 | Validator chain weights / on-chain Merkle anchor | not wired tonight | publisher signs each eval_run; on-chain anchoring is next ship |

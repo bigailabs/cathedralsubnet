@@ -12,8 +12,8 @@ You operate a Polaris-hosted Hermes worker that maintains one regulatory card. C
 ## Install
 
 ```bash
-git clone https://github.com/bigailabs/cathedralsubnet
-cd cathedralsubnet
+git clone https://github.com/bigailabs/cathedral
+cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .

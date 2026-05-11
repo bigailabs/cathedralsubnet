@@ -1,4 +1,4 @@
-# Adversarial findings — cathedralsubnet v1
+# Adversarial findings — cathedral v1
 
 Reviewer: Team A adversarial agent
 Branch: `feature/v1-launch` (committed: 7 commits including #7 inline cards;

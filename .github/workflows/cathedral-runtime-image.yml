@@ -52,4 +52,4 @@ jobs:
           labels: |
             org.opencontainers.image.title=cathedral-runtime
             org.opencontainers.image.version=${{ steps.version.outputs.value }}
-            org.opencontainers.image.source=https://github.com/bigailabs/cathedralsubnet
+            org.opencontainers.image.source=https://github.com/bigailabs/cathedral
