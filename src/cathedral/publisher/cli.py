@@ -157,7 +157,7 @@ def seed_cards(
 def load_eval_spec(
     database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
     repo_url: str = typer.Option(
-        "https://raw.githubusercontent.com/bigailabs/cathedral-eval-spec/main",
+        "https://raw.githubusercontent.com/cathedralai/cathedral-eval-spec/main",
         "--repo-url",
         help="Base URL of the cathedral-eval-spec content (raw GitHub).",
     ),

@@ -12,7 +12,7 @@ You operate a Polaris-hosted Hermes worker that maintains one regulatory card. C
 ## Install
 
 ```bash
-git clone https://github.com/bigailabs/cathedral
+git clone https://github.com/cathedralai/cathedral
 cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate

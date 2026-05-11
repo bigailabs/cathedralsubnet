@@ -13,7 +13,7 @@ Issue #1 owns this surface. The runbook is canonical: any operator can take over
 ## Install
 
 ```bash
-git clone https://github.com/bigailabs/cathedral
+git clone https://github.com/cathedralai/cathedral
 cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate
