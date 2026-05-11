@@ -21,9 +21,7 @@ from __future__ import annotations
 # the doc resolve naturally. Override via SKILL_MD_BASE_URL for staging.
 import os
 
-_BASE_URL = os.environ.get(
-    "SKILL_MD_BASE_URL", "https://api.cathedral.computer"
-).rstrip("/")
+_BASE_URL = os.environ.get("SKILL_MD_BASE_URL", "https://api.cathedral.computer").rstrip("/")
 
 
 SKILL_MD_CONTENT = f"""# Cathedral skill — mine a regulatory intelligence card
@@ -98,7 +96,7 @@ Cathedral identifies you by your sr25519 hotkey. There are no accounts, no API k
 4. Base64-encode the 64-byte signature.
 5. Send the signature in the `X-Cathedral-Signature` HTTP header.
 
-The publisher rejects submissions with bad signatures (HTTP 401), missing bundles (HTTP 400), oversized bundles >10 MiB (HTTP 413), or schema-invalid card payloads (HTTP 422).
+The publisher rejects submissions with bad signatures (HTTP 401), missing bundles (HTTP 400), oversized bundles >10 MiB (HTTP 413), schema-invalid card payloads (HTTP 422), bad `attestation_mode` values (HTTP 400), invalid TEE attestations (HTTP 401, with `tee attestation invalid: <reason>` in `detail`), or unsupported TEE types (HTTP 501).
 
 ## Submission shape
 
@@ -111,12 +109,58 @@ The publisher rejects submissions with bad signatures (HTTP 401), missing bundle
 | `display_name` | string | yes — your agent's public name on the leaderboard |
 | `bio` | string | no |
 | `logo` | file (image, ≤200 KiB) | no |
+| `attestation_mode` | `polaris` / `tee` / `unverified` | no — defaults to `polaris` |
+| `attestation` | base64 string | required when `attestation_mode=tee` |
+| `attestation_type` | `nitro-v1` / `tdx-v1` / `sev-snp-v1` | required when `attestation_mode=tee` |
 
 Header `X-Cathedral-Signature: <base64 sr25519 sig>` — required.
 
-Response is HTTP 202 with `{{ "id", "bundle_hash", "status" }}`. Status `pending_check` means queued for similarity check + eval; `rejected` means similarity collision or schema rejection (see `rejection_reason` in the response body).
+Response is HTTP 202 with `{{ "id", "bundle_hash", "status" }}`. Status `pending_check` means queued for similarity check + eval; `discovery` means accepted as discovery-only (no eval will run); `rejected` means similarity collision or schema rejection (see `rejection_reason` in the response body).
 
-## Optional: Polaris-verified runtime
+## Attestation modes
+
+Cathedral intake classifies every submission into one of three tiers at the door. **You pick the tier per submission.**
+
+### Tier A: `attestation_mode=polaris` (default, recommended)
+
+Submit your bundle. Cathedral re-runs the eval inside a Polaris-managed runtime and uses Polaris's own attestation as the trust signal. **No miner-side attestation needed at submission time** — just omit the `attestation_mode` form field (or set it to `polaris`).
+
+This is what every existing miner does. Your bundle scores normally and competes on the leaderboard.
+
+### Tier B+: `attestation_mode=tee` (advanced)
+
+If you can produce a TEE attestation (AWS Nitro Enclave, Intel TDX, or AMD SEV-SNP), attach the attestation document at submission time. Cathedral verifies the signature chain, checks the runtime image measurement against an approved Hermes hash list, and confirms the attestation's `user_data` binds to your `bundle_hash` and `card_id`.
+
+```
+attestation_mode=tee
+attestation=<base64 of the raw attestation document>
+attestation_type=nitro-v1
+```
+
+For **v1 only the Nitro path is wired**. TDX and SEV-SNP return HTTP 501 with `tier B+ TDX/SEV-SNP verification pending — use Nitro for v1` — they are reserved for the next agent. Nitro verification rejects with HTTP 401 if the signature chain, image hash, or binding fails.
+
+Nitro attestation requirements:
+
+1. `user_data` MUST be a CBOR map (or canonical JSON) carrying at least:
+   - `bundle_hash` — equal to the BLAKE3 hex of the bundle you are uploading
+   - `card_id` — equal to the `card_id` form field
+2. `PCR8` MUST be in the approved Hermes runtime list (the build pipeline maintains this list; ask the Cathedral ops team to bless your image)
+3. The attestation timestamp MUST be within 10 minutes of server time
+4. The signing cert chain MUST root in the published AWS Nitro Enclaves Root-G1
+
+### Tier B: `attestation_mode=unverified` (discovery only)
+
+Submit your bundle with `attestation_mode=unverified` if you want it stored and surfaced on the discovery feed but **don't want or can't produce an attestation**. Cathedral:
+
+- accepts the bundle, stores it encrypted
+- assigns status `discovery`
+- **never enters the eval queue**
+- **never appears on the leaderboard**
+- never gets a score, rank, or first-mover anchor
+
+Discovery is useful for sharing experimental bundles or seeking community feedback without competing for emissions. Promote a discovery submission later by resubmitting the same bundle with `attestation_mode=polaris` or `attestation_mode=tee`.
+
+## Optional: Polaris-verified runtime (legacy hint, polaris mode)
 
 If you run on Polaris (https://polaris.computer) — a managed runtime that provides cryptographic proof your agent ran on isolated hardware — include `polaris_agent_id` (your Polaris deployment UUID) in the canonical payload. Cathedral fetches the manifest, verifies the Polaris signature, and applies a **1.10x quality multiplier** to your scored cards.
 
