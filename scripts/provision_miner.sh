@@ -112,7 +112,7 @@ module.exports = {
     script: "docker",
     args: [
       "run", "--rm", "--name", "cathedral-probe",
-      "-p", `${process.env.CATHEDRAL_PROBE_PORT || 8088}:8088`,
+      "-p", `${process.env.CATHEDRAL_PROBE_PORT || 8088}:8080`,
       "-v", "/etc/cathedral-probe/hotkey.json:/etc/cathedral-probe/hotkey.json:ro",
       "-v", "/var/lib/cathedral-probe/traces:/var/lib/cathedral-probe/traces",
       "-e", "CATHEDRAL_PROBE_MODE=true",
