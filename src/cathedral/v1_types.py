@@ -194,12 +194,25 @@ class CardDefinition(BaseModel):
 # --------------------------------------------------------------------------
 
 
+_SIGNATURE_EXCLUDED_KEYS = frozenset(
+    {
+        "signature",
+        "cathedral_signature",
+        # `merkle_epoch` is set AFTER signing by the weekly merkle close
+        # job — it must not be part of the signed bytes or every record
+        # would invalidate the moment its epoch is anchored.
+        "merkle_epoch",
+    }
+)
+
+
 def canonical_json(payload: dict[str, Any]) -> bytes:
     """Match `cathedral.types.canonical_json_for_signing` semantics.
 
-    Drops `signature` and `cathedral_signature` keys, sorts keys, no
-    whitespace, UTF-8 encoded. Used for both submission and eval-run
-    signing canonicalization (Section 4).
+    Drops `signature`, `cathedral_signature`, and `merkle_epoch` keys
+    (CRIT-7: post-signing fields are excluded from the signed bytes).
+    Sorts keys, no whitespace, UTF-8 encoded. Used for both submission
+    and eval-run signing canonicalization (Section 4).
     """
-    body = {k: v for k, v in payload.items() if k not in ("signature", "cathedral_signature")}
+    body = {k: v for k, v in payload.items() if k not in _SIGNATURE_EXCLUDED_KEYS}
     return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")

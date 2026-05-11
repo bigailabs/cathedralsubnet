@@ -45,26 +45,28 @@ class PullVerificationError(Exception):
 def verify_eval_run_signature(
     eval_run: dict[str, Any], public_key: Ed25519PublicKey
 ) -> None:
-    """Verify cathedral_signature over canonical_json(eval_run - sig).
+    """Verify cathedral_signature over the canonical EvalOutput projection.
 
-    Raises `PullVerificationError` on failure.
+    CRIT-7: prior versions verified over a storage-shaped dict that the
+    publisher does not actually sign. The publisher signs the public
+    EvalOutput projection (CONTRACTS.md §1.10 + L8); this function
+    tolerates being called with either:
+
+    * the public EvalOutput projection (preferred / wire shape), or
+    * a legacy storage-shaped dict that has a nested ``output_card_json``,
+
+    and in both cases verifies against the canonical wire bytes the
+    publisher signed. Any extra/storage-only keys are dropped before
+    verification so the byte-exact projection is reconstructed.
+
+    Raises ``PullVerificationError`` on failure.
     """
-    sig_b64 = eval_run.get("cathedral_signature")
-    if not sig_b64:
-        raise PullVerificationError("missing cathedral_signature")
-    try:
-        sig = base64.b64decode(sig_b64)
-    except (ValueError, TypeError) as e:
-        raise PullVerificationError(f"signature base64 invalid: {e}") from e
-
-    payload_dict = {
-        k: v for k, v in eval_run.items() if k != "cathedral_signature"
-    }
-    payload = canonical_json(payload_dict)
-    try:
-        public_key.verify(sig, payload)
-    except InvalidSignature as e:
-        raise PullVerificationError("invalid cathedral signature") from e
+    projection = _to_eval_output_projection(eval_run)
+    if projection is None:
+        raise PullVerificationError(
+            "eval-run dict missing fields needed to reconstruct EvalOutput"
+        )
+    verify_eval_output_signature(projection, public_key)
 
 
 async def upsert_pulled_eval(
@@ -194,25 +196,24 @@ async def run_pull_loop(
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                # The shipped EvalOutput shape carries the eval-run record
-                # plus agent context — we re-build the signed payload by
-                # extracting the fields used in scoring_pipeline.
-                rebuilt = _rebuild_signed_payload(item)
-                if rebuilt is None:
-                    logger.warning("pull_eval_record_malformed", item_id=item.get("id"))
-                    continue
+                # CRIT-7: verify the cathedral signature directly against
+                # the public EvalOutput projection — the publisher signs
+                # the projection (see scoring_pipeline.score_and_sign), so
+                # rebuilding a different storage-shaped dict and verifying
+                # that always fails. `merkle_epoch` is excluded from the
+                # signed bytes via canonical_json.
                 try:
-                    verify_eval_run_signature(rebuilt, cathedral_public_key)
+                    verify_eval_output_signature(item, cathedral_public_key)
                 except PullVerificationError as e:
                     logger.warning(
-                        "pull_eval_signature_invalid", id=rebuilt.get("id"), error=str(e)
+                        "pull_eval_signature_invalid", id=item.get("id"), error=str(e)
                     )
                     continue
 
                 hotkey = _hotkey_for(item)
                 if not hotkey:
                     continue
-                await upsert_pulled_eval(conn, eval_run=rebuilt, miner_hotkey=hotkey)
+                await upsert_pulled_eval(conn, eval_run=item, miner_hotkey=hotkey)
                 persisted += 1
 
             if items:
@@ -230,40 +231,65 @@ async def run_pull_loop(
             await _sleep_or_stop(stop, interval_secs)
 
 
-def _rebuild_signed_payload(eval_output: dict[str, Any]) -> dict[str, Any] | None:
-    """Re-derive the dict that was signed.
+def _to_eval_output_projection(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Coerce a record into the canonical wire EvalOutput projection.
 
-    The publisher's `_eval_run_to_output` projects `EvalRun` into a
-    public-facing shape that flattens the agent context. We invert that
-    by pulling the original signed fields from the projection (the
-    publisher emits them under their original names).
+    CRIT-7: the publisher signs the public EvalOutput shape
+    (CONTRACTS.md §1.10 + locked decision L8). The validator must
+    verify against the SAME byte-exact projection that was signed.
+
+    Accepts either:
+    * a public EvalOutput dict — passed through as-is (only required
+      keys are kept; ``merkle_epoch`` is excluded from canonical bytes
+      via ``cathedral.v1_types.canonical_json`` regardless), or
+    * a legacy storage-shaped dict with ``output_card_json`` + the
+      flat agent fields — fields are renamed to the wire shape.
+
+    Returns ``None`` if neither shape can be reconstructed (caller
+    should reject the record).
     """
-    needed = ("id", "agent_id", "card_id", "weighted_score", "ran_at", "cathedral_signature")
-    for k in needed:
-        if k not in eval_output:
-            return None
-
-    output_card_json = eval_output.get("output_card")
-    if not isinstance(output_card_json, dict):
+    # Wire shape carries `output_card`; storage shape carries `output_card_json`.
+    if "output_card" in record and isinstance(record["output_card"], dict):
+        output_card = record["output_card"]
+    elif "output_card_json" in record and isinstance(record["output_card_json"], dict):
+        output_card = record["output_card_json"]
+    else:
         return None
 
-    return {
-        "id": eval_output["id"],
-        "submission_id": str(eval_output["agent_id"]),
-        "epoch": eval_output.get("merkle_epoch"),
-        "round_index": eval_output.get("round_index", 0),
-        "polaris_agent_id": eval_output.get("polaris_agent_id", ""),
-        "polaris_run_id": eval_output.get("polaris_run_id", ""),
-        "task_json": eval_output.get("task_json", {}),
-        "output_card_json": output_card_json,
-        "output_card_hash": eval_output.get("output_card_hash", ""),
-        "score_parts": eval_output.get("score_parts", {}),
-        "weighted_score": eval_output["weighted_score"],
-        "ran_at": eval_output["ran_at"],
-        "duration_ms": eval_output.get("duration_ms", 0),
-        "errors": eval_output.get("errors"),
-        "cathedral_signature": eval_output["cathedral_signature"],
+    needed = ("id", "card_id", "weighted_score", "ran_at", "cathedral_signature")
+    for k in needed:
+        if k not in record:
+            return None
+
+    # `agent_id` lives at the top level on the wire; in storage it's `submission_id`.
+    agent_id = record.get("agent_id")
+    if agent_id is None:
+        agent_id = record.get("submission_id")
+    if agent_id is None:
+        return None
+
+    projection = {
+        "id": record["id"],
+        "agent_id": str(agent_id),
+        "agent_display_name": record.get("agent_display_name", ""),
+        "card_id": record["card_id"],
+        "output_card": output_card,
+        "output_card_hash": record.get("output_card_hash", ""),
+        "weighted_score": record["weighted_score"],
+        "ran_at": record["ran_at"],
+        "cathedral_signature": record["cathedral_signature"],
+        "merkle_epoch": record.get("merkle_epoch"),
     }
+    return projection
+
+
+def _rebuild_signed_payload(eval_output: dict[str, Any]) -> dict[str, Any] | None:
+    """Re-derive the dict that was signed (wire EvalOutput projection).
+
+    Backward-compat shim — delegates to :func:`_to_eval_output_projection`.
+    See CRIT-7 note in :func:`verify_eval_run_signature`.
+    """
+    return _to_eval_output_projection(eval_output)
 
 
 def _hotkey_for(eval_output: dict[str, Any]) -> str | None:

@@ -32,20 +32,36 @@ from cathedral.types import canonical_json_for_signing
 
 
 def make_signed_eval_output(sk: Ed25519PrivateKey, *, idx: int = 0) -> dict[str, Any]:
-    """Build a contract-shaped EvalOutput (§1.10) signed by the fake cathedral."""
-    payload = {
+    """Build a contract-shaped EvalOutput (§1.10 + L8) signed by the fake cathedral.
+
+    The signature covers the immutable projection. `merkle_epoch` is appended
+    after signing — it gets populated by the weekly merkle close job and
+    therefore cannot be part of the bytes the cathedral signs (CRIT-7).
+    `output_card_hash` IS in the signed bytes (locked decision L8 — frontend
+    + validators rely on it as the visible trust-chain anchor).
+    """
+    output_card = {"id": "eu-ai-act", "topic": "demo"}
+    import blake3 as _blake3
+    import json as _json
+
+    output_card_hash = _blake3.blake3(
+        _json.dumps(output_card, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    signed = {
         "id": f"00000000-0000-4000-8000-{idx:012d}",
         "agent_id": f"11111111-1111-4111-8111-{idx:012d}",
         "agent_display_name": f"Agent {idx}",
         "card_id": "eu-ai-act",
-        "output_card": {"id": "eu-ai-act", "topic": "demo"},
+        "output_card": output_card,
+        "output_card_hash": output_card_hash,
         "weighted_score": 0.5 + 0.01 * idx,
         "ran_at": "2026-05-10T12:00:00.000Z",
-        "merkle_epoch": None,
     }
-    blob = canonical_json_for_signing(payload)
+    blob = canonical_json_for_signing(signed)
     sig = base64.b64encode(sk.sign(blob)).decode("ascii")
+    payload = dict(signed)
     payload["cathedral_signature"] = sig
+    payload["merkle_epoch"] = None  # post-anchor metadata, NOT in signed bytes
     return payload
 
 
@@ -261,3 +277,39 @@ def _find_pull_runner(mod) -> Callable | None:
         if callable(fn):
             return fn
     return None
+
+
+# --------------------------------------------------------------------------
+# CRIT-7 regression — sign + verify round-trip across both code paths
+# --------------------------------------------------------------------------
+
+
+def test_legacy_verify_accepts_wire_shape_records(pull_loop_module):
+    """CRIT-7: ``verify_eval_run_signature`` (legacy entry point) must
+    verify against the same canonical wire EvalOutput projection that the
+    publisher's :func:`scoring_pipeline.score_and_sign` signs.
+
+    Prior to the fix the legacy verifier reconstructed a storage-shaped
+    dict and compared bytes against the wire shape — guaranteed to
+    diverge → ``InvalidSignature`` for every legitimate record →
+    validator pull loop persists nothing → ZERO weights set on chain.
+    """
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+
+    record = make_signed_eval_output(sk, idx=42)
+
+    pull_loop_module.verify_eval_output_signature(record, pk)
+    pull_loop_module.verify_eval_run_signature(record, pk)
+
+
+def test_legacy_verify_rejects_tampered_record(pull_loop_module):
+    """CRIT-7: tampering must still fail on the legacy verifier path."""
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+
+    record = make_signed_eval_output(sk, idx=7)
+    record["weighted_score"] = 0.99
+
+    with pytest.raises(pull_loop_module.PullVerificationError):
+        pull_loop_module.verify_eval_run_signature(record, pk)
