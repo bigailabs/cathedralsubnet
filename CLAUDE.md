@@ -18,7 +18,7 @@ Miners submit Polaris identifiers (agent, deployment, run, artifact). The valida
 
 If a request implies any of the above, push back. They are explicitly parked.
 
-## Active stories (mirrors github.com/bigailabs/cathedral issues)
+## Active stories (mirrors github.com/cathedralai/cathedral issues)
 
 - **#2** Verify Polaris worker evidence by identifier — `cathedral.evidence`, `cathedral.validator.worker`
 - **#3** Regulatory cards useful and verifiable — `cathedral.cards`
@@ -50,5 +50,5 @@ If a request implies any of the above, push back. They are explicitly parked.
 
 - Branch from `main` with `feature/`, `fix/`, `docs/` prefixes
 - Never push to main directly
-- Reference issue numbers when applicable (cross-repo: `bigailabs/cathedral#2`)
+- Reference issue numbers when applicable (cross-repo: `cathedralai/cathedral#2`)
 - Never add AI attribution to commits or PRs

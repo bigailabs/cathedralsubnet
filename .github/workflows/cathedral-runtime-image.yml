@@ -47,9 +47,9 @@ jobs:
           push: true
           build-args: CATHEDRAL_RUNTIME_VERSION=${{ steps.version.outputs.value }}
           tags: |
-            ghcr.io/bigailabs/cathedral-runtime:${{ steps.version.outputs.value }}
-            ghcr.io/bigailabs/cathedral-runtime:latest
+            ghcr.io/cathedralai/cathedral-runtime:${{ steps.version.outputs.value }}
+            ghcr.io/cathedralai/cathedral-runtime:latest
           labels: |
             org.opencontainers.image.title=cathedral-runtime
             org.opencontainers.image.version=${{ steps.version.outputs.value }}
-            org.opencontainers.image.source=https://github.com/bigailabs/cathedral
+            org.opencontainers.image.source=https://github.com/cathedralai/cathedral

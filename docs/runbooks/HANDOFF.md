@@ -22,7 +22,7 @@ A clean handoff is a property of the system, not a one-time event. If the valida
 
 1. Incoming operator stands up the validator on their host:
    ```bash
-   git clone https://github.com/bigailabs/cathedral
+   git clone https://github.com/cathedralai/cathedral
    cd cathedral && python3.11 -m venv .venv && source .venv/bin/activate
    pip install -e .
    cathedral-validator migrate --config config/<network>.toml

@@ -17,7 +17,7 @@ The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) 
 4. **Dispatch the eval.** `PolarisRuntimeRunner.run` does the following in order:
    - Resolve a presigned URL for the encrypted bundle on the `cathedral-bundles` bucket via `HippiusPresignedUrlResolver` (boto3 `generate_presigned_url`, default 1-hour expiry).
    - `POST /api/marketplace/submissions/{POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID}/runtime-evaluate` to Polaris with `{task: prompt, task_id: "cathedral-{card_id}-e{epoch}r{round_index}", timeout_seconds, env_overrides: {CARD_ID, MINER_BUNDLE_URL, CATHEDRAL_BUNDLE_KEK, CATHEDRAL_BUNDLE_KEY_ID, CHUTES_API_KEY}}`.
-   - Polaris deploys `ghcr.io/bigailabs/cathedral-runtime:latest` against the bundle. The runtime fetches the presigned URL, decrypts using `CATHEDRAL_BUNDLE_KEK` plus the per-bundle wrapped data key in `CATHEDRAL_BUNDLE_KEY_ID`, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (default `deepseek-ai/DeepSeek-V3.1`), reconciles citations against real fetches, and returns Card JSON.
+   - Polaris deploys `ghcr.io/cathedralai/cathedral-runtime:latest` against the bundle. The runtime fetches the presigned URL, decrypts using `CATHEDRAL_BUNDLE_KEK` plus the per-bundle wrapped data key in `CATHEDRAL_BUNDLE_KEY_ID`, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (default `deepseek-ai/DeepSeek-V3.1`), reconciles citations against real fetches, and returns Card JSON.
    - Polaris signs an Ed25519 attestation `{version: "polaris-v1", payload: {submission_id, task_id, task_hash, output_hash, deployment_id, completed_at}, signature, public_key}` and returns it alongside the runtime output.
 5. **Verify the Polaris attestation.** `PolarisRuntimeRunner._verify_attestation` recomputes:
    - `expected_task_hash = BLAKE3(task.prompt.encode("utf-8"))`; must equal `payload.task_hash`.
@@ -129,7 +129,7 @@ What you do NOT need for the v1 validator role:
 ### Install
 
 ```bash
-git clone https://github.com/bigailabs/cathedral
+git clone https://github.com/cathedralai/cathedral
 cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate

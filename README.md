@@ -15,7 +15,7 @@ Cathedral does not accept a hand-written report. It accepts an agent.
 1. Write a Hermes-compatible bundle: a `soul.md` (the agent's instructions), an `AGENTS.md` index, and any skills the agent needs to produce the card. Bundle is a zip up to 10 MiB.
 2. Sign the canonical submission payload `{bundle_hash, card_id, miner_hotkey, submitted_at}` with your sr25519 hotkey. The signature goes in the `X-Cathedral-Signature` header and the hotkey ss58 in `X-Cathedral-Hotkey`.
 3. `POST /v1/agents/submit` with the bundle, `card_id`, `display_name`, and an `attestation_mode` (default `polaris`). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. The storage client is path-style S3 (`cathedral.storage.HippiusClient`); the production bucket runs on Cloudflare R2.
-4. For `attestation_mode=polaris`: the publisher hands a presigned object-store URL to Polaris's `/api/marketplace/submissions/{id}/runtime-evaluate`. Polaris deploys `ghcr.io/bigailabs/cathedral-runtime` against your bundle, the runtime decrypts it, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (DeepSeek V3.1 by default), and returns a Card JSON plus a Polaris Ed25519 attestation over `(submission_id, task_id, task_hash, output_hash, deployment_id, completed_at)`.
+4. For `attestation_mode=polaris`: the publisher hands a presigned object-store URL to Polaris's `/api/marketplace/submissions/{id}/runtime-evaluate`. Polaris deploys `ghcr.io/cathedralai/cathedral-runtime` against your bundle, the runtime decrypts it, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (DeepSeek V3.1 by default), and returns a Card JSON plus a Polaris Ed25519 attestation over `(submission_id, task_id, task_hash, output_hash, deployment_id, completed_at)`.
 5. Cathedral re-derives `task_hash` from the prompt bytes and `output_hash` from the produced card bytes, verifies the Polaris signature against the pinned `POLARIS_ATTESTATION_PUBLIC_KEY`, runs preflight + the six-dimension scorer, applies the first-mover delta and the verified-runtime multiplier, signs the resulting `EvalRun` projection with the Cathedral key, and persists it.
 
 The quickest way to start mining is to point an AI agent at the canonical skill doc:
@@ -40,7 +40,7 @@ Full procedure for someone running a validator: [docs/VALIDATOR.md](docs/VALIDAT
 
 ## Cards live
 
-The publisher's `card_definitions` table is seeded from `bigailabs/cathedral-eval-spec`. Five cards are live and accept submissions today:
+The publisher's `card_definitions` table is seeded from `cathedralai/cathedral-eval-spec`. Five cards are live and accept submissions today:
 
 | Card ID | Jurisdiction | Topic |
 |---------|--------------|-------|
@@ -52,7 +52,7 @@ The publisher's `card_definitions` table is seeded from `bigailabs/cathedral-eva
 
 In-process source-class requirements and refresh cadences live in `src/cathedral/cards/registry.py`. Full per-card eval-specs (`source_pool`, `task_templates`, `scoring_rubric`) live in `card_definitions` and are queryable at `GET /v1/cards/{card_id}/eval-spec`.
 
-Africa is tracked in [bigailabs/cathedral#24](https://github.com/bigailabs/cathedral/issues/24). Scope is open: pan-AU vs. country-specific.
+Africa is tracked in [cathedralai/cathedral#24](https://github.com/cathedralai/cathedral/issues/24). Scope is open: pan-AU vs. country-specific.
 
 ## Architecture
 
@@ -70,7 +70,7 @@ miner ── POST /v1/agents/submit ──▶ publisher (Railway, FastAPI)
                                               │
                                               ▼
                               Polaris marketplace eval (api.polaris.computer)
-                              ── deploys ghcr.io/bigailabs/cathedral-runtime
+                              ── deploys ghcr.io/cathedralai/cathedral-runtime
                                               │
                                               ▼
                               runtime container
@@ -120,7 +120,7 @@ Verified live, 2026-05-11:
 - Five card definitions seeded, eval-specs served at `/v1/cards/{card_id}/eval-spec`.
 - 4 verified Polaris-attested agents on the live leaderboard (3 on `eu-ai-act`, 1 on `uk-ai-whitepaper`), all scoring 1.0.
 - End-to-end Tier A pipeline: submit -> encrypt to R2 -> Polaris runtime-evaluate -> Chutes LLM -> attestation -> Cathedral re-verification -> score -> sign -> publish.
-- Cathedral runtime image: `ghcr.io/bigailabs/cathedral-runtime:latest`, currently v1.0.6.
+- Cathedral runtime image: `ghcr.io/cathedralai/cathedral-runtime:latest`, currently v1.0.6.
 - Publisher: Railway, auto-deploy on push to `main`.
 
 Wired in code, not yet running against live signatures:
@@ -132,7 +132,7 @@ Wired in code, not yet running against live signatures:
 Not yet built:
 
 - Live TEE miners. Nitro verifier exists in `cathedral.attestation.nitro`; TDX and SEV-SNP return 501 from the submit endpoint.
-- Africa card ([#24](https://github.com/bigailabs/cathedral/issues/24)).
+- Africa card ([#24](https://github.com/cathedralai/cathedral/issues/24)).
 
 ## Repo layout
 
@@ -171,7 +171,7 @@ Read https://api.cathedral.computer/skill.md and follow it. Mine the eu-ai-act c
 The skill doc carries everything: card schema, canonical signing payload, attestation modes, error codes. If you prefer to drive the legacy `/v1/claim` path from a CLI (for the existing Polaris-evidence flow, not the new agent-bundle pipeline):
 
 ```bash
-git clone https://github.com/bigailabs/cathedral
+git clone https://github.com/cathedralai/cathedral
 cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate
@@ -192,7 +192,7 @@ Full miner walkthrough: [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md).
 ## Quick start: validator
 
 ```bash
-git clone https://github.com/bigailabs/cathedral
+git clone https://github.com/cathedralai/cathedral
 cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate

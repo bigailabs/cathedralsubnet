@@ -7,7 +7,7 @@
 # provider, and returns a Card JSON.
 #
 # Built by .github/workflows/cathedral-runtime-image.yml and pushed to
-# ghcr.io/bigailabs/cathedral-runtime:<version>. Bump
+# ghcr.io/cathedralai/cathedral-runtime:<version>. Bump
 # `CATHEDRAL_RUNTIME_VERSION` below to cut a new release.
 
 FROM python:3.12-slim
