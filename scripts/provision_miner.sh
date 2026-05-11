@@ -35,29 +35,28 @@ if [[ ! -f "${MINER_HOTKEY_JSON_PATH}" ]]; then
 fi
 
 echo "==> step 1: install docker + nodejs + npm if missing"
+# Polaris boxes often ship docker-ce (not docker.io); detect by binary
+# presence rather than package name to avoid containerd vs containerd.io
+# repo conflicts. Node/npm same: detect by binary.
 NEED_APT_UPDATE=0
-need_pkg() {
-  # dpkg-query exits non-zero when the package isn't installed; cheaper than
-  # forcing `apt-get install` every run.
-  if ! dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; then
-    return 0
-  fi
-  return 1
-}
-
 MISSING_PKGS=()
-for pkg in docker.io nodejs npm; do
-  if need_pkg "${pkg}"; then
-    MISSING_PKGS+=("${pkg}")
-  fi
-done
+if ! command -v docker >/dev/null 2>&1; then
+  MISSING_PKGS+=("docker.io")
+fi
+if ! command -v node >/dev/null 2>&1; then
+  MISSING_PKGS+=("nodejs")
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  MISSING_PKGS+=("npm")
+fi
 
 if (( ${#MISSING_PKGS[@]} > 0 )); then
+  echo "    installing: ${MISSING_PKGS[*]}"
   NEED_APT_UPDATE=1
   sudo apt-get update
   sudo apt-get install -y "${MISSING_PKGS[@]}"
 else
-  echo "    docker.io, nodejs, npm already installed - skipping apt"
+  echo "    docker, node, npm already present - skipping apt"
 fi
 
 echo "==> step 2: ensure ${PROBE_USER} user exists"
@@ -91,6 +90,13 @@ sudo install -o "${PROBE_USER}" -g "${PROBE_USER}" -m 0600 \
   "${MINER_HOTKEY_JSON_PATH}" "${PROBE_HOTKEY_DST}"
 
 echo "==> step 5: docker pull ${RUNTIME_IMAGE}"
+# If the registry is private, the operator must pass GHCR_USERNAME +
+# GHCR_TOKEN (or have already run `docker login` on this box). Login is
+# idempotent and skipped when both env vars are absent.
+if [[ -n "${GHCR_TOKEN:-}" && -n "${GHCR_USERNAME:-}" ]]; then
+  echo "    logging in to ghcr.io as ${GHCR_USERNAME}"
+  echo "${GHCR_TOKEN}" | sudo docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin >/dev/null
+fi
 sudo docker pull "${RUNTIME_IMAGE}"
 
 echo "==> step 6: write ${PROBE_ECOSYSTEM}"
@@ -140,23 +146,21 @@ else
 fi
 
 echo "==> step 9: start the probe under pm2 as ${PROBE_USER}"
-# pm2 does not have a --env-file flag, so we source probe.env into the
-# subshell that runs `pm2 start`. PM2 captures the process env at start
-# time, which is exactly what the ecosystem's process.env reads expect.
-# If the app already exists, restart it so config changes take effect.
-if sudo -u "${PROBE_USER}" -H pm2 list 2>/dev/null | grep -q "cathedral-probe"; then
-  sudo -u "${PROBE_USER}" -H bash -c "set -a; . '${PROBE_ENV_FILE}'; set +a; pm2 restart '${PROBE_ECOSYSTEM}' --update-env"
+# `sudo -iu` (login shell) is required: plain `sudo -u` inherits the parent
+# shell's stdio fds and pm2's node daemon fails to spawn with EACCES.
+# pm2 has no --env-file flag, so source probe.env into the subshell before
+# `pm2 start`. PM2 captures the process env at start time, matching what
+# the ecosystem's `process.env` reads expect.
+if sudo -iu "${PROBE_USER}" pm2 list 2>/dev/null | grep -q "cathedral-probe"; then
+  sudo -iu "${PROBE_USER}" bash -c "set -a; . '${PROBE_ENV_FILE}'; set +a; pm2 restart '${PROBE_ECOSYSTEM}' --update-env"
 else
-  sudo -u "${PROBE_USER}" -H bash -c "set -a; . '${PROBE_ENV_FILE}'; set +a; pm2 start '${PROBE_ECOSYSTEM}'"
+  sudo -iu "${PROBE_USER}" bash -c "set -a; . '${PROBE_ENV_FILE}'; set +a; pm2 start '${PROBE_ECOSYSTEM}'"
 fi
 
 echo "==> step 10: pm2 save"
-sudo -u "${PROBE_USER}" -H pm2 save
+sudo -iu "${PROBE_USER}" pm2 save
 
 echo "==> step 11: pm2 startup (idempotent)"
-# `pm2 startup` is idempotent - if the systemd unit is already installed it
-# prints "already inited" and exits 0. Run it unconditionally so a
-# freshly-provisioned box always gets boot persistence.
 sudo env "PATH=${PATH}:/usr/bin" pm2 startup systemd -u "${PROBE_USER}" --hp "${PROBE_HOME}"
 
 cat <<EOF
@@ -169,11 +173,11 @@ is pulled, /probe/health will 404 - that is expected and not a sign of
 broken provisioning.
 
 To verify supervision:
-    sudo -u ${PROBE_USER} pm2 status
-    sudo -u ${PROBE_USER} pm2 logs cathedral-probe --lines 100
+    sudo -iu ${PROBE_USER} pm2 status
+    sudo -iu ${PROBE_USER} pm2 logs cathedral-probe --lines 100
 
 To bump the runtime tag:
     sudo sed -i 's/^CATHEDRAL_RUNTIME_TAG=.*/CATHEDRAL_RUNTIME_TAG=v1.0.X/' ${PROBE_ENV_FILE}
     sudo docker pull ghcr.io/cathedralai/cathedral-runtime:v1.0.X
-    sudo -u ${PROBE_USER} -H bash -c "set -a; . '${PROBE_ENV_FILE}'; set +a; pm2 restart cathedral-probe --update-env"
+    sudo -iu ${PROBE_USER} bash -c "set -a; . '${PROBE_ENV_FILE}'; set +a; pm2 restart cathedral-probe --update-env"
 EOF
