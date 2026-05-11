@@ -375,10 +375,16 @@ async def get_health(request: Request) -> dict[str, Any]:
 
 
 def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, Any]:
-    """Build the public EvalOutput projection (CONTRACTS.md §1.10).
+    """Build the public EvalOutput projection (CONTRACTS.md §1.10 + L8).
 
     Field order is the publication order — keys matter to clients but not
     to canonical-JSON signing (which sorts internally).
+
+    `output_card_hash` is included per locked decision L8: frontend renders
+    it as the visible trust-chain anchor, and validators verify the
+    cathedral signature against the same byte-exact projection (CRIT-7).
+    `merkle_epoch` is post-anchor metadata; it is NOT covered by the
+    cathedral signature (see `cathedral.v1_types.canonical_json`).
     """
     return {
         "id": run["id"],
@@ -386,6 +392,7 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
         "agent_display_name": sub["display_name"],
         "card_id": sub["card_id"],
         "output_card": run["output_card_json"],
+        "output_card_hash": run["output_card_hash"],
         "weighted_score": run["weighted_score"],
         "ran_at": run["ran_at"],
         "cathedral_signature": run["cathedral_signature"],

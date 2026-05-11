@@ -64,7 +64,13 @@ class _LeaderboardEntry(BaseModel):
 
 
 class _EvalOutput(BaseModel):
-    """Mirrors §1.10 `EvalOutput`."""
+    """Mirrors §1.10 `EvalOutput` + locked decision L8.
+
+    `output_card_hash` is REQUIRED in the public projection (L8): the
+    frontend renders it as the visible trust-chain anchor and validators
+    use it to verify the cathedral signature against the byte-exact card
+    that was scored.
+    """
 
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -72,6 +78,7 @@ class _EvalOutput(BaseModel):
     agent_display_name: str
     card_id: str
     output_card: dict[str, Any]
+    output_card_hash: str
     weighted_score: float
     ran_at: str
     cathedral_signature: str
