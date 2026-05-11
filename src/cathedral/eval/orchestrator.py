@@ -359,6 +359,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
     import os
 
     from cathedral.eval.polaris_runner import (
+        BundleCardRunner,
         FailingStubPolarisRunner,
         HttpPolarisRunner,
         HttpPolarisRunnerConfig,
@@ -373,6 +374,8 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         return MalformedStubPolarisRunner()
     if mode.startswith("stub"):
         return StubPolarisRunner()
+    if mode == "bundle":
+        return BundleCardRunner()
     return HttpPolarisRunner(
         HttpPolarisRunnerConfig(
             base_url=os.environ.get(

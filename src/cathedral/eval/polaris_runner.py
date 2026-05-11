@@ -14,11 +14,20 @@ a `HttpPolarisRunner` once Polaris ships the container-runner endpoint.
 When `CATHEDRAL_EVAL_MODE=stub`, the orchestrator wires `StubPolarisRunner`
 which fabricates a card from the task — useful for end-to-end smoke
 tests before the real Polaris endpoint exists.
+
+When `CATHEDRAL_EVAL_MODE=bundle`, the orchestrator wires
+`BundleCardRunner`, the BYO-compute path: the miner already ran their
+agent, baked the resulting Card JSON into the bundle at
+`artifacts/last-card.json`, and the publisher's job is just to read +
+score it. No Polaris call, no fabrication.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
+import json
+import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -183,6 +192,122 @@ class MalformedStubPolarisRunner:
             },
             duration_ms=5,
             errors=["malformed card from stub-bad-card mode"],
+        )
+
+
+# --------------------------------------------------------------------------
+# BYO-compute runner — score the miner's pre-baked card from the bundle
+# --------------------------------------------------------------------------
+
+
+# Bundle paths the miner is allowed to use for the pre-baked card. Order
+# matters: the first match wins. `artifacts/last-card.json` is the
+# canonical Hermes convention (matches the test miner script); `card.json`
+# at root is accepted as a friendlier alias for hand-crafted bundles.
+_BUNDLE_CARD_PATHS: tuple[str, ...] = (
+    "artifacts/last-card.json",
+    "card.json",
+)
+
+
+def _find_card_in_bundle(bundle_bytes: bytes) -> tuple[str, bytes] | None:
+    """Locate the miner-supplied card JSON inside a zip bundle.
+
+    Returns (member_name, raw_bytes) for the first match in
+    `_BUNDLE_CARD_PATHS`, or None if the bundle has no recognised card
+    file. Tolerates a single top-level directory prefix (matches the
+    same convention as `bundle_extractor._find_first`).
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(bundle_bytes))
+    except zipfile.BadZipFile:
+        return None
+    with zf:
+        names = {info.filename.replace("\\", "/"): info for info in zf.infolist()}
+        for candidate in _BUNDLE_CARD_PATHS:
+            if candidate in names:
+                return candidate, zf.read(names[candidate])
+            # Allow a single-directory nesting prefix, e.g.
+            # `my-agent/artifacts/last-card.json`.
+            for member, info in names.items():
+                if (
+                    member.endswith("/" + candidate)
+                    and member.count("/") == candidate.count("/") + 1
+                ):
+                    return member, zf.read(info)
+    return None
+
+
+class BundleCardRunner:
+    """Path A — score the miner's pre-baked Card JSON instead of running an eval.
+
+    Wired by `CATHEDRAL_EVAL_MODE=bundle`. The orchestrator already
+    decrypted the bundle and handed us the plaintext bytes; we look for
+    `artifacts/last-card.json` (or `card.json`), parse it as JSON, and
+    return it as the runner's output. The downstream scoring pipeline
+    runs preflight + scorer against this dict exactly as if it had come
+    from a Polaris-spawned Hermes container — the only difference is
+    that the LLM work happened on the miner's hardware.
+
+    Failure modes are signalled via `PolarisRunnerError` so the
+    orchestrator's existing retry path (CONTRACTS.md §6) handles them
+    uniformly:
+
+      - missing card file       -> PolarisRunnerError("bundle missing ...")
+      - unreadable zip          -> PolarisRunnerError("bundle not a valid zip")
+      - malformed JSON          -> PolarisRunnerError("card.json malformed: ...")
+      - non-object JSON root    -> PolarisRunnerError("card.json must be a JSON object")
+
+    After 3 such errors, the orchestrator marks the submission
+    `rejected` with `rejection_reason="polaris exhausted retries"` and
+    records a zero-score eval_run with the error list — same surface
+    behaviour as a Polaris-side failure.
+    """
+
+    def __init__(self) -> None:
+        # No I/O, no state — runner instances are cheap and stateless,
+        # matching the StubPolarisRunner contract.
+        pass
+
+    async def run(
+        self,
+        *,
+        bundle_bytes: bytes,
+        bundle_hash: str,
+        task: EvalTask,
+        miner_hotkey: str,
+    ) -> PolarisRunResult:
+        del bundle_hash, miner_hotkey  # not needed; scoring_pipeline re-pins attribution
+
+        start = datetime.now(UTC)
+        located = _find_card_in_bundle(bundle_bytes)
+        if located is None:
+            raise PolarisRunnerError(
+                f"bundle missing card file (looked for {', '.join(_BUNDLE_CARD_PATHS)})"
+            )
+        member, raw = located
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError as e:
+            raise PolarisRunnerError(f"{member} is not valid utf-8: {e}") from e
+        except json.JSONDecodeError as e:
+            raise PolarisRunnerError(f"{member} malformed: {e}") from e
+        if not isinstance(decoded, dict):
+            raise PolarisRunnerError(
+                f"{member} must be a JSON object, got {type(decoded).__name__}"
+            )
+
+        # BYO-compute path: no polaris_agent_id, no polaris_run_id (Polaris
+        # didn't run anything). scoring_pipeline.score_and_sign treats an
+        # empty polaris_agent_id as "not Polaris-verified" and skips the
+        # 1.10x runtime multiplier — that's the correct semantics here.
+        duration_ms = int((datetime.now(UTC) - start).total_seconds() * 1000)
+        return PolarisRunResult(
+            polaris_agent_id="",
+            polaris_run_id=f"bundle-{task.card_id}-e{task.epoch}r{task.round_index}",
+            output_card_json=decoded,
+            duration_ms=duration_ms,
+            errors=[],
         )
 
 

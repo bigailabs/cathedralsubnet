@@ -32,6 +32,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from cathedral.cards.registry import CardRegistry
 from cathedral.eval.orchestrator import run_eval_loop
 from cathedral.eval.polaris_runner import (
+    BundleCardRunner,
     HttpPolarisRunner,
     HttpPolarisRunnerConfig,
     PolarisRunner,
@@ -179,10 +180,15 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
     Environment variables consumed:
       CATHEDRAL_KEK_HEX or CATHEDRAL_MASTER_ENCRYPTION_KEY (32-byte hex)
       CATHEDRAL_EVAL_SIGNING_KEY (32-byte hex Ed25519 private key)
-      CATHEDRAL_EVAL_MODE (optional: "stub" enables StubPolarisRunner)
+      CATHEDRAL_EVAL_MODE (optional):
+        "stub"   -> StubPolarisRunner (placeholder card for smoke tests)
+        "bundle" -> BundleCardRunner  (BYO-compute; score miner's pre-baked
+                                       artifacts/last-card.json directly)
+        unset / other -> HttpPolarisRunner (talks to Polaris compute)
       HIPPIUS_S3_ACCESS_KEY / HIPPIUS_S3_SECRET_KEY / HIPPIUS_S3_ENDPOINT
         / HIPPIUS_S3_REGION / HIPPIUS_S3_BUCKET
-      POLARIS_BASE_URL + POLARIS_API_TOKEN (when not in stub mode)
+      POLARIS_BASE_URL + POLARIS_API_TOKEN (when CATHEDRAL_EVAL_MODE is
+        unset or points at the HTTP runner)
     """
 
     async def _factory() -> PublisherContext:
@@ -215,8 +221,11 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
         signer = EvalSigner.from_env_hex(signing_hex)
 
         polaris: PolarisRunner
-        if os.environ.get("CATHEDRAL_EVAL_MODE", "").lower() == "stub":
+        eval_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+        if eval_mode == "stub":
             polaris = StubPolarisRunner()
+        elif eval_mode == "bundle":
+            polaris = BundleCardRunner()
         else:
             polaris = HttpPolarisRunner(
                 HttpPolarisRunnerConfig(
@@ -379,6 +388,8 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
         polaris: PolarisRunner
         if eval_mode.startswith("stub"):
             polaris = _build_stub_polaris(eval_mode)
+        elif eval_mode == "bundle":
+            polaris = BundleCardRunner()
         else:
             polaris = HttpPolarisRunner(
                 HttpPolarisRunnerConfig(
