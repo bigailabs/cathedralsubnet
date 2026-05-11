@@ -4,11 +4,11 @@
 # Stands up the cathedral-runtime container under PM2 with the miner hotkey
 # mounted in and traces persisted to /var/lib/cathedral-probe/traces. The
 # probe endpoints (/probe/run, /probe/health, /probe/reload) are added by
-# Stage B.1 of BUILD_V1.md — this script just gets the container running so
+# Stage B.1 of BUILD_V1.md - this script just gets the container running so
 # those endpoints come online as soon as a runtime tag containing them is
 # pulled.
 #
-# Idempotent — safe to re-run after a tag bump or hotkey rotation.
+# Idempotent - safe to re-run after a tag bump or hotkey rotation.
 set -euo pipefail
 
 # --- Inputs ------------------------------------------------------------------
@@ -57,14 +57,14 @@ if (( ${#MISSING_PKGS[@]} > 0 )); then
   sudo apt-get update
   sudo apt-get install -y "${MISSING_PKGS[@]}"
 else
-  echo "    docker.io, nodejs, npm already installed — skipping apt"
+  echo "    docker.io, nodejs, npm already installed - skipping apt"
 fi
 
 echo "==> step 2: ensure ${PROBE_USER} user exists"
 if ! id "${PROBE_USER}" >/dev/null 2>&1; then
   sudo useradd -m -s /bin/bash "${PROBE_USER}"
 else
-  echo "    user ${PROBE_USER} already exists — skipping"
+  echo "    user ${PROBE_USER} already exists - skipping"
 fi
 
 # docker group lets the probe user run `docker run` without sudo at PM2 time.
@@ -136,7 +136,7 @@ echo "==> step 8: install pm2 globally if missing"
 if ! command -v pm2 >/dev/null 2>&1; then
   sudo npm install -g pm2
 else
-  echo "    pm2 already installed — skipping"
+  echo "    pm2 already installed - skipping"
 fi
 
 echo "==> step 9: start the probe under pm2 as ${PROBE_USER}"
@@ -154,7 +154,7 @@ echo "==> step 10: pm2 save"
 sudo -u "${PROBE_USER}" -H pm2 save
 
 echo "==> step 11: pm2 startup (idempotent)"
-# `pm2 startup` is idempotent — if the systemd unit is already installed it
+# `pm2 startup` is idempotent - if the systemd unit is already installed it
 # prints "already inited" and exits 0. Run it unconditionally so a
 # freshly-provisioned box always gets boot persistence.
 sudo env "PATH=${PATH}:/usr/bin" pm2 startup systemd -u "${PROBE_USER}" --hp "${PROBE_HOME}"
@@ -165,7 +165,7 @@ cat <<EOF
 
 Note: the /probe/run, /probe/health, and /probe/reload endpoints are added
 in Stage B.1 of BUILD_V1.md. Until a runtime image containing those routes
-is pulled, /probe/health will 404 — that is expected and not a sign of
+is pulled, /probe/health will 404 - that is expected and not a sign of
 broken provisioning.
 
 To verify supervision:
