@@ -891,8 +891,10 @@ class HippiusPresignedUrlResolver:
         bh = submission.get("bundle_hash")
         logger.info(
             "presign_resolver",
-            submission_id=submission.get("id"),
+            sub_id=submission.get("id"),
+            row_keys=sorted(submission.keys()),
             bundle_blob_key=bbk,
+            bundle_blob_key_type=type(bbk).__name__,
             bundle_hash_short=bh[:16] if isinstance(bh, str) else None,
         )
         key = bbk or bh or ""
