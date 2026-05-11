@@ -93,7 +93,15 @@ class EvalSigner:
 
 
 def card_hash(card: Card | dict[str, Any]) -> str:
-    """`blake3(canonical_json(card))` — used as the leaf input."""
+    """`blake3(canonical_json(card))` — used as the leaf input.
+
+    CRIT-8: must hash the EXACT bytes that the publisher serves (and stores
+    in `eval_runs.output_card_json`). For dict input we hash the canonical
+    serialization of the dict directly. For Card input (legacy callers /
+    tests) we render via Pydantic; that path is NOT used by the live scoring
+    pipeline — the live pipeline always passes the literal `output_card_json`
+    dict so the hash matches `blake3(canonical_json(served_output_card))`.
+    """
     if isinstance(card, Card):
         d = card.model_dump(by_alias=True, mode="json")
     else:
@@ -127,11 +135,21 @@ async def score_and_sign(
     submission_id = submission["id"]
     card_id = submission["card_id"]
 
-    # Card decode + preflight + score
+    # Card decode + preflight + score.
+    # CONTRACTS §1.4: worker_owner_hotkey, polaris_agent_id, and id are
+    # "filled by validator from claim" — they MUST come from server-trusted
+    # state and OVERRIDE anything the bundle's agent emitted (CRIT-9). Use
+    # unconditional assignment, never setdefault.
     raw_card = dict(output_card_json)
-    raw_card.setdefault("worker_owner_hotkey", miner_hotkey)
-    raw_card.setdefault("polaris_agent_id", polaris_agent_id)
-    raw_card.setdefault("id", card_id)
+    raw_card["worker_owner_hotkey"] = miner_hotkey
+    raw_card["polaris_agent_id"] = polaris_agent_id
+    raw_card["id"] = card_id
+    # Re-pin in the storage dict too so any downstream view of
+    # output_card_json sees the trusted attribution.
+    output_card_json = dict(output_card_json)
+    output_card_json["worker_owner_hotkey"] = miner_hotkey
+    output_card_json["polaris_agent_id"] = polaris_agent_id
+    output_card_json["id"] = card_id
 
     weighted_pre = 0.0
     score_dict: dict[str, Any] = {
@@ -166,17 +184,24 @@ async def score_and_sign(
     )
     weighted_final = weighted_pre * multiplier
 
-    # Compute output_card_hash + sign
-    output_card_hash = card_hash(card if card is not None else raw_card)
+    # CRIT-8: hash the literal `output_card_json` bytes that the publisher
+    # both STORES (eval_runs.output_card_json) AND SERVES (EvalOutput.output_card).
+    # Do NOT hash the Pydantic-rendered Card — Pydantic re-rendering applies
+    # defaults/normalization and yields different bytes than what gets served,
+    # making the hash externally unverifiable.
+    output_card_hash = card_hash(output_card_json)
     eval_run_id = str(uuid4())
     ran_at = datetime.now(UTC)
     ran_at_iso = _ms_iso(ran_at)
 
-    # CONTRACTS.md §1.10 + §4.2 + tests/v1: the cathedral_signature covers
-    # the public EvalOutput projection (the wire shape the validator pull
-    # loop verifies), NOT the internal EvalRun storage row. Signing over
-    # the projection means downstream verifiers don't have to invert the
-    # public response back into the storage row to verify.
+    # CONTRACTS.md §1.10 + §4.2 + L8 + tests/v1: the cathedral_signature
+    # covers the public EvalOutput projection (the wire shape the validator
+    # pull loop verifies). Signing over the projection means downstream
+    # verifiers don't have to invert the public response back into the
+    # storage row to verify. `output_card_hash` is included per L8 so the
+    # frontend / validators can pin the byte-exact card the cathedral
+    # signed. `merkle_epoch` is appended post-anchor and is EXCLUDED from
+    # the signed bytes via `canonical_json` (see v1_types).
     display_name = submission.get("display_name", "")
     public_payload = {
         "id": eval_run_id,
@@ -184,9 +209,9 @@ async def score_and_sign(
         "agent_display_name": display_name,
         "card_id": card_id,
         "output_card": output_card_json,
+        "output_card_hash": output_card_hash,
         "weighted_score": weighted_final,
         "ran_at": ran_at_iso,
-        "merkle_epoch": None,
     }
     signature = signer.sign(public_payload)
 
