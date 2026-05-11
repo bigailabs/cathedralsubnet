@@ -76,6 +76,12 @@ def build_publisher_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ctx: PublisherContext = await ctx_factory()
         app.state.ctx = ctx
+        # Make ctx visible to the orchestrator's env-resolver. Production
+        # `from_settings` previously skipped this; the test-only `build_app`
+        # set it inside its own factory. Hoisting to the shared lifespan
+        # so PolarisRuntimeRunner can find HippiusClient in both modes.
+        global _LATEST_CTX
+        _LATEST_CTX = ctx
 
         stop = asyncio.Event()
         if start_eval_loop:
@@ -117,6 +123,8 @@ def build_publisher_app(
             yield
         finally:
             stop.set()
+            _LATEST_CTX_RESET = None  # noqa: F841 - declared so we can clear below
+            globals()["_LATEST_CTX"] = None
             for t in ctx.background_tasks:
                 t.cancel()
             await asyncio.gather(*ctx.background_tasks, return_exceptions=True)
