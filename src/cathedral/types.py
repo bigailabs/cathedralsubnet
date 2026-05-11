@@ -36,8 +36,15 @@ class PolarisAgentClaim(BaseModel):
     """`cathedral.polaris_agent_claim.v1`.
 
     Submitted by miners to `POST /v1/claim`. The validator queues the claim,
-    fetches Polaris evidence by identifier (manifest, runs, usage), verifies
-    signatures, and scores the card carried in `card_payload`.
+    optionally fetches Polaris evidence by identifier (manifest, runs, usage),
+    verifies signatures, and scores the card carried in `card_payload`.
+
+    `polaris_agent_id` is OPTIONAL. When present, cathedral fetches and
+    verifies the Polaris manifest, and the score gets a verified-runtime
+    multiplier (CONTRACTS.md §7.3). When absent, the agent is BYO-compute
+    and only the hotkey signature is verified — the card still scores,
+    just without the multiplier. This unblocks miners who run Hermes (or
+    any compatible runtime) on infrastructure they own.
 
     Cards live on Cathedral, not Polaris. Miners submit the card body inline
     so Cathedral never has to hop back to Polaris for artifact bytes — and
@@ -54,7 +61,7 @@ class PolarisAgentClaim(BaseModel):
     miner_hotkey: str
     owner_wallet: str
     work_unit: str
-    polaris_agent_id: str
+    polaris_agent_id: str | None = None
     polaris_deployment_id: str | None = None
     polaris_run_ids: list[str] = Field(default_factory=list)
     polaris_artifact_ids: list[str] = Field(default_factory=list)
@@ -66,11 +73,21 @@ class PolarisAgentClaim(BaseModel):
     card_payload: dict | None = None
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    @field_validator("miner_hotkey", "owner_wallet", "work_unit", "polaris_agent_id")
+    @field_validator("miner_hotkey", "owner_wallet", "work_unit")
     @classmethod
     def _non_empty(cls, v: str) -> str:
         if not v:
             raise ValueError("must be non-empty")
+        return v
+
+    @field_validator("polaris_agent_id")
+    @classmethod
+    def _polaris_agent_id_non_empty_when_present(cls, v: str | None) -> str | None:
+        # Optional field: None means BYO-compute. When supplied, must be
+        # a non-empty identifier (empty-string is treated as a coding bug,
+        # not a valid "no Polaris" signal — use None for that).
+        if v is not None and not v:
+            raise ValueError("polaris_agent_id must be non-empty when present")
         return v
 
 
@@ -146,9 +163,15 @@ class PolarisUsageRecord(BaseModel):
 
 
 class EvidenceBundle(BaseModel):
-    """The verified payload Cathedral hands to the card scorer."""
+    """The verified payload Cathedral hands to the card scorer.
 
-    manifest: PolarisManifest
+    `manifest` is None when the claim is BYO-compute (no `polaris_agent_id`
+    on the claim). Downstream consumers MUST guard for this case: there is
+    no owner_wallet to compare for self-loop detection and no runtime_image
+    to verify, so those checks are skipped.
+    """
+
+    manifest: PolarisManifest | None = None
     runs: list[PolarisRunRecord] = Field(default_factory=list)
     artifacts: list[PolarisArtifactRecord] = Field(default_factory=list)
     usage: list[PolarisUsageRecord] = Field(default_factory=list)
