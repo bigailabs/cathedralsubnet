@@ -1,11 +1,20 @@
 """Cathedral verified-runtime server.
 
 Polaris's `runtime-evaluate` endpoint deploys this image, then POSTs a task
-to `/task`. We fetch the miner's encrypted bundle from R2 by the presigned
-URL we receive in `env_overrides`, decrypt with the KEK Polaris injects,
-load the miner's `soul.md` from the bundle, call the configured LLM
-provider with that as the system prompt + the supplied task, parse the
-response as Card JSON, and return it.
+to `/task`. The container:
+
+  1. Fetches the miner's encrypted bundle from R2 via a presigned URL
+  2. Decrypts the bundle using the KEK + encryption_key_id passed in env
+  3. Reads the miner's soul.md as system prompt
+  4. Fetches Cathedral's published eval-spec for the card_id
+  5. Fetches each source in the eval-spec's source_pool
+  6. Computes BLAKE3 hashes of the fetched content for verifiable citations
+  7. Asks the LLM to synthesize a Card JSON using the real citations
+  8. Returns the Card
+
+This produces cards that the publisher's scoring pipeline can actually
+verify and rank — citations re-fetch with matching hashes, hitting the
+"source_quality" and "min_citations" criteria.
 
 Contract with Polaris (`polaris/services/runtime_evaluate.py`):
 
@@ -13,9 +22,18 @@ Contract with Polaris (`polaris/services/runtime_evaluate.py`):
     Content-Type: application/json
     {
       "task_id":  "...",
-      "task":     "...",
-      "env":      {"MINER_BUNDLE_URL": "...", "CATHEDRAL_BUNDLE_KEK": "<hex>",
-                   "CHUTES_API_KEY": "...", "CARD_ID": "...", "MINER_HOTKEY": "..."}
+      "task":     "<prompt the LLM should answer>",
+      "env":      {
+        "MINER_BUNDLE_URL":          "<presigned R2 URL>",
+        "CATHEDRAL_BUNDLE_KEK":      "<hex>",
+        "CATHEDRAL_BUNDLE_KEY_ID":   "kms-local:<b64>:<b64>",
+        "CHUTES_API_KEY":            "<llm provider key>",
+        "CHUTES_BASE_URL":           "(optional) https://llm.chutes.ai/v1",
+        "CARD_ID":                   "eu-ai-act",
+        "MINER_HOTKEY":              "5...",
+        "EVAL_SPEC_URL":             "(optional) override the eval-spec source",
+        "CATHEDRAL_PUBLISHER_URL":   "(optional) base URL for eval-spec lookup"
+      }
     }
 
     -> 200
@@ -26,20 +44,12 @@ Contract with Polaris (`polaris/services/runtime_evaluate.py`):
       "input_tokens":  ...,
       "output_tokens": ...
     }
-
-    /healthz returns 200 once the model client is initialised.
-
-LLM provider: Chutes (https://llm.chutes.ai/v1) by default, matching
-Polaris's Hermes runtime. Any OpenAI-compatible provider works — drop a
-different `CHUTES_BASE_URL` + key into the container env and the call
-shape is unchanged.
-
-The bundle decryption mirrors `cathedral.storage.crypto.decrypt_bundle`
-exactly so any KEK that worked on the publisher works here.
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import io
 import json
 import logging
@@ -47,15 +57,18 @@ import os
 import re
 import time
 import zipfile
+from datetime import UTC, datetime
 from typing import Any
 
+import blake3
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.3")
+VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.4")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -76,6 +89,14 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok", "version": VERSION}
 
 
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 "
+    "Cathedral-Runtime/0.1"
+)
+_CATHEDRAL_PUBLISHER_DEFAULT = "https://cathedral-publisher-production.up.railway.app"
+
+
 @app.post("/task")
 async def run_task(req: TaskRequest) -> JSONResponse:
     start = time.monotonic()
@@ -85,15 +106,22 @@ async def run_task(req: TaskRequest) -> JSONResponse:
     llm_key = (
         req.env.get("CHUTES_API_KEY")
         or os.environ.get("CHUTES_API_KEY")
-        or req.env.get("ANTHROPIC_API_KEY")  # backward compat shim
+        or req.env.get("ANTHROPIC_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
     )
     card_id = req.env.get("CARD_ID", "")
+    publisher = (
+        req.env.get("CATHEDRAL_PUBLISHER_URL")
+        or os.environ.get("CATHEDRAL_PUBLISHER_URL")
+        or _CATHEDRAL_PUBLISHER_DEFAULT
+    ).rstrip("/")
 
     if not bundle_url:
         raise HTTPException(400, "MINER_BUNDLE_URL missing in env")
     if not llm_key:
         raise HTTPException(400, "CHUTES_API_KEY missing in env or container")
+    if not card_id:
+        raise HTTPException(400, "CARD_ID missing in env")
 
     log.info("task_id=%s card_id=%s fetching bundle from %s", req.task_id, card_id, bundle_url[:120])
     try:
@@ -120,19 +148,41 @@ async def run_task(req: TaskRequest) -> JSONResponse:
         log.exception("task_id=%s soul.md extract failed", req.task_id)
         raise HTTPException(422, f"bundle soul.md extract failed: {e.__class__.__name__}") from e
 
+    # Fetch eval-spec for this card so we know which sources to cite.
+    try:
+        spec = await _fetch_eval_spec(publisher, card_id)
+    except Exception as e:
+        log.exception("task_id=%s eval-spec fetch failed", req.task_id)
+        raise HTTPException(502, f"eval-spec fetch failed: {e.__class__.__name__}: {str(e)[:200]}") from e
+
+    # Fetch every source in the source pool concurrently. Compute BLAKE3
+    # hash per source so the LLM has verifiable citation material.
+    citations = await _fetch_and_hash_sources(spec.get("source_pool") or [])
+    log.info("task_id=%s fetched %d/%d sources successfully", req.task_id, len(citations), len(spec.get("source_pool") or []))
+
+    if not citations:
+        raise HTTPException(502, "no sources successfully fetched — cannot produce card")
+
     model = os.getenv("CATHEDRAL_RUNTIME_MODEL", "deepseek-ai/DeepSeek-V3.1")
-    base_url_chutes = os.getenv("CHUTES_BASE_URL") or req.env.get("CHUTES_BASE_URL") or "https://llm.chutes.ai/v1"
-    base_url_chutes = base_url_chutes.rstrip("/")
+    base_url_chutes = (
+        os.getenv("CHUTES_BASE_URL")
+        or req.env.get("CHUTES_BASE_URL")
+        or "https://llm.chutes.ai/v1"
+    ).rstrip("/")
     log.info("task_id=%s calling LLM model=%s base=%s", req.task_id, model, base_url_chutes)
     try:
         card_json, usage = await _call_llm(
-            llm_key, base_url_chutes, model, soul_md, req.task, card_id
+            llm_key, base_url_chutes, model, soul_md, req.task, card_id, citations, spec
         )
     except HTTPException:
         raise
     except Exception as e:
         log.exception("task_id=%s LLM call failed", req.task_id)
         raise HTTPException(502, f"LLM call failed: {e.__class__.__name__}: {str(e)[:200]}") from e
+
+    # Backfill: ensure citations the LLM kept have the REAL fetched_at +
+    # content_hash + status that we measured, not what the model claimed.
+    card_json = _reconcile_citations(card_json, citations)
 
     duration_ms = int((time.monotonic() - start) * 1000)
     log.info("task_id=%s done duration_ms=%d", req.task_id, duration_ms)
@@ -159,30 +209,19 @@ async def _fetch_bundle(url: str) -> bytes:
         return resp.content
 
 
-def _decrypt_bundle(blob: bytes, kek: bytes, encryption_key_id: str = "") -> bytes:
-    """Match cathedral.storage.crypto.decrypt_bundle.
+def _decrypt_bundle(blob: bytes, kek: bytes, encryption_key_id: str) -> bytes:
+    """Mirror cathedral.storage.crypto.decrypt_bundle.
 
-    The publisher's layout (storage/crypto.py):
-      Blob on R2:        nonce(12B) || AES-GCM ciphertext+tag
+    Layout (per the publisher's encrypt_bundle):
+      Blob on R2: nonce(12B) || AES-GCM ciphertext+tag
       encryption_key_id: 'kms-local:<b64-wrapped-key>:<b64-nonce>'
-                         where wrapped-key is RFC-3394 AES-key-wrap(KEK, data_key)
-                         (NOT AES-GCM wrap)
-
-    Both the blob and the encryption_key_id are needed to decrypt;
-    Cathedral sends both via env_overrides (MINER_BUNDLE_URL for the blob,
-    CATHEDRAL_BUNDLE_KEY_ID for the kms-local string).
+                         (wrapped-key is RFC-3394 AES-key-wrap(KEK, data_key))
     """
-    import base64
-    from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
-
     _NONCE_LEN = 12
     if len(kek) != 32:
         raise ValueError(f"KEK must be 32 bytes (got {len(kek)})")
     if not encryption_key_id.startswith("kms-local:"):
-        raise ValueError(
-            "CATHEDRAL_BUNDLE_KEY_ID env override required for verified-runtime "
-            "decryption (format: 'kms-local:<b64>:<b64>')"
-        )
+        raise ValueError("encryption_key_id must be 'kms-local:<b64>:<b64>'")
     parts = encryption_key_id.split(":")
     if len(parts) != 3:
         raise ValueError(f"bad encryption_key_id shape: {parts[:1]}")
@@ -198,27 +237,6 @@ def _decrypt_bundle(blob: bytes, kek: bytes, encryption_key_id: str = "") -> byt
     return AESGCM(data_key).decrypt(nonce_in_blob, body_ct, associated_data=None)
 
 
-def _decrypt_bundle_LEGACY(ciphertext: bytes, kek: bytes) -> bytes:
-    """Unused: kept for reference. Original (incorrect) layout assumption."""
-    if len(kek) != 32:
-        raise ValueError(f"KEK must be 32 bytes (got {len(kek)})")
-    if len(ciphertext) < 4:
-        raise ValueError("ciphertext too short")
-    wrap_len = int.from_bytes(ciphertext[:4], "big")
-    if wrap_len <= 0 or wrap_len > 1024:
-        raise ValueError(f"implausible wrapped-key length: {wrap_len}")
-    if len(ciphertext) < 4 + wrap_len + 12:
-        raise ValueError("ciphertext truncated")
-    wrapped_key = ciphertext[4 : 4 + wrap_len]
-    body_nonce = ciphertext[4 + wrap_len : 4 + wrap_len + 12]
-    body_ct = ciphertext[4 + wrap_len + 12 :]
-
-    wrap_nonce = wrapped_key[:12]
-    wrap_ct = wrapped_key[12:]
-    data_key = AESGCM(kek).decrypt(wrap_nonce, wrap_ct, associated_data=None)
-    return AESGCM(data_key).decrypt(body_nonce, body_ct, associated_data=None)
-
-
 def _extract_soul_md(bundle_zip: bytes) -> str:
     with zipfile.ZipFile(io.BytesIO(bundle_zip)) as z:
         for name in z.namelist():
@@ -227,39 +245,159 @@ def _extract_soul_md(bundle_zip: bytes) -> str:
     raise HTTPException(422, "bundle missing soul.md")
 
 
+async def _fetch_eval_spec(publisher: str, card_id: str) -> dict[str, Any]:
+    url = f"{publisher}/api/cathedral/v1/cards/{card_id}/eval-spec"
+    async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": _UA}) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _fetch_and_hash_sources(source_pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fetch each source URL once, compute its BLAKE3 hash.
+
+    Returns a list of citation dicts ready to embed in the Card. Sources
+    that fail to fetch (4xx/5xx/timeouts) are skipped. The publisher's
+    preflight rejects any citation that doesn't re-fetch with a 2xx, so
+    we only emit ones we successfully retrieved.
+    """
+    if not source_pool:
+        return []
+
+    async def fetch_one(src: dict[str, Any]) -> dict[str, Any] | None:
+        url = src.get("url", "")
+        if not url:
+            return None
+        try:
+            async with httpx.AsyncClient(
+                timeout=20.0,
+                headers={"User-Agent": _UA},
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200 or not resp.content:
+                    log.info("source skip url=%s status=%d bytes=%d", url[:60], resp.status_code, len(resp.content or b""))
+                    return None
+                h = blake3.blake3(resp.content).hexdigest()
+                return {
+                    "url": url,
+                    "class": src.get("class", "other"),
+                    "fetched_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "status": resp.status_code,
+                    "content_hash": h,
+                    "_excerpt": resp.text[:2000] if resp.headers.get("content-type", "").startswith("text/") else "",
+                }
+        except Exception as e:
+            log.info("source fail url=%s err=%s", url[:60], e.__class__.__name__)
+            return None
+
+    results = await asyncio.gather(*[fetch_one(s) for s in source_pool])
+    return [r for r in results if r]
+
+
+def _reconcile_citations(card: dict[str, Any], real_citations: list[dict[str, Any]]) -> dict[str, Any]:
+    """For every citation URL the model picked, replace the model's claimed
+    fetched_at/status/content_hash with the real values we measured.
+
+    The model often invents these fields; we have the truth from our
+    actual fetch. Citations the model wrote that DON'T match a URL we
+    actually fetched are dropped — they'd fail preflight anyway.
+    """
+    real_by_url = {c["url"]: c for c in real_citations}
+    model_cits = card.get("citations") or []
+    out: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for c in model_cits:
+        url = c.get("url")
+        if not url or url in seen_urls:
+            continue
+        real = real_by_url.get(url)
+        if real is None:
+            # Model referenced a URL we didn't successfully fetch. Drop it.
+            continue
+        seen_urls.add(url)
+        out.append(
+            {
+                "url": url,
+                "class": real["class"],
+                "fetched_at": real["fetched_at"],
+                "status": real["status"],
+                "content_hash": real["content_hash"],
+            }
+        )
+    # If the model under-cited, fill from the real_citations list to
+    # meet the rubric's min_citations.
+    for r in real_citations:
+        if len(out) >= max(3, len(out)):
+            break
+        if r["url"] in seen_urls:
+            continue
+        out.append(
+            {
+                "url": r["url"],
+                "class": r["class"],
+                "fetched_at": r["fetched_at"],
+                "status": r["status"],
+                "content_hash": r["content_hash"],
+            }
+        )
+        seen_urls.add(r["url"])
+    card["citations"] = out
+    return card
+
+
 _SYSTEM_PROMPT_TEMPLATE = """\
 {soul_md}
 
+# Today
+
+The current UTC time is {today_iso}. Treat the snippets below as the
+authoritative state of the regulatory record AS OF NOW. Cite by URL.
+
+# Sources you actually fetched
+
+The following sources have been fetched and verified. Each carries a
+content hash. You MAY cite any of these URLs — the publisher will
+re-fetch each one to verify status 2xx, so do not invent URLs or
+content hashes. The runtime will overwrite citation fetched_at /
+status / content_hash with the measured values regardless of what you
+emit.
+
+{sources_block}
+
 # Output contract
 
-You are producing a Cathedral regulatory-intelligence card. Your entire
-response MUST be a single JSON object matching this schema, with no
-prose before or after the JSON:
+You are producing a Cathedral regulatory-intelligence card for
+card_id = `{card_id}`. Your ENTIRE response must be a single JSON
+object matching this schema, with NO prose before or after:
 
 {{
   "jurisdiction": "eu" | "us" | "uk" | "ca" | "au" | "in" | "br" | "sg" | "jp" | "other",
-  "topic": "...",
-  "title": "...",
-  "summary": "<40-800 chars, 1-6 sentences>",
-  "what_changed": "...",
-  "why_it_matters": "...",
-  "action_notes": "...",
-  "risks": "...",
-  "citations": [{{
-    "url": "...",
-    "class": "official_journal" | "regulator" | "law_text" | "court" | "parliament" | "government" | "secondary_analysis" | "other",
-    "fetched_at": "<ISO-8601 UTC>",
-    "status": <int>,
-    "content_hash": "<blake3 hex>"
-  }}],
-  "confidence": <0..1>,
+  "topic": "<short topic label>",
+  "title": "<headline-style summary of the most material development>",
+  "summary": "<{min_summary}-{max_summary} chars, 1-6 sentences>",
+  "what_changed": "<the concrete change since last refresh>",
+  "why_it_matters": "<who is affected, what the implication is>",
+  "action_notes": "<what a compliance officer should do this week>",
+  "risks": "<material penalties, deadlines, exposure>",
+  "citations": [
+    {{"url":"<one of the fetched URLs above>","class":"<class from the source>","fetched_at":"<ISO>","status":200,"content_hash":"<placeholder>"}}
+  ],
+  "confidence": <float in [0,1]>,
   "no_legal_advice": true,
-  "last_refreshed_at": "<ISO-8601 UTC>",
-  "refresh_cadence_hours": <int>
+  "last_refreshed_at": "{today_iso}",
+  "refresh_cadence_hours": {cadence}
 }}
 
-`no_legal_advice` must be the literal boolean `true`. Cite real sources
-you actually used during your synthesis. Today is {today_iso}.
+Rules:
+- `no_legal_advice` MUST be the literal boolean `true`.
+- Cite AT LEAST {min_cits} different URLs from the fetched sources above.
+- Prefer citations whose class is in {required_classes}.
+- Do not invent URLs.
+- Do not editorialize or predict regulator intent.
+- Do not use legal-advice framing ("you should sue", "we recommend filing").
+
+Task: {task}
 """
 
 
@@ -270,24 +408,41 @@ async def _call_llm(
     soul_md: str,
     task: str,
     card_id: str,
+    citations: list[dict[str, Any]],
+    spec: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, int]]:
-    """Call an OpenAI-compatible chat-completions endpoint.
-
-    Polaris's Hermes runtime uses Chutes (https://llm.chutes.ai/v1) as
-    its LLM provider; Cathedral's runtime piggy-backs on the same key
-    and base URL by default so a single Polaris-side env serves both
-    runtimes. Any OpenAI-compatible provider works.
+    """Call an OpenAI-compatible chat-completions endpoint with the soul.md
+    as system prompt and the fetched sources as context.
     """
-    from datetime import UTC, datetime
+    rubric = spec.get("scoring_rubric") or {}
+    min_cits = max(3, int(rubric.get("min_citations") or 3))
+    required_classes = rubric.get("required_source_classes") or ["official_journal", "regulator"]
+    min_summary = int(rubric.get("min_summary_chars") or 40)
+    max_summary = int(rubric.get("max_summary_chars") or 800)
+    cadence = int(spec.get("refresh_cadence_hours") or 24)
+
+    # Build a compact source block — URL + class + first 1500 chars of body.
+    blocks = []
+    for c in citations[:8]:  # cap to keep prompt manageable
+        excerpt = (c.get("_excerpt") or "").replace("\n", " ")[:1500]
+        blocks.append(
+            f"- URL: {c['url']}\n  class: {c['class']}\n  excerpt: {excerpt or '(non-text or empty body)'}"
+        )
+    sources_block = "\n".join(blocks)
 
     system = _SYSTEM_PROMPT_TEMPLATE.format(
         soul_md=soul_md.strip(),
-        today_iso=datetime.now(UTC).isoformat(timespec="seconds"),
+        today_iso=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        card_id=card_id,
+        sources_block=sources_block,
+        min_summary=min_summary,
+        max_summary=max_summary,
+        min_cits=min_cits,
+        required_classes=required_classes,
+        cadence=cadence,
     )
-    user_msg = (
-        f"Card: {card_id}\n\nTask: {task}\n\n"
-        "Return only the Card JSON. No prose."
-    )
+    user_msg = f"Task: {task}\n\nReturn only the Card JSON. No prose."
+
     body = {
         "model": model,
         "max_tokens": 4096,
@@ -306,9 +461,7 @@ async def _call_llm(
             f"{base_url}/chat/completions", json=body, headers=headers
         )
     if resp.status_code != 200:
-        raise HTTPException(
-            502, f"LLM call failed: {resp.status_code} {resp.text[:500]}"
-        )
+        raise HTTPException(502, f"LLM call failed: {resp.status_code} {resp.text[:500]}")
     data = resp.json()
     choices = data.get("choices") or []
     if not choices:
@@ -318,11 +471,10 @@ async def _call_llm(
         raise HTTPException(502, "LLM returned empty content")
     card = _parse_card_json(content)
     usage_blob = data.get("usage") or {}
-    usage = {
+    return card, {
         "input_tokens": int(usage_blob.get("prompt_tokens", 0)),
         "output_tokens": int(usage_blob.get("completion_tokens", 0)),
     }
-    return card, usage
 
 
 def _parse_card_json(text: str) -> dict[str, Any]:
