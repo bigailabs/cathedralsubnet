@@ -1,6 +1,10 @@
-# Cathedral Subnet
+# Cathedral
 
-A Bittensor subnet for regulatory intelligence. Miners ship agents. A Polaris-attested runtime runs each agent against a published card. Validators verify the attestation and score the output.
+A Bittensor subnet running a verifiable AI workforce.
+
+The subnet publishes **jobs** - standing work with a source pool, task templates, and a public scoring rubric. Miners bring agents that submit **cards** answering those jobs. Cathedral runs every agent in a sealed runtime, scores the card on six dimensions, signs the result, and weekly-anchors it on chain. Best-performing agents earn TAO.
+
+First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, UK AI Whitepaper, Singapore PDPC, Japan METI/MIC). The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
 
 - **Mainnet:** SN39 (`finney`)
 - **Testnet:** SN292 (`test`)
@@ -8,14 +12,16 @@ A Bittensor subnet for regulatory intelligence. Miners ship agents. A Polaris-at
 - **Publisher API:** https://api.cathedral.computer (Railway-backed; canonical mirror at `cathedral-publisher-production.up.railway.app`)
 - **Source for skill onboarding:** `GET /skill.md` on either host
 
+> **Vocabulary note.** This README and the public site use **jobs** for the standing work the subnet asks for, and **cards** for miner submissions. The publisher's database column is still `card_id` (it keys on the job identifier). External-facing copy is being renamed first; the schema rename will follow with a signed-payload version bump.
+
 ## What a miner ships
 
 Cathedral does not accept a hand-written report. It accepts an agent.
 
-1. Write a Hermes-compatible bundle: a `soul.md` (the agent's instructions), an `AGENTS.md` index, and any skills the agent needs to produce the card. Bundle is a zip up to 10 MiB.
-2. Sign the canonical submission payload `{bundle_hash, card_id, miner_hotkey, submitted_at}` with your sr25519 hotkey. The signature goes in the `X-Cathedral-Signature` header and the hotkey ss58 in `X-Cathedral-Hotkey`.
-3. `POST /v1/agents/submit` with the bundle, `card_id`, `display_name`, and an `attestation_mode` (default `polaris`). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. The storage client is path-style S3 (`cathedral.storage.HippiusClient`); the production bucket runs on Cloudflare R2.
-4. For `attestation_mode=polaris`: the publisher hands a presigned object-store URL to Polaris's `/api/marketplace/submissions/{id}/runtime-evaluate`. Polaris deploys `ghcr.io/cathedralai/cathedral-runtime` against your bundle, the runtime decrypts it, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (DeepSeek V3.1 by default), and returns a Card JSON plus a Polaris Ed25519 attestation over `(submission_id, task_id, task_hash, output_hash, deployment_id, completed_at)`.
+1. Package an agent bundle: a `soul.md` (the agent's instructions), an `AGENTS.md` index, and any skills the agent needs to produce a card. Hermes, LangGraph, plain Python - the bundle format is the miner's choice as long as the agent takes a prompt and outputs structured JSON. Bundle is a zip up to 10 MiB.
+2. Sign the canonical submission payload `{bundle_hash, card_id, miner_hotkey, submitted_at}` with your sr25519 hotkey. (Here `card_id` is the job identifier.) The signature goes in the `X-Cathedral-Signature` header and the hotkey ss58 in `X-Cathedral-Hotkey`.
+3. `POST /v1/agents/submit` with the bundle, `card_id` (the job you're answering), `display_name`, and an `attestation_mode` (default `polaris`). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. Production storage runs on Cloudflare R2 via a path-style S3 client.
+4. For `attestation_mode=polaris`: the publisher hands a presigned object-store URL to Polaris's `/api/marketplace/submissions/{id}/runtime-evaluate`. Polaris deploys `ghcr.io/cathedralai/cathedral-runtime` against your bundle, the runtime decrypts it, reads `soul.md` as the system prompt, fetches every URL in the job's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (DeepSeek V3.1 by default), and returns a card (structured JSON) plus a Polaris Ed25519 attestation over `(submission_id, task_id, task_hash, output_hash, deployment_id, completed_at)`.
 5. Cathedral re-derives `task_hash` from the prompt bytes and `output_hash` from the produced card bytes, verifies the Polaris signature against the pinned `POLARIS_ATTESTATION_PUBLIC_KEY`, runs preflight + the six-dimension scorer, applies the first-mover delta and the verified-runtime multiplier, signs the resulting `EvalRun` projection with the Cathedral key, and persists it.
 
 The quickest way to start mining is to point an AI agent at the canonical skill doc:
@@ -38,11 +44,11 @@ For v1, the producer side (miner submits, Cathedral runtime evaluates, publisher
 
 Full procedure for someone running a validator: [docs/VALIDATOR.md](docs/VALIDATOR.md).
 
-## Cards live
+## Jobs live
 
-The publisher's `card_definitions` table is seeded from `cathedralai/cathedral-eval-spec`. Five cards are live and accept submissions today:
+The publisher's `card_definitions` table is seeded from `cathedralai/cathedral-eval-spec`. Five jobs are live and accept submissions today:
 
-| Card ID | Jurisdiction | Topic |
+| Job ID | Jurisdiction | Topic |
 |---------|--------------|-------|
 | `eu-ai-act` | EU | EU AI Act enforcement and guidance |
 | `us-ai-eo` | US | US executive orders and federal AI guidance |
@@ -50,7 +56,7 @@ The publisher's `card_definitions` table is seeded from `cathedralai/cathedral-e
 | `singapore-pdpc` | SG | Singapore PDPC enforcement and guidance |
 | `japan-meti-mic` | JP | Japan METI / MIC AI and data guidance |
 
-In-process source-class requirements and refresh cadences live in `src/cathedral/cards/registry.py`. Full per-card eval-specs (`source_pool`, `task_templates`, `scoring_rubric`) live in `card_definitions` and are queryable at `GET /v1/cards/{card_id}/eval-spec`.
+In-process source-class requirements and refresh cadences live in `src/cathedral/cards/registry.py`. Full per-job eval-specs (`source_pool`, `task_templates`, `scoring_rubric`) live in `card_definitions` and are queryable at `GET /v1/cards/{card_id}/eval-spec`.
 
 Africa is tracked in [cathedralai/cathedral#24](https://github.com/cathedralai/cathedral/issues/24). Scope is open: pan-AU vs. country-specific.
 
@@ -117,22 +123,22 @@ Full attestation contract: [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_CONTR
 
 Verified live, 2026-05-11:
 
-- Five card definitions seeded, eval-specs served at `/v1/cards/{card_id}/eval-spec`.
-- 4 verified Polaris-attested agents on the live leaderboard (3 on `eu-ai-act`, 1 on `uk-ai-whitepaper`), all scoring 1.0.
+- Five job definitions seeded, eval-specs served at `/v1/cards/{card_id}/eval-spec`.
 - End-to-end Tier A pipeline: submit -> encrypt to R2 -> Polaris runtime-evaluate -> Chutes LLM -> attestation -> Cathedral re-verification -> score -> sign -> publish.
-- Cathedral runtime image: `ghcr.io/cathedralai/cathedral-runtime:latest`, currently v1.0.6.
-- Publisher: Railway, auto-deploy on push to `main`.
+- Cathedral runtime image: `ghcr.io/cathedralai/cathedral-runtime:v1.0.7` with probe-mode endpoints (`/probe/run`, `/probe/health`, `/probe/reload`) for long-lived miner-owned probes.
+- Publisher: Railway, auto-deploy on push to `main`. TLS via Cloudflare.
+- Validator binary running on SN292 testnet (uid 32), pulling signed eval-runs from the publisher, verifying the cathedral signature locally, and dispatching `set_weights` every 600 seconds with a 98% burn floor to the subnet owner uid.
+- Provisioning: `scripts/provision_validator.sh` and `scripts/provision_miner.sh` stand up a validator or miner-probe from scratch on Ubuntu 22.04+; PM2 supervises both apps with systemd boot persistence; `bin/updater.sh` watches for signed git tags and reloads on release.
 
 Wired in code, not yet running against live signatures:
 
-- Validator pull-loop verifying publisher signatures end-to-end at production scale. The signature path verifies in tests; the live cathedral validator binary is not yet pulling.
 - On-chain Merkle anchoring (weekly `system.remarkWithEvent`). Merkle code path exists in `cathedral.publisher.merkle` and `cathedral.chain.anchor`; not running on a schedule yet.
-- Subtensor weight setting from the new publisher signature stream. The legacy `/v1/claim` weight loop still runs.
+- SN39 mainnet validator. Code path proven on SN292 testnet; needs a registered SN39 hotkey with stake + permit to set weights on mainnet.
 
 Not yet built:
 
 - Live TEE miners. Nitro verifier exists in `cathedral.attestation.nitro`; TDX and SEV-SNP return 501 from the submit endpoint.
-- Africa card ([#24](https://github.com/cathedralai/cathedral/issues/24)).
+- Africa job ([#24](https://github.com/cathedralai/cathedral/issues/24)).
 
 ## Repo layout
 

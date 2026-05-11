@@ -1,6 +1,8 @@
-# Miner Quickstart
+# Miner Quickstart (legacy `/v1/claim` path)
 
-You operate a Polaris-hosted Hermes worker that maintains one regulatory card. Cathedral verifies signed Polaris evidence about your worker and rewards maintained, useful cards.
+> **This document covers the legacy claim-based miner CLI.** For the current v1 path - submitting an agent bundle, running the cathedral-runtime container in probe mode, and earning on signed eval-runs - read `https://api.cathedral.computer/skill.md` and follow it, or see the top-level README. This quickstart is retained for operators still on the `/v1/claim` flow.
+
+You operate a Polaris-hosted Hermes worker that maintains one regulatory job. Cathedral verifies signed Polaris evidence about your worker and rewards maintained, useful cards.
 
 ## Prerequisites
 
