@@ -26,6 +26,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import aiosqlite
@@ -92,17 +93,54 @@ class EvalOrchestrator:
         *,
         db: aiosqlite.Connection,
         hippius: HippiusClient,
-        polaris: PolarisRunner,
+        polaris: PolarisRunner | None = None,
         signer: EvalSigner,
         registry: CardRegistry,
+        runner_for: Callable[[dict[str, Any]], PolarisRunner] | None = None,
     ) -> None:
+        """Construct an orchestrator with either a single runner or a
+        per-submission runner factory.
+
+        `polaris` (legacy) — one runner used for every submission. Kept
+        for back-compat with existing callers and tests.
+
+        `runner_for` (preferred) — a callable `submission -> PolarisRunner`.
+        Lets the orchestrator dispatch on the submission's
+        `attestation_mode` so Tier A (polaris-hosted) goes to
+        `PolarisRuntimeRunner`, BYO miners go to `BundleCardRunner`,
+        and unverified discovery submissions are filtered out at the
+        queue layer before reaching here.
+
+        Exactly one of `polaris` or `runner_for` must be supplied;
+        if both are present, `runner_for` wins.
+        """
+        if polaris is None and runner_for is None:
+            raise ValueError("must supply polaris= or runner_for=")
         self.db = db
         self.hippius = hippius
-        self.polaris = polaris
+        self._fixed_polaris = polaris
+        self._runner_for = runner_for
         self.signer = signer
         self.registry = registry
         self._round_counter = _RoundCounter(epoch=epoch_for(datetime.now(UTC)))
         self._failure_counts: dict[str, int] = defaultdict(int)
+
+    @property
+    def polaris(self) -> PolarisRunner:
+        """Back-compat: a few callers read `orch.polaris` directly. When
+        a per-submission factory is configured this returns whatever the
+        factory yields for an empty submission, which is fine for the
+        cases that use this — they're inspecting type, not running."""
+        if self._fixed_polaris is not None:
+            return self._fixed_polaris
+        assert self._runner_for is not None
+        return self._runner_for({})
+
+    def _resolve_runner(self, submission: dict[str, Any]) -> PolarisRunner:
+        if self._runner_for is not None:
+            return self._runner_for(submission)
+        assert self._fixed_polaris is not None
+        return self._fixed_polaris
 
     async def evaluate_one(self, submission: dict[str, Any]) -> None:
         log = logger.bind(submission_id=submission["id"], card_id=submission["card_id"])
@@ -170,9 +208,14 @@ class EvalOrchestrator:
             polaris_errors: list[str] = []
             polaris_result = None
             backoffs = _retry_backoffs()
+            # Per-submission dispatch: Tier A polaris-hosted miners
+            # route to PolarisRuntimeRunner, BYO miners route to
+            # BundleCardRunner. Discovery-mode rows are filtered out
+            # before they reach the queue (publisher/submit.py).
+            runner = self._resolve_runner(submission)
             for attempt, backoff in enumerate(backoffs, start=1):
                 try:
-                    polaris_result = await self.polaris.run(
+                    polaris_result = await runner.run(
                         bundle_bytes=plaintext,
                         bundle_hash=submission["bundle_hash"],
                         task=task,
@@ -352,6 +395,24 @@ async def _evaluating_submissions(conn: Any, limit: int = 10) -> list[dict[str, 
     return [dict(zip(cols, r, strict=False)) for r in rows]
 
 
+def _resolve_polaris_runner_for_mode(mode: str) -> PolarisRunner:
+    """Build a runner for an explicit attestation mode.
+
+    Mirrors `_resolve_polaris_runner_from_env` but skips the env lookup —
+    the per-submission dispatch already knows which tier this row is.
+    """
+    import os as _os
+    _saved = _os.environ.get("CATHEDRAL_EVAL_MODE")
+    _os.environ["CATHEDRAL_EVAL_MODE"] = mode
+    try:
+        return _resolve_polaris_runner_from_env()
+    finally:
+        if _saved is None:
+            _os.environ.pop("CATHEDRAL_EVAL_MODE", None)
+        else:
+            _os.environ["CATHEDRAL_EVAL_MODE"] = _saved
+
+
 def _resolve_polaris_runner_from_env() -> PolarisRunner:
     """Re-build a Polaris runner from the current env so monkeypatched
     `CATHEDRAL_EVAL_MODE` mid-test takes effect on the next tick.
@@ -442,13 +503,35 @@ async def _run_once_async() -> int:
     if ctx is None:
         return 0
 
-    # Use the env-resolved Polaris runner so mid-test monkeypatch of
-    # CATHEDRAL_EVAL_MODE actually takes effect.
-    polaris = _resolve_polaris_runner_from_env()
+    # Per-submission runner dispatch. The submission's `attestation_mode`
+    # column (added by the submit-attestation-modes PR) tells us whether
+    # a miner opted into Tier A (polaris) or BYO (bundle). The env-level
+    # CATHEDRAL_EVAL_MODE remains the override for stub/legacy paths and
+    # the fallback whenever attestation_mode is unset or its required
+    # env vars aren't configured — that way tests and dev environments
+    # that pin a single mode globally keep working without seeding extra
+    # config per submission.
+    import os as _os
+
+    def runner_for(submission: dict[str, Any]) -> PolarisRunner:
+        mode = (submission.get("attestation_mode") or "").lower()
+        env_mode = _os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
+        # If the global env explicitly picks a stub/test runner, that wins
+        # so test fixtures keep behaving identically.
+        if env_mode.startswith("stub"):
+            return _resolve_polaris_runner_from_env()
+        if mode == "polaris" and _os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"):
+            return _resolve_polaris_runner_for_mode("polaris")
+        if mode == "tee":
+            # Tier B+ TEE submissions are pre-verified at submit time;
+            # the eval pipeline only needs the bundled card.
+            return _resolve_polaris_runner_for_mode("bundle")
+        return _resolve_polaris_runner_from_env()
+
     orch = EvalOrchestrator(
         db=ctx.db,
         hippius=ctx.hippius,
-        polaris=polaris,
+        runner_for=runner_for,
         signer=ctx.signer,
         registry=ctx.registry,
     )
