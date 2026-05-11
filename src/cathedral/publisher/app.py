@@ -187,7 +187,25 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
 
     async def _factory() -> PublisherContext:
         conn = await connect(database_path)
-        hippius = HippiusClient(HippiusConfig.from_env())
+        # Prefer real Hippius; fall back to in-memory stub when env is
+        # unset OR the bucket isn't reachable. We choose RAM over hard-fail
+        # because v1 launch can survive bundle loss on redeploy, but a
+        # publisher that won't accept submissions is dead on arrival.
+        # A startup probe (HEAD on the bucket) is what triggers the
+        # fallback — config-only checks miss the common case where keys
+        # parse fine but lack PutObject permission.
+        hippius: Any
+        try:
+            client = HippiusClient(HippiusConfig.from_env())
+            if not await client.healthcheck():
+                raise RuntimeError("hippius healthcheck failed")
+            hippius = client
+        except Exception as e:
+            import structlog
+            structlog.get_logger(__name__).warning(
+                "hippius_unavailable_falling_back_to_stub", error=str(e)
+            )
+            hippius = StubHippiusClient()
 
         signing_hex = os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY")
         if not signing_hex:
