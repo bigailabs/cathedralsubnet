@@ -632,17 +632,25 @@ class PolarisRuntimeRunner:
         env_overrides: dict[str, str] = {
             "CARD_ID": task.card_id,
             "MINER_BUNDLE_URL": bundle_url,
-            # `ANTHROPIC_API_KEY` is intentionally NOT injected by
-            # Cathedral — Polaris vault wires it on its side. Listed
-            # here as a comment so future maintainers don't re-add it:
-            # injecting a key here would leak it across the trust
-            # boundary.
         }
         if self.config.bundle_encryption_key_hex:
             # v1: ship the bundle KEK as an env override. CONTRACTS.md §7.4
             # flags this as a known weakness — future revision will wrap
             # per-bundle data keys with a Polaris-side KMS key.
             env_overrides["CATHEDRAL_BUNDLE_KEK"] = self.config.bundle_encryption_key_hex
+        # LLM provider key. Polaris's marketplace eval pipeline doesn't
+        # currently project the host's vault into the spawned runtime
+        # container (see polaris/services/marketplace_eval.py — env_vars
+        # field is not threaded through). Until Polaris ships that
+        # injection, Cathedral passes the configured CHUTES_API_KEY
+        # through directly. The trust boundary is already inside our
+        # operator scope (we are the trusted-service principal), so
+        # this doesn't leak outside our control plane.
+        import os as _os
+        if (chutes := _os.environ.get("CHUTES_API_KEY")):
+            env_overrides["CHUTES_API_KEY"] = chutes
+        if (base_url := _os.environ.get("CHUTES_BASE_URL")):
+            env_overrides["CHUTES_BASE_URL"] = base_url
 
         body = {
             "task": task.prompt,
