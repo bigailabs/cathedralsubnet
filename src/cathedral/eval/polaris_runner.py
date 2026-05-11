@@ -870,9 +870,25 @@ class PolarisRuntimeRunner:
         raise PolarisRunnerError("runtime-evaluate response has neither 'output' nor 'output_json'")
 
     def _decode_card(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Prefer `output_json` if it's already a dict; otherwise decode."""
+        """Prefer `output_json` if it's already a dict; otherwise decode.
+
+        Polaris's runtime-evaluate wraps the runtime container's response
+        in its own envelope, so `payload['output_json']` is the runtime's
+        FULL response (e.g. `{output_json: <Card>, duration_ms, model}`).
+        Unwrap one more level when we detect this — the runtime contract
+        is that it itself returns `{output_json: <Card>, ...}`.
+        """
         oj = payload.get("output_json")
         if isinstance(oj, dict):
+            inner = oj.get("output_json")
+            # If the runtime double-wrapped, drill in once. The Card
+            # schema requires `last_refreshed_at` and `refresh_cadence_hours`,
+            # so any dict missing those is almost certainly the runtime's
+            # envelope, not the Card.
+            if isinstance(inner, dict) and (
+                "last_refreshed_at" in inner or "citations" in inner
+            ):
+                return dict(inner)
             return dict(oj)
         raw = self._raw_output_bytes(payload)
         try:
@@ -885,6 +901,12 @@ class PolarisRuntimeRunner:
             raise PolarisRunnerError(
                 f"runtime-evaluate output must be a JSON object, got {type(decoded).__name__}"
             )
+        # Also handle the wrapped shape via the bytes path.
+        inner = decoded.get("output_json")
+        if isinstance(inner, dict) and (
+            "last_refreshed_at" in inner or "citations" in inner
+        ):
+            return dict(inner)
         return decoded
 
 
