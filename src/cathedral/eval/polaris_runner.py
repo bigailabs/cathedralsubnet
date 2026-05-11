@@ -655,6 +655,11 @@ class PolarisRuntimeRunner:
             # flags this as a known weakness — future revision will wrap
             # per-bundle data keys with a Polaris-side KMS key.
             env_overrides["CATHEDRAL_BUNDLE_KEK"] = self.config.bundle_encryption_key_hex
+        # Per-bundle encryption_key_id carries the wrapped data key + nonce
+        # that the runtime needs alongside the KEK to actually decrypt the
+        # ciphertext from R2. Pulled from the agent_submissions row.
+        if submission and (kid := submission.get("encryption_key_id")):
+            env_overrides["CATHEDRAL_BUNDLE_KEY_ID"] = str(kid)
         # LLM provider key. Polaris's marketplace eval pipeline doesn't
         # currently project the host's vault into the spawned runtime
         # container (see polaris/services/marketplace_eval.py — env_vars

@@ -487,7 +487,12 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
                 submission_id=os.environ.get("POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID", ""),
                 attestation_public_key_hex=attestation_key,
                 bundle_url_resolver=HippiusPresignedUrlResolver(ctx.hippius),
-                bundle_encryption_key_hex=os.environ.get("CATHEDRAL_BUNDLE_KEK", ""),
+                bundle_encryption_key_hex=(
+                    os.environ.get("CATHEDRAL_BUNDLE_KEK")
+                    or os.environ.get("CATHEDRAL_KEK_HEX")
+                    or os.environ.get("CATHEDRAL_MASTER_ENCRYPTION_KEY")
+                    or ""
+                ),
             )
         )
     return HttpPolarisRunner(

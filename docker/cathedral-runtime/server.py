@@ -55,7 +55,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.2")
+VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.3")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -81,6 +81,7 @@ async def run_task(req: TaskRequest) -> JSONResponse:
     start = time.monotonic()
     bundle_url = req.env.get("MINER_BUNDLE_URL")
     kek_hex = req.env.get("CATHEDRAL_BUNDLE_KEK", "")
+    bundle_key_id = req.env.get("CATHEDRAL_BUNDLE_KEY_ID", "")
     llm_key = (
         req.env.get("CHUTES_API_KEY")
         or os.environ.get("CHUTES_API_KEY")
@@ -102,12 +103,12 @@ async def run_task(req: TaskRequest) -> JSONResponse:
         raise HTTPException(502, f"bundle fetch failed: {e.__class__.__name__}: {str(e)[:200]}") from e
     log.info("task_id=%s bundle bytes=%d", req.task_id, len(bundle_bytes))
 
-    if kek_hex:
+    if kek_hex and bundle_key_id:
         try:
-            plaintext = _decrypt_bundle(bundle_bytes, bytes.fromhex(kek_hex))
+            plaintext = _decrypt_bundle(bundle_bytes, bytes.fromhex(kek_hex), bundle_key_id)
         except Exception as e:
             log.exception("task_id=%s decrypt failed", req.task_id)
-            raise HTTPException(500, f"bundle decryption failed: {e}") from e
+            raise HTTPException(500, f"bundle decryption failed: {e.__class__.__name__}: {str(e)[:200]}") from e
     else:
         plaintext = bundle_bytes
 
@@ -158,15 +159,47 @@ async def _fetch_bundle(url: str) -> bytes:
         return resp.content
 
 
-def _decrypt_bundle(ciphertext: bytes, kek: bytes) -> bytes:
-    """Match `cathedral.storage.crypto.decrypt_bundle`.
+def _decrypt_bundle(blob: bytes, kek: bytes, encryption_key_id: str = "") -> bytes:
+    """Match cathedral.storage.crypto.decrypt_bundle.
 
-    Layout written by `encrypt_bundle`:
-      4-byte big-endian wrapped-key length |
-      wrapped data-key (AES-GCM wrap under KEK) |
-      12-byte data-key nonce |
-      ciphertext+tag of the bundle.
+    The publisher's layout (storage/crypto.py):
+      Blob on R2:        nonce(12B) || AES-GCM ciphertext+tag
+      encryption_key_id: 'kms-local:<b64-wrapped-key>:<b64-nonce>'
+                         where wrapped-key is RFC-3394 AES-key-wrap(KEK, data_key)
+                         (NOT AES-GCM wrap)
+
+    Both the blob and the encryption_key_id are needed to decrypt;
+    Cathedral sends both via env_overrides (MINER_BUNDLE_URL for the blob,
+    CATHEDRAL_BUNDLE_KEY_ID for the kms-local string).
     """
+    import base64
+    from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
+
+    _NONCE_LEN = 12
+    if len(kek) != 32:
+        raise ValueError(f"KEK must be 32 bytes (got {len(kek)})")
+    if not encryption_key_id.startswith("kms-local:"):
+        raise ValueError(
+            "CATHEDRAL_BUNDLE_KEY_ID env override required for verified-runtime "
+            "decryption (format: 'kms-local:<b64>:<b64>')"
+        )
+    parts = encryption_key_id.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"bad encryption_key_id shape: {parts[:1]}")
+    wrapped = base64.b64decode(parts[1])
+    nonce_in_key = base64.b64decode(parts[2])
+    if len(blob) <= _NONCE_LEN:
+        raise ValueError("ciphertext too short")
+    nonce_in_blob = blob[:_NONCE_LEN]
+    body_ct = blob[_NONCE_LEN:]
+    if nonce_in_blob != nonce_in_key:
+        raise ValueError("nonce mismatch between blob and key id")
+    data_key = aes_key_unwrap(kek, wrapped)
+    return AESGCM(data_key).decrypt(nonce_in_blob, body_ct, associated_data=None)
+
+
+def _decrypt_bundle_LEGACY(ciphertext: bytes, kek: bytes) -> bytes:
+    """Unused: kept for reference. Original (incorrect) layout assumption."""
     if len(kek) != 32:
         raise ValueError(f"KEK must be 32 bytes (got {len(kek)})")
     if len(ciphertext) < 4:
