@@ -25,3 +25,4 @@ data/
 secrets/
 *.key
 *.pem
+.claude/worktrees/
