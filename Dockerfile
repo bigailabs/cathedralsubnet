@@ -16,9 +16,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e .
 
 # Persistent SQLite for the publisher's submission ledger.
-# Railway mounts a volume; the publisher writes here.
+# Railway provides volume mounts via the dashboard rather than VOLUME directives;
+# the publisher writes to whatever CATHEDRAL_DB_PATH points at.
 RUN mkdir -p /data
-VOLUME /data
 ENV CATHEDRAL_DB_PATH=/data/publisher.db
 
 EXPOSE 8080
