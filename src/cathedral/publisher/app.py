@@ -140,6 +140,21 @@ def build_publisher_app(
 
     app.include_router(submit_router)
     app.include_router(reads_router)
+
+    # Agent-facing onboarding — Moltbook-style. A miner pastes
+    # `Read https://api.cathedral.computer/skill.md and follow the
+    # instructions to mine the eu-ai-act card` into their AI agent;
+    # the agent fetches this URL and self-registers.
+    from fastapi.responses import PlainTextResponse
+    from cathedral.publisher.skill_md import SKILL_MD_CONTENT
+
+    @app.get("/skill.md", response_class=PlainTextResponse, include_in_schema=False)
+    async def _skill_md() -> PlainTextResponse:
+        return PlainTextResponse(
+            SKILL_MD_CONTENT,
+            media_type="text/markdown; charset=utf-8",
+        )
+
     return app
 
 
