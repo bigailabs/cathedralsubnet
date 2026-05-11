@@ -32,7 +32,11 @@ class _ScoreHistoryEntry(BaseModel):
 
 
 class _AgentProfile(BaseModel):
-    """Mirrors CONTRACTS.md §1.9 `AgentProfile` (frontend mirror)."""
+    """Mirrors CONTRACTS.md §1.9 `AgentProfile` (frontend mirror).
+
+    `attestation_mode` was added with the discovery-surface split: the
+    frontend branches the agent profile UI on it (verified vs discovery).
+    """
 
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -47,6 +51,7 @@ class _AgentProfile(BaseModel):
     current_score: float | None
     current_rank: int | None
     submitted_at: str
+    attestation_mode: str  # 'polaris' | 'tee' | 'unverified'
     recent_evals: list[dict[str, Any]] = Field(default_factory=list)
     score_history: list[_ScoreHistoryEntry] = Field(default_factory=list)
 
@@ -121,8 +126,7 @@ def _seed_one_submission(client, keypair, card_id="eu-ai-act") -> dict[str, Any]
 
 def _validate_iso_z(value: str, *, section: str) -> None:
     assert value.endswith("Z"), (
-        f"{section}: timestamps must use ISO-8601 trailing 'Z' "
-        f"(§9 lock #6); got {value!r}"
+        f"{section}: timestamps must use ISO-8601 trailing 'Z' (§9 lock #6); got {value!r}"
     )
 
 
@@ -277,9 +281,7 @@ def test_get_card_feed_returns_items_and_next_since(publisher_client):
 
 def test_get_card_feed_since_filter_is_iso(publisher_client):
     """§2.7 query `since` is ISO-8601."""
-    resp = publisher_client.get(
-        "/v1/cards/eu-ai-act/feed?since=2026-01-01T00:00:00.000Z"
-    )
+    resp = publisher_client.get("/v1/cards/eu-ai-act/feed?since=2026-01-01T00:00:00.000Z")
     assert resp.status_code == 200, f"§2.7 with since must work: {resp.text}"
 
 
@@ -337,9 +339,7 @@ def test_leaderboard_ranked_by_score_desc(publisher_client):
     ranks = [i["current_rank"] for i in items]
     scores = [i["current_score"] for i in items]
     assert ranks == sorted(ranks), f"§2.8: items must be ordered by rank; got {ranks}"
-    assert scores == sorted(scores, reverse=True), (
-        f"§2.8: scores must be descending; got {scores}"
-    )
+    assert scores == sorted(scores, reverse=True), f"§2.8: scores must be descending; got {scores}"
 
 
 # --------------------------------------------------------------------------
@@ -357,9 +357,7 @@ def test_leaderboard_recent_requires_since(publisher_client):
 
 def test_leaderboard_recent_returns_cross_card_evals(publisher_client):
     """§2.9 response shape `{items, next_since, merkle_epoch_latest}`."""
-    resp = publisher_client.get(
-        "/v1/leaderboard/recent?since=2020-01-01T00:00:00.000Z"
-    )
+    resp = publisher_client.get("/v1/leaderboard/recent?since=2020-01-01T00:00:00.000Z")
     assert resp.status_code == 200, f"§2.9: {resp.text}"
     body = resp.json()
     for k in ("items", "next_since", "merkle_epoch_latest"):
@@ -367,9 +365,7 @@ def test_leaderboard_recent_returns_cross_card_evals(publisher_client):
     assert isinstance(body["items"], list)
     for item in body["items"]:
         _EvalOutput.model_validate(item)
-    assert body["merkle_epoch_latest"] is None or isinstance(
-        body["merkle_epoch_latest"], int
-    )
+    assert body["merkle_epoch_latest"] is None or isinstance(body["merkle_epoch_latest"], int)
 
 
 # --------------------------------------------------------------------------

@@ -49,6 +49,10 @@ async def get_agent(agent_id: str, request: Request) -> dict[str, Any]:
         "current_score": sub["current_score"],
         "current_rank": sub["current_rank"],
         "submitted_at": sub["submitted_at"],
+        # attestation_mode is exposed so the frontend can branch the
+        # agent profile UI: verified (polaris/tee) shows score/rank/
+        # eval history; unverified shows the discovery banner.
+        "attestation_mode": sub.get("attestation_mode", "polaris"),
         "recent_evals": [_eval_run_to_output(r, sub) for r in runs],
         "score_history": score_history,
     }
@@ -103,11 +107,11 @@ async def get_card_summary(card_id: str, request: Request) -> dict[str, Any]:
     if card_def is None:
         raise HTTPException(status_code=404, detail="card not found")
 
+    # `best_eval` and `agent_count` are both verified-surface only: the
+    # public card overview should reflect only attested agents. Discovery
+    # rows are surfaced separately at `/v1/cards/{id}/discovery`.
     best = await repository.best_eval_run_for_card(ctx.db, card_id)
-    submissions = await repository.list_submissions_for_card(
-        ctx.db, card_id, sort="score", limit=200, offset=0
-    )
-    agent_count = len([s for s in submissions if s["status"] == "ranked"])
+    agent_count = await repository.count_verified_agents_for_card(ctx.db, card_id)
     latest = max(
         (r["ran_at"] for r in await repository.list_eval_runs_for_card(ctx.db, card_id, limit=1)),
         default=None,
@@ -193,6 +197,69 @@ async def get_card_eval_spec(card_id: str, request: Request) -> dict[str, Any]:
         "task_templates": card_def["task_templates"],
         "source_pool": card_def["source_pool"],
         "refresh_cadence_hours": card_def["refresh_cadence_hours"],
+    }
+
+
+# --------------------------------------------------------------------------
+# Discovery surface — unverified submissions
+# --------------------------------------------------------------------------
+#
+# The leaderboard (above) is the verified surface: only `attestation_mode`
+# in `('polaris','tee')` rows. Discovery rows live here on a separate axis:
+#
+#   GET /v1/cards/{id}/discovery        — per-card unverified list
+#   GET /v1/cards/{id}/discovery/count  — cheap count for tile/header
+#   GET /v1/discovery/recent            — cross-card feed for /research
+#
+# Discovery rows have `attestation_mode='unverified'` and `status='discovery'`.
+# They never enter the eval queue, never accrue scores, never earn TAO.
+# They exist for browsing, citation, and acquisition discovery.
+
+
+@router.get("/v1/cards/{card_id}/discovery")
+async def get_card_discovery(
+    card_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    ctx: PublisherContext = request.app.state.ctx
+    if (await repository.get_card_definition(ctx.db, card_id)) is None:
+        raise HTTPException(status_code=404, detail="card not found")
+    items = await repository.list_discovery_submissions_for_card(
+        ctx.db, card_id, limit=limit, offset=offset
+    )
+    total = await repository.count_discovery_submissions_for_card(ctx.db, card_id)
+    return {
+        "items": [_submission_to_discovery_item(s) for s in items],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/v1/cards/{card_id}/discovery/count")
+async def get_card_discovery_count(card_id: str, request: Request) -> dict[str, Any]:
+    ctx: PublisherContext = request.app.state.ctx
+    if (await repository.get_card_definition(ctx.db, card_id)) is None:
+        raise HTTPException(status_code=404, detail="card not found")
+    total = await repository.count_discovery_submissions_for_card(ctx.db, card_id)
+    return {"total": total}
+
+
+@router.get("/v1/discovery/recent")
+async def get_discovery_recent(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Cross-card discovery feed used by the top-level /research page."""
+    ctx: PublisherContext = request.app.state.ctx
+    items = await repository.list_discovery_submissions_recent(ctx.db, limit=limit, offset=offset)
+    return {
+        "items": [_submission_to_discovery_item(s) for s in items],
+        "limit": limit,
+        "offset": offset,
     }
 
 
@@ -317,6 +384,7 @@ async def get_miner_agents(hotkey: str, request: Request) -> dict[str, Any]:
                 "current_score": s["current_score"],
                 "current_rank": s["current_rank"],
                 "submitted_at": s["submitted_at"],
+                "attestation_mode": s.get("attestation_mode", "polaris"),
                 "recent_evals": [_eval_run_to_output(r, s) for r in runs],
                 "score_history": [
                     {"date": r["ran_at"], "score": r["weighted_score"]} for r in reversed(runs)
@@ -419,6 +487,30 @@ def _submission_to_leaderboard_entry(sub: dict[str, Any]) -> dict[str, Any]:
         "current_score": sub["current_score"] or 0.0,
         "current_rank": sub["current_rank"] or 0,
         "last_eval_at": sub.get("submitted_at", _now_iso()),
+    }
+
+
+def _submission_to_discovery_item(sub: dict[str, Any]) -> dict[str, Any]:
+    """Project a discovery (unverified) submission to its public shape.
+
+    Discovery items intentionally omit score/rank fields — there are none.
+    `soul_md_preview` passes through whatever the row carries; today that
+    is always NULL because the submit path leaves it unpopulated for
+    unverified rows. The frontend renders this as a teaser when present
+    and as nothing when null.
+    """
+    return {
+        "agent_id": sub["id"],
+        "display_name": sub["display_name"],
+        "logo_url": sub.get("logo_url"),
+        "bio": sub.get("bio"),
+        "miner_hotkey": sub["miner_hotkey"],
+        "card_id": sub["card_id"],
+        "bundle_hash": sub["bundle_hash"],
+        "bundle_size_bytes": sub["bundle_size_bytes"],
+        "submitted_at": sub["submitted_at"],
+        "soul_md_preview": sub.get("soul_md_preview"),
+        "tags": ["unverified", "research"],
     }
 
 
