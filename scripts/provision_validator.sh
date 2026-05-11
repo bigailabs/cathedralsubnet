@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Cathedral validator provisioner — Stage A.7
+# Cathedral validator provisioner - Stage A.7
 #
 # Bootstraps a fresh Polaris CPU box (Ubuntu 22.04+) into a fully running
 # Cathedral validator under PM2. Idempotent: safe to re-run.
