@@ -30,15 +30,37 @@ from cathedral.storage.hippius_client import (
     HippiusError,
 )
 
-#: Locked bucket name (CONTRACTS.md Section 5).
-BUCKET: str = "cathedral-bundles"
+import os
+
+#: Default bucket name (CONTRACTS.md Section 5). Overridable via
+#: HIPPIUS_S3_BUCKET so a single Hippius account can host bundles
+#: under a token-scoped bucket (e.g. `kasparian-testnet`) when the
+#: dedicated `cathedral-bundles` bucket isn't yet provisioned.
+BUCKET: str = os.environ.get("HIPPIUS_S3_BUCKET", "cathedral-bundles")
 BUCKET_NAME: str = BUCKET  # alias used by some tests
 DEFAULT_BUCKET: str = BUCKET
 
+#: Default key prefix for agent bundles. Overridable via
+#: HIPPIUS_S3_PREFIX so multiple subprojects can share a bucket.
+#: Trailing `/` enforced so callers never produce keys like
+#: `cathedralagents/abc.bin.enc`.
+def _normalize_prefix(raw: str) -> str:
+    if not raw:
+        return ""
+    return raw if raw.endswith("/") else raw + "/"
+
+
+_AGENT_PREFIX: str = _normalize_prefix(
+    os.environ.get("HIPPIUS_S3_PREFIX", "agents/")
+)
+
 
 def agent_blob_key(submission_id: str) -> str:
-    """Return the encrypted-blob key shape `agents/{submission_id}.bin.enc`."""
-    return f"agents/{submission_id}.bin.enc"
+    """Return the encrypted-blob key shape `<prefix>{submission_id}.bin.enc`.
+
+    Prefix defaults to `agents/`; override via `HIPPIUS_S3_PREFIX` env.
+    """
+    return f"{_AGENT_PREFIX}{submission_id}.bin.enc"
 
 
 # Aliases for tooling discovery.
@@ -47,8 +69,13 @@ blob_key_for = agent_blob_key
 make_blob_key = agent_blob_key
 
 
+_LOGO_PREFIX: str = _normalize_prefix(
+    os.environ.get("HIPPIUS_S3_LOGO_PREFIX", "logos/")
+)
+
+
 def logo_blob_key(submission_id: str, ext: str) -> str:
-    return f"logos/{submission_id}.{ext}"
+    return f"{_LOGO_PREFIX}{submission_id}.{ext}"
 
 
 def put_bundle(
