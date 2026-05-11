@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import typer
 import uvicorn
@@ -50,6 +51,88 @@ def migrate(
 
     asyncio.run(_run())
     typer.echo(f"schema ready at {settings.storage.database_path}")
+
+
+@app.command("pull")
+def pull(
+    config: str = typer.Option("config/testnet.toml", "--config", "-c"),
+    publisher_url: str = typer.Option(
+        "https://api.cathedral.computer", "--publisher-url"
+    ),
+    public_key_env: str = typer.Option(
+        "CATHEDRAL_PUBLIC_KEY_HEX",
+        "--public-key-env",
+        help="Env var holding the cathedral signing public key (32-byte hex).",
+    ),
+    interval_secs: float = typer.Option(30.0, "--interval-secs"),
+) -> None:
+    """V1 pull loop — poll publisher's leaderboard/recent + set weights.
+
+    This is the canonical V1 validator loop:
+        publisher /v1/leaderboard/recent
+            -> verify cathedral signature
+            -> persist to local sqlite (pulled_eval_runs)
+        weight_loop
+            -> reads rolling 30-day score per hotkey
+            -> set Bittensor weights
+    """
+    configure()
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    from cathedral.chain import BittensorChain
+    from cathedral.config import ValidatorSettings
+    from cathedral.validator.health import Health
+    from cathedral.validator.pull_loop import run_pull_loop
+    from cathedral.validator.weight_loop import run_weight_loop
+
+    pubkey_hex = os.environ.get(public_key_env)
+    if not pubkey_hex:
+        raise typer.BadParameter(f"env var {public_key_env} not set")
+    pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex))
+
+    settings = ValidatorSettings.from_toml(config)
+
+    async def _run() -> None:
+        conn = await connect(settings.storage.database_path)
+        health = Health()
+        chain = BittensorChain(
+            network=settings.network.name,
+            netuid=settings.network.netuid,
+            wallet_name=settings.network.wallet_name,
+            wallet_hotkey=settings.network.validator_hotkey,
+            wallet_path=settings.network.wallet_path,
+        )
+        stop = asyncio.Event()
+        tasks = [
+            asyncio.create_task(
+                run_pull_loop(
+                    conn=conn,
+                    publisher_url=publisher_url,
+                    cathedral_public_key=pubkey,
+                    health=health,
+                    interval_secs=interval_secs,
+                    stop=stop,
+                )
+            ),
+            asyncio.create_task(
+                run_weight_loop(
+                    conn,
+                    chain,
+                    health,
+                    interval_secs=settings.weights.interval_secs,
+                    disabled=settings.weights.disabled,
+                    stop=stop,
+                )
+            ),
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            stop.set()
+            await conn.close()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

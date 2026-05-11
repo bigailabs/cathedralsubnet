@@ -16,7 +16,8 @@ from cathedral.cards.registry import CardRegistry
 from cathedral.chain import BittensorChain, Chain
 from cathedral.evidence import EvidenceCollector, HttpPolarisFetcher
 from cathedral.types import PolarisAgentClaim
-from cathedral.validator import cards as cards_store, queue, weight_loop, worker
+from cathedral.validator import cards as cards_store
+from cathedral.validator import queue, weight_loop, worker
 from cathedral.validator.auth import make_bearer_dep
 from cathedral.validator.config_runtime import RuntimeContext
 from cathedral.validator.db import connect

@@ -10,6 +10,7 @@ dist/
 build/
 *.egg-info/
 .venv/
+.venv-local/
 venv/
 *.db
 *.db-shm

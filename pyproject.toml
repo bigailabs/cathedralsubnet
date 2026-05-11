@@ -19,6 +19,8 @@ dependencies = [
     "typer>=0.13",
     "tomli>=2.0; python_version<'3.11'",
     "bittensor>=8.0",
+    "python-multipart>=0.0.9,<1.0.0",
+    "boto3>=1.34.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +38,7 @@ dev = [
 cathedral = "cathedral.cli.ops:app"
 cathedral-validator = "cathedral.cli.validator:app"
 cathedral-miner = "cathedral.cli.miner:app"
+cathedral-publisher = "cathedral.publisher.cli:app"
 
 [build-system]
 requires = ["hatchling>=1.25"]
@@ -81,3 +84,10 @@ ignore = ["S101", "S104", "S105", "UP036", "UP042"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S", "B017"]
+# FastAPI dependency injection requires `= File(...)` / `= Depends(...)` defaults.
+"src/cathedral/publisher/submit.py" = ["B008"]
+"src/cathedral/publisher/reads.py" = ["B008"]
+# `SimilarityRejection` is named for the rejection event, not an Error pattern.
+"src/cathedral/publisher/similarity.py" = ["N818"]
+# SQL ORDER BY clause is built from a whitelisted dispatch — not user input.
+"src/cathedral/publisher/repository.py" = ["S608"]

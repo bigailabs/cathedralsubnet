@@ -26,6 +26,16 @@ class CardRegistry:
 
     @classmethod
     def baseline(cls) -> CardRegistry:
+        """V1 launch baseline (CONTRACTS.md Section 9 lock #12).
+
+        These IDs supersede the earlier baseline. The full per-card
+        definition (description, eval_spec_md, source_pool,
+        task_templates, scoring_rubric) lives in the
+        `card_definitions` DB table populated from the
+        `cathedral-eval-spec` content repo. The in-process registry
+        kept here is the lightweight scoring-side view used by the
+        existing `score_card`/`preflight` code paths.
+        """
         return cls(
             entries=(
                 RegistryEntry(
@@ -40,35 +50,31 @@ class CardRegistry:
                     refresh_cadence_hours=24,
                 ),
                 RegistryEntry(
-                    card_id="us-ai-executive-order",
+                    card_id="us-ai-eo",
                     jurisdiction=Jurisdiction.US,
                     topic="US executive orders and federal AI guidance",
                     required_source_classes=(SourceClass.GOVERNMENT, SourceClass.REGULATOR),
                     refresh_cadence_hours=24,
                 ),
                 RegistryEntry(
-                    card_id="uk-aisi",
+                    card_id="uk-ai-whitepaper",
                     jurisdiction=Jurisdiction.UK,
-                    topic="UK AI Safety Institute publications",
+                    topic="UK pro-innovation AI regulation framework",
                     required_source_classes=(SourceClass.GOVERNMENT, SourceClass.REGULATOR),
                     refresh_cadence_hours=48,
                 ),
                 RegistryEntry(
-                    card_id="eu-gdpr-enforcement",
-                    jurisdiction=Jurisdiction.EU,
-                    topic="GDPR enforcement decisions and fines",
-                    required_source_classes=(SourceClass.REGULATOR, SourceClass.COURT),
-                    refresh_cadence_hours=24,
+                    card_id="singapore-pdpc",
+                    jurisdiction=Jurisdiction.SG,
+                    topic="Singapore PDPC enforcement and guidance",
+                    required_source_classes=(SourceClass.REGULATOR, SourceClass.LAW_TEXT),
+                    refresh_cadence_hours=48,
                 ),
                 RegistryEntry(
-                    card_id="us-ccpa",
-                    jurisdiction=Jurisdiction.US,
-                    topic="California Consumer Privacy Act enforcement",
-                    required_source_classes=(
-                        SourceClass.REGULATOR,
-                        SourceClass.LAW_TEXT,
-                        SourceClass.COURT,
-                    ),
+                    card_id="japan-meti-mic",
+                    jurisdiction=Jurisdiction.JP,
+                    topic="Japan METI/MIC AI and data guidance",
+                    required_source_classes=(SourceClass.GOVERNMENT, SourceClass.REGULATOR),
                     refresh_cadence_hours=48,
                 ),
             )
