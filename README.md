@@ -21,6 +21,8 @@ This repository is the validator and miner reference implementation in Python.
 
 Pre-1.0. Validator and miner are functional in dry mode. Active work is tracked in [open issues](https://github.com/bigailabs/cathedralsubnet/issues).
 
+The publisher service auto-deploys to Railway on every push to `main`.
+
 ## Layout
 
 ```
