@@ -52,8 +52,30 @@ echo "    validator_hotkey=${VALIDATOR_HOTKEY_SS58}"
 # --- Step 2: apt deps -------------------------------------------------------
 
 echo "==> step 2: install system packages"
-# Build the list of missing packages so re-runs skip a no-op apt update + install.
-APT_PKGS=(python3.11 python3.11-venv git curl gnupg nodejs npm)
+# Pick the Python interpreter. Cathedral requires >=3.11. On Ubuntu 22.04 the
+# default is 3.10 and python3.11 must come from apt; on 24.04 the default is
+# already 3.12. We auto-detect rather than hardcoding 3.11.
+PYTHON_BIN=""
+for cand in python3.13 python3.12 python3.11; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    PYTHON_BIN="$cand"
+    break
+  fi
+done
+if [[ -z "$PYTHON_BIN" ]]; then
+  sudo apt-get update
+  sudo apt-get install -y python3.11 python3.11-venv
+  PYTHON_BIN="python3.11"
+fi
+echo "    python: $PYTHON_BIN ($($PYTHON_BIN --version))"
+
+VENV_PKG="${PYTHON_BIN}-venv"
+if ! dpkg -s "$VENV_PKG" >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y "$VENV_PKG"
+fi
+
+APT_PKGS=(git curl gnupg nodejs npm)
 MISSING_PKGS=()
 for pkg in "${APT_PKGS[@]}"; do
   if ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -65,7 +87,7 @@ if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
   sudo apt-get update
   sudo apt-get install -y "${MISSING_PKGS[@]}"
 else
-  echo "    all packages already installed"
+  echo "    all system packages already installed"
 fi
 
 # --- Step 3: cathedral user -------------------------------------------------
@@ -108,7 +130,7 @@ sudo -u cathedral git -C "$SRC_DIR" pull --ff-only --quiet origin "$CATHEDRAL_RE
 
 echo "==> step 7: python venv + install"
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
-  sudo -u cathedral python3.11 -m venv "$VENV_DIR"
+  sudo -u cathedral "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 sudo -u cathedral "$VENV_DIR/bin/pip" install --upgrade --quiet pip
 sudo -u cathedral "$VENV_DIR/bin/pip" install --quiet -e "$SRC_DIR"
@@ -167,19 +189,21 @@ sudo install -o cathedral -g cathedral -m 0644 "$ECOSYSTEM_SRC" "$ECOSYSTEM_DST"
 # --- Step 12: pm2 start -----------------------------------------------------
 
 echo "==> step 12: pm2 start"
-# `pm2 start` on an already-running ecosystem reloads in place, so this is idempotent.
-sudo -u cathedral pm2 start "$ECOSYSTEM_DST"
+# Use `sudo -iu cathedral` (login shell) rather than plain `sudo -u`. PM2's
+# daemon spawn fails with `spawn /usr/bin/node EACCES` when the env isn't a
+# clean login shell (the parent shell inherits stdio fds that PM2's child
+# can't open). Login shell resets HOME / fds and pm2 starts cleanly.
+# `pm2 start` on an already-running ecosystem reloads in place; idempotent.
+sudo -iu cathedral pm2 start "$ECOSYSTEM_DST"
 
 # --- Step 13: pm2 save ------------------------------------------------------
 
 echo "==> step 13: pm2 save"
-sudo -u cathedral pm2 save
+sudo -iu cathedral pm2 save
 
 # --- Step 14: pm2 startup --------------------------------------------------
 
 echo "==> step 14: pm2 systemd boot integration"
-# Only invoke `pm2 startup` if the unit isn't already enabled. Re-running it
-# is harmless but noisy and prints a misleading "copy this command" banner.
 if systemctl is-enabled pm2-cathedral >/dev/null 2>&1; then
   echo "    pm2-cathedral systemd unit already enabled"
 else
@@ -189,8 +213,8 @@ fi
 # --- Step 15: migrate db ---------------------------------------------------
 
 echo "==> step 15: run validator migrations"
-sudo -u cathedral "$VENV_DIR/bin/cathedral-validator" migrate --config "$ETC_DIR/testnet.toml"
+sudo -iu cathedral "$VENV_DIR/bin/cathedral-validator" migrate --config "$ETC_DIR/testnet.toml"
 
 echo ""
 echo "==> done. pm2 status:"
-sudo -u cathedral pm2 status
+sudo -iu cathedral pm2 status
