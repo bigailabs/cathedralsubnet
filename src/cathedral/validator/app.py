@@ -17,7 +17,7 @@ from cathedral.chain import BittensorChain, Chain
 from cathedral.evidence import EvidenceCollector, HttpPolarisFetcher
 from cathedral.types import PolarisAgentClaim
 from cathedral.validator import cards as cards_store
-from cathedral.validator import queue, weight_loop, worker
+from cathedral.validator import pull_loop, queue, weight_loop, worker
 from cathedral.validator.auth import make_bearer_dep
 from cathedral.validator.config_runtime import RuntimeContext
 from cathedral.validator.db import connect
@@ -69,6 +69,25 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                 )
             ),
         ]
+        if ctx.cathedral_public_key is not None:
+            tasks.append(
+                asyncio.create_task(
+                    pull_loop.run_pull_loop(
+                        conn=conn,
+                        publisher_url=ctx.settings.publisher.url,
+                        cathedral_public_key=ctx.cathedral_public_key,
+                        health=ctx.health,
+                        interval_secs=ctx.settings.publisher.pull_interval_secs,
+                        api_token=ctx.publisher_api_token,
+                        stop=stop,
+                    )
+                )
+            )
+        else:
+            logger.warning(
+                "pull_loop_disabled",
+                reason="cathedral_public_key not configured",
+            )
         try:
             yield
         finally:
@@ -138,6 +157,22 @@ def from_settings(settings_path: str) -> FastAPI:
         wallet_hotkey=settings.network.validator_hotkey,
         wallet_path=settings.network.wallet_path,
     )
+
+    cathedral_pubkey: Ed25519PublicKey | None = None
+    cathedral_pubkey_hex = os.environ.get(settings.publisher.public_key_env)
+    if cathedral_pubkey_hex:
+        cathedral_pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(cathedral_pubkey_hex))
+    else:
+        logger.warning(
+            "cathedral_public_key_missing",
+            env=settings.publisher.public_key_env,
+            hint="pull_loop will be disabled — set the env var to enable",
+        )
+
+    publisher_api_token: str | None = None
+    if settings.publisher.api_token_env:
+        publisher_api_token = os.environ.get(settings.publisher.api_token_env)
+
     ctx = RuntimeContext(
         settings=settings,
         bearer=bearer,
@@ -145,6 +180,8 @@ def from_settings(settings_path: str) -> FastAPI:
         collector=collector,
         registry=CardRegistry.baseline(),
         health=Health(),
+        cathedral_public_key=cathedral_pubkey,
+        publisher_api_token=publisher_api_token,
         fetcher_close=fetcher.aclose,
     )
     return build_app(ctx)

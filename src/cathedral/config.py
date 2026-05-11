@@ -52,6 +52,15 @@ class WeightsConfig(BaseModel):
     forced_burn_percentage: float = 98.0
 
 
+class PublisherConfig(BaseModel):
+    """Where the validator pulls signed eval-runs from."""
+
+    url: str = "https://api.cathedral.computer"
+    public_key_env: str = "CATHEDRAL_PUBLIC_KEY_HEX"
+    pull_interval_secs: float = 30.0
+    api_token_env: str | None = None
+
+
 class StorageConfig(BaseModel):
     database_path: str = "data/validator.db"
 
@@ -72,6 +81,7 @@ class ValidatorSettings(BaseSettings):
     polaris: PolarisConfig
     http: HttpConfig = Field(default_factory=HttpConfig)
     weights: WeightsConfig = Field(default_factory=WeightsConfig)
+    publisher: PublisherConfig = Field(default_factory=PublisherConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
     stall: StallConfig = Field(default_factory=StallConfig)

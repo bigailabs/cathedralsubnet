@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from cathedral.cards.registry import CardRegistry
 from cathedral.chain import Chain
 from cathedral.config import ValidatorSettings
@@ -24,4 +26,6 @@ class RuntimeContext:
     collector: EvidenceCollector
     registry: CardRegistry
     health: Health
+    cathedral_public_key: Ed25519PublicKey | None = None
+    publisher_api_token: str | None = None
     fetcher_close: Callable[[], Awaitable[None]] | None = None
