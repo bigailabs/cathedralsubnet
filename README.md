@@ -242,4 +242,4 @@ Full validator procedure (mechanism, anti-cheating, requirements, known limits, 
 
 ## License
 
-MIT. See [LICENSE](LICENSE). (c) 2026 bigailabs.
+MIT. See [LICENSE](LICENSE). (c) 2026 cathedralai.
