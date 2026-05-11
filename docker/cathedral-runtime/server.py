@@ -2,12 +2,12 @@
 
 Two modes:
 
-* **Per-eval mode (default)** — Polaris's `runtime-evaluate` endpoint
+* **Per-eval mode (default)** - Polaris's `runtime-evaluate` endpoint
   deploys this image and POSTs to `/task`. The container fetches the
   encrypted bundle, decrypts, calls the LLM, returns a Card. Lifetime
   is one eval.
 
-* **Probe mode** (`CATHEDRAL_PROBE_MODE=true`) — long-lived process on
+* **Probe mode** (`CATHEDRAL_PROBE_MODE=true`) - long-lived process on
   a miner's Polaris box. Adds `/probe/run`, `/probe/health`,
   `/probe/reload`. The probe owns the miner hotkey (mounted from
   `/etc/cathedral-probe/hotkey.json`) and signs each `ProbeOutput`
@@ -29,7 +29,7 @@ Per-eval contract (existing):
       }
     }
 
-Probe-mode contract (new) — see ProbeRequest / ProbeOutput below.
+Probe-mode contract (new) - see ProbeRequest / ProbeOutput below.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.7")
 PORT = int(os.getenv("PORT", "8080"))
 
 # Probe-mode tunables. These are read at module load so a process needs
-# to restart to flip modes — that's intentional: the toggle determines
+# to restart to flip modes - that's intentional: the toggle determines
 # which endpoints get registered on `app`.
 PROBE_MODE = os.getenv("CATHEDRAL_PROBE_MODE", "").lower() in ("1", "true", "yes", "on")
 PROBE_HOTKEY_PATH = Path(
@@ -72,7 +72,7 @@ PROBE_TRACE_DIR = Path(os.getenv("CATHEDRAL_PROBE_TRACE_DIR", "/var/lib/cathedra
 
 def _configure_logging() -> logging.Logger:
     """JSON-line logger to stderr. We avoid pulling structlog into the
-    container image — the existing requirements.txt is intentionally
+    container image - the existing requirements.txt is intentionally
     slim. A small custom formatter gives us structured logs without
     another dep.
     """
@@ -200,7 +200,7 @@ async def run_task(req: TaskRequest) -> JSONResponse:
     )
 
     if not citations:
-        raise HTTPException(502, "no sources successfully fetched — cannot produce card")
+        raise HTTPException(502, "no sources successfully fetched - cannot produce card")
 
     model = os.getenv("CATHEDRAL_RUNTIME_MODEL", "deepseek-ai/DeepSeek-V3.1")
     base_url_chutes = (
@@ -351,7 +351,7 @@ def _reconcile_citations(
 
     The model often invents these fields; we have the truth from our
     actual fetch. Citations the model wrote that DON'T match a URL we
-    actually fetched are dropped — they'd fail preflight anyway.
+    actually fetched are dropped - they'd fail preflight anyway.
     """
     real_by_url = {c["url"]: c for c in real_citations}
     model_cits = card.get("citations") or []
@@ -407,7 +407,7 @@ authoritative state of the regulatory record AS OF NOW. Cite by URL.
 # Sources you actually fetched
 
 The following sources have been fetched and verified. Each carries a
-content hash. You MAY cite any of these URLs — the publisher will
+content hash. You MAY cite any of these URLs - the publisher will
 re-fetch each one to verify status 2xx, so do not invent URLs or
 content hashes. The runtime will overwrite citation fetched_at /
 status / content_hash with the measured values regardless of what you
@@ -471,7 +471,7 @@ async def _call_llm(
     max_summary = int(rubric.get("max_summary_chars") or 800)
     cadence = int(spec.get("refresh_cadence_hours") or 24)
 
-    # Build a compact source block — URL + class + first 1500 chars of body.
+    # Build a compact source block - URL + class + first 1500 chars of body.
     blocks = []
     for c in citations[:8]:  # cap to keep prompt manageable
         excerpt = (c.get("_excerpt") or "").replace("\n", " ")[:1500]
@@ -944,7 +944,7 @@ def _register_probe_endpoints() -> None:
         log.info("probe_mode_on hotkey=%s", ss58)
     except FileNotFoundError:
         log.warning(
-            "probe_mode_on hotkey_path=%s missing — health 503 until /probe/reload",
+            "probe_mode_on hotkey_path=%s missing - health 503 until /probe/reload",
             PROBE_HOTKEY_PATH,
         )
     except Exception as e:

@@ -23,7 +23,7 @@ RUNTIME_PATH = Path(__file__).resolve().parents[1] / "docker" / "cathedral-runti
 
 
 # --------------------------------------------------------------------------
-# Helpers — load the runtime server module under controlled env / hotkey
+# Helpers - load the runtime server module under controlled env / hotkey
 # --------------------------------------------------------------------------
 
 
@@ -50,7 +50,7 @@ def _load_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Any:
-    """Fresh module load — required because probe endpoints register at
+    """Fresh module load - required because probe endpoints register at
     import time based on env. Using importlib avoids polluting sys.modules
     across tests."""
     monkeypatch.setenv("CATHEDRAL_PROBE_MODE", "true" if probe_mode else "false")
@@ -336,7 +336,7 @@ def test_probe_reload_swaps_bundle_when_bytes_provided(
 
 
 def _make_minimal_bundle() -> bytes:
-    """Smallest valid zip with a soul.md inside — matches what the
+    """Smallest valid zip with a soul.md inside - matches what the
     extractor expects."""
     import io
     import zipfile
