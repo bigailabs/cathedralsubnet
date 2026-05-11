@@ -19,6 +19,8 @@ dependencies = [
     "typer>=0.13",
     "tomli>=2.0; python_version<'3.11'",
     "bittensor>=8.0",
+    "python-multipart>=0.0.9,<1.0.0",
+    "boto3>=1.34.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
