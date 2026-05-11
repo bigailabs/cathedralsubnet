@@ -1,0 +1,30 @@
+module.exports = {
+  apps: [
+    {
+      name: "cathedral-validator",
+      cwd: "/opt/cathedral/source",
+      script: "/opt/cathedral/.venv/bin/cathedral-validator",
+      args: "serve --config /etc/cathedral/testnet.toml --no-json-logs",
+      interpreter: "none",
+      env_file: "/etc/cathedral/validator.env",
+      autorestart: true,
+      max_restarts: 50,
+      restart_delay: 10000,
+      max_memory_restart: "1G",
+      out_file: "/var/log/cathedral/validator.out.log",
+      error_file: "/var/log/cathedral/validator.err.log",
+      time: true,
+    },
+    {
+      name: "cathedral-updater",
+      cwd: "/opt/cathedral",
+      script: "/opt/cathedral/bin/updater.sh",
+      interpreter: "/bin/bash",
+      autorestart: true,
+      restart_delay: 60000,
+      out_file: "/var/log/cathedral/updater.out.log",
+      error_file: "/var/log/cathedral/updater.err.log",
+      time: true,
+    },
+  ],
+};
