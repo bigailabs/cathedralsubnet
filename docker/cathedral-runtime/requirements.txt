@@ -4,3 +4,4 @@ httpx==0.28.1
 pydantic==2.10.0
 cryptography==44.0.0
 blake3==1.0.4
+bittensor-wallet==4.0.1

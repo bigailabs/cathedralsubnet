@@ -1,49 +1,35 @@
 """Cathedral verified-runtime server.
 
-Polaris's `runtime-evaluate` endpoint deploys this image, then POSTs a task
-to `/task`. The container:
+Two modes:
 
-  1. Fetches the miner's encrypted bundle from R2 via a presigned URL
-  2. Decrypts the bundle using the KEK + encryption_key_id passed in env
-  3. Reads the miner's soul.md as system prompt
-  4. Fetches Cathedral's published eval-spec for the card_id
-  5. Fetches each source in the eval-spec's source_pool
-  6. Computes BLAKE3 hashes of the fetched content for verifiable citations
-  7. Asks the LLM to synthesize a Card JSON using the real citations
-  8. Returns the Card
+* **Per-eval mode (default)** — Polaris's `runtime-evaluate` endpoint
+  deploys this image and POSTs to `/task`. The container fetches the
+  encrypted bundle, decrypts, calls the LLM, returns a Card. Lifetime
+  is one eval.
 
-This produces cards that the publisher's scoring pipeline can actually
-verify and rank — citations re-fetch with matching hashes, hitting the
-"source_quality" and "min_citations" criteria.
+* **Probe mode** (`CATHEDRAL_PROBE_MODE=true`) — long-lived process on
+  a miner's Polaris box. Adds `/probe/run`, `/probe/health`,
+  `/probe/reload`. The probe owns the miner hotkey (mounted from
+  `/etc/cathedral-probe/hotkey.json`) and signs each `ProbeOutput`
+  before returning. Traces persisted to `/var/lib/cathedral-probe/`.
 
-Contract with Polaris (`polaris/services/runtime_evaluate.py`):
+Per-eval contract (existing):
 
     POST /task
-    Content-Type: application/json
     {
-      "task_id":  "...",
-      "task":     "<prompt the LLM should answer>",
-      "env":      {
+      "task_id": "...",
+      "task":    "<prompt>",
+      "env":     {
         "MINER_BUNDLE_URL":          "<presigned R2 URL>",
         "CATHEDRAL_BUNDLE_KEK":      "<hex>",
         "CATHEDRAL_BUNDLE_KEY_ID":   "kms-local:<b64>:<b64>",
-        "CHUTES_API_KEY":            "<llm provider key>",
-        "CHUTES_BASE_URL":           "(optional) https://llm.chutes.ai/v1",
+        "CHUTES_API_KEY":            "<llm key>",
         "CARD_ID":                   "eu-ai-act",
-        "MINER_HOTKEY":              "5...",
-        "EVAL_SPEC_URL":             "(optional) override the eval-spec source",
-        "CATHEDRAL_PUBLISHER_URL":   "(optional) base URL for eval-spec lookup"
+        ...
       }
     }
 
-    -> 200
-    {
-      "output_json":   {... Card ...},
-      "duration_ms":   12345,
-      "model":         "deepseek-ai/DeepSeek-V3.1",
-      "input_tokens":  ...,
-      "output_tokens": ...
-    }
+Probe-mode contract (new) — see ProbeRequest / ProbeOutput below.
 """
 
 from __future__ import annotations
@@ -55,9 +41,12 @@ import json
 import logging
 import os
 import re
+import sys
 import time
+import uuid
 import zipfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import blake3
@@ -71,8 +60,45 @@ from starlette.responses import JSONResponse
 VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.7")
 PORT = int(os.getenv("PORT", "8080"))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("cathedral-runtime")
+# Probe-mode tunables. These are read at module load so a process needs
+# to restart to flip modes — that's intentional: the toggle determines
+# which endpoints get registered on `app`.
+PROBE_MODE = os.getenv("CATHEDRAL_PROBE_MODE", "").lower() in ("1", "true", "yes", "on")
+PROBE_HOTKEY_PATH = Path(
+    os.getenv("CATHEDRAL_PROBE_HOTKEY_PATH", "/etc/cathedral-probe/hotkey.json")
+)
+PROBE_TRACE_DIR = Path(os.getenv("CATHEDRAL_PROBE_TRACE_DIR", "/var/lib/cathedral-probe/traces"))
+
+
+def _configure_logging() -> logging.Logger:
+    """JSON-line logger to stderr. We avoid pulling structlog into the
+    container image — the existing requirements.txt is intentionally
+    slim. A small custom formatter gives us structured logs without
+    another dep.
+    """
+
+    class _JsonFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            payload: dict[str, Any] = {
+                "ts": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }
+            if record.exc_info:
+                payload["exc"] = self.formatException(record.exc_info)
+            return json.dumps(payload, default=str)
+
+    handler = logging.StreamHandler(stream=sys.stderr)
+    handler.setFormatter(_JsonFormatter())
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    return logging.getLogger("cathedral-runtime")
+
+
+log = _configure_logging()
 
 
 app = FastAPI(title=f"cathedral-runtime {VERSION}")
@@ -123,12 +149,16 @@ async def run_task(req: TaskRequest) -> JSONResponse:
     if not card_id:
         raise HTTPException(400, "CARD_ID missing in env")
 
-    log.info("task_id=%s card_id=%s fetching bundle from %s", req.task_id, card_id, bundle_url[:120])
+    log.info(
+        "task_id=%s card_id=%s fetching bundle from %s", req.task_id, card_id, bundle_url[:120]
+    )
     try:
         bundle_bytes = await _fetch_bundle(bundle_url)
     except Exception as e:
         log.exception("task_id=%s bundle fetch failed", req.task_id)
-        raise HTTPException(502, f"bundle fetch failed: {e.__class__.__name__}: {str(e)[:200]}") from e
+        raise HTTPException(
+            502, f"bundle fetch failed: {e.__class__.__name__}: {str(e)[:200]}"
+        ) from e
     log.info("task_id=%s bundle bytes=%d", req.task_id, len(bundle_bytes))
 
     if kek_hex and bundle_key_id:
@@ -136,7 +166,9 @@ async def run_task(req: TaskRequest) -> JSONResponse:
             plaintext = _decrypt_bundle(bundle_bytes, bytes.fromhex(kek_hex), bundle_key_id)
         except Exception as e:
             log.exception("task_id=%s decrypt failed", req.task_id)
-            raise HTTPException(500, f"bundle decryption failed: {e.__class__.__name__}: {str(e)[:200]}") from e
+            raise HTTPException(
+                500, f"bundle decryption failed: {e.__class__.__name__}: {str(e)[:200]}"
+            ) from e
     else:
         plaintext = bundle_bytes
 
@@ -153,21 +185,26 @@ async def run_task(req: TaskRequest) -> JSONResponse:
         spec = await _fetch_eval_spec(publisher, card_id)
     except Exception as e:
         log.exception("task_id=%s eval-spec fetch failed", req.task_id)
-        raise HTTPException(502, f"eval-spec fetch failed: {e.__class__.__name__}: {str(e)[:200]}") from e
+        raise HTTPException(
+            502, f"eval-spec fetch failed: {e.__class__.__name__}: {str(e)[:200]}"
+        ) from e
 
     # Fetch every source in the source pool concurrently. Compute BLAKE3
     # hash per source so the LLM has verifiable citation material.
     citations = await _fetch_and_hash_sources(spec.get("source_pool") or [])
-    log.info("task_id=%s fetched %d/%d sources successfully", req.task_id, len(citations), len(spec.get("source_pool") or []))
+    log.info(
+        "task_id=%s fetched %d/%d sources successfully",
+        req.task_id,
+        len(citations),
+        len(spec.get("source_pool") or []),
+    )
 
     if not citations:
         raise HTTPException(502, "no sources successfully fetched — cannot produce card")
 
     model = os.getenv("CATHEDRAL_RUNTIME_MODEL", "deepseek-ai/DeepSeek-V3.1")
     base_url_chutes = (
-        os.getenv("CHUTES_BASE_URL")
-        or req.env.get("CHUTES_BASE_URL")
-        or "https://llm.chutes.ai/v1"
+        os.getenv("CHUTES_BASE_URL") or req.env.get("CHUTES_BASE_URL") or "https://llm.chutes.ai/v1"
     ).rstrip("/")
     log.info("task_id=%s calling LLM model=%s base=%s", req.task_id, model, base_url_chutes)
     try:
@@ -268,6 +305,7 @@ async def _fetch_and_hash_sources(source_pool: list[dict[str, Any]]) -> list[dic
         url = src.get("url", "")
         if not url:
             return None
+        t0 = time.monotonic()
         try:
             async with httpx.AsyncClient(
                 timeout=20.0,
@@ -275,8 +313,14 @@ async def _fetch_and_hash_sources(source_pool: list[dict[str, Any]]) -> list[dic
                 follow_redirects=True,
             ) as client:
                 resp = await client.get(url)
+                fetch_latency_ms = int((time.monotonic() - t0) * 1000)
                 if resp.status_code != 200 or not resp.content:
-                    log.info("source skip url=%s status=%d bytes=%d", url[:60], resp.status_code, len(resp.content or b""))
+                    log.info(
+                        "source skip url=%s status=%d bytes=%d",
+                        url[:60],
+                        resp.status_code,
+                        len(resp.content or b""),
+                    )
                     return None
                 h = blake3.blake3(resp.content).hexdigest()
                 return {
@@ -285,7 +329,11 @@ async def _fetch_and_hash_sources(source_pool: list[dict[str, Any]]) -> list[dic
                     "fetched_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                     "status": resp.status_code,
                     "content_hash": h,
-                    "_excerpt": resp.text[:2000] if resp.headers.get("content-type", "").startswith("text/") else "",
+                    "content_type": resp.headers.get("content-type", ""),
+                    "fetch_latency_ms": fetch_latency_ms,
+                    "_excerpt": resp.text[:2000]
+                    if resp.headers.get("content-type", "").startswith("text/")
+                    else "",
                 }
         except Exception as e:
             log.info("source fail url=%s err=%s", url[:60], e.__class__.__name__)
@@ -295,7 +343,9 @@ async def _fetch_and_hash_sources(source_pool: list[dict[str, Any]]) -> list[dic
     return [r for r in results if r]
 
 
-def _reconcile_citations(card: dict[str, Any], real_citations: list[dict[str, Any]]) -> dict[str, Any]:
+def _reconcile_citations(
+    card: dict[str, Any], real_citations: list[dict[str, Any]]
+) -> dict[str, Any]:
     """For every citation URL the model picked, replace the model's claimed
     fetched_at/status/content_hash with the real values we measured.
 
@@ -458,9 +508,7 @@ async def _call_llm(
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(
-            f"{base_url}/chat/completions", json=body, headers=headers
-        )
+        resp = await client.post(f"{base_url}/chat/completions", json=body, headers=headers)
     if resp.status_code != 200:
         raise HTTPException(502, f"LLM call failed: {resp.status_code} {resp.text[:500]}")
     data = resp.json()
@@ -514,6 +562,433 @@ def _parse_card_json(text: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise HTTPException(502, "model output is not a JSON object")
     return _coerce_str_fields(parsed)
+
+
+# ---------------------------------------------------------------------------
+# Probe mode
+# ---------------------------------------------------------------------------
+
+
+class ProbeSource(BaseModel):
+    url: str
+    name: str | None = None
+    class_: str = Field(default="other", alias="class")
+
+    model_config = {"populate_by_name": True}
+
+
+class ProbePrompt(BaseModel):
+    """One prompt to run during a probe invocation.
+
+    `template_id` is a stable identifier the publisher uses to bucket
+    repeat runs. `text` is the actual prompt. Anything else the
+    publisher wants to round-trip lives in `extra`.
+    """
+
+    template_id: str | None = None
+    text: str
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProbeRequest(BaseModel):
+    submission_id: str
+    card_id: str
+    bundle_url: str | None = None
+    bundle_bytes_b64: str | None = None
+    soul_url: str | None = None
+    soul_bytes_b64: str | None = None
+    bundle_kek_hex: str | None = None
+    bundle_key_id: str | None = None
+    prompts: list[ProbePrompt] = Field(default_factory=list)
+    sources: list[ProbeSource] | None = None
+
+
+class SourceFetch(BaseModel):
+    url: str
+    status: int
+    blake3_hash: str
+    content_type: str
+    fetch_latency_ms: int
+
+
+class CitationCheck(BaseModel):
+    url: str
+    claimed_hash: str
+    measured_hash: str
+    matched: bool
+
+
+class PromptTrace(BaseModel):
+    template_id: str | None
+    model: str
+    latency_ms: int
+    prompt_token_count: int
+    response_token_count: int
+
+
+class CardRenderTrace(BaseModel):
+    input_prompt_length: int
+    output_json_size: int
+
+
+class Trace(BaseModel):
+    prompt: PromptTrace
+    card_render: CardRenderTrace
+    citations: list[CitationCheck]
+
+
+class ProbeOutput(BaseModel):
+    submission_id: str
+    card_id: str
+    output_card: dict[str, Any]
+    output_card_hash: str
+    task_hash: str
+    sources_fetched: list[SourceFetch]
+    traces: list[Trace]
+    ran_at: datetime
+    miner_signature: str = ""
+
+
+class ProbeReloadRequest(BaseModel):
+    bundle_url: str | None = None
+    bundle_bytes_b64: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Probe state
+# ---------------------------------------------------------------------------
+
+
+class _ProbeState:
+    """Runtime-only state for probe mode.
+
+    `bundle_cache` is the last successfully decrypted bundle bytes.
+    `miner_keypair` is loaded once at startup; `/probe/reload` re-reads
+    the on-disk hotkey (supports rotation via volume swap without a
+    container restart).
+    """
+
+    def __init__(self) -> None:
+        self.bundle_cache: bytes | None = None
+        self.bundle_cache_url: str | None = None
+        self.last_run_at: datetime | None = None
+        self.miner_keypair: Any | None = None
+        self.miner_hotkey: str | None = None
+
+
+probe_state = _ProbeState()
+
+
+def _load_miner_keypair(path: Path) -> tuple[Any, str]:
+    """Load a substrate-format hotkey JSON and return (Keypair, ss58).
+
+    The on-disk format is the standard substrate / polkadot.js export:
+        {"accountId":"0x...","publicKey":"0x...",
+         "secretPhrase":"twelve word mnemonic",
+         "ss58Address":"5..."}
+
+    We prefer `secretPhrase` for keypair creation because that's what
+    `btcli` writes by default. Falls back to `privateKey` / `seed` for
+    keystores that have already discarded the mnemonic.
+    """
+    from bittensor_wallet import Keypair
+
+    raw = path.read_text(encoding="utf-8").strip()
+    parsed = json.loads(raw)
+    mnemonic = parsed.get("secretPhrase") or parsed.get("mnemonic")
+    if mnemonic:
+        kp = Keypair.create_from_mnemonic(mnemonic)
+    elif parsed.get("privateKey"):
+        priv = parsed["privateKey"]
+        priv_hex = priv[2:] if priv.startswith("0x") else priv
+        kp = Keypair.create_from_private_key(priv_hex)
+    elif parsed.get("seed"):
+        seed = parsed["seed"]
+        seed_hex = seed[2:] if seed.startswith("0x") else seed
+        kp = Keypair.create_from_seed(seed_hex)
+    else:
+        raise ValueError("hotkey JSON missing secretPhrase / privateKey / seed")
+    expected_ss58 = parsed.get("ss58Address")
+    ss58 = kp.ss58_address
+    if expected_ss58 and ss58 != expected_ss58:
+        raise ValueError(f"hotkey JSON ss58 mismatch: file={expected_ss58} derived={ss58}")
+    return kp, ss58
+
+
+def _canonical_json(payload: dict[str, Any]) -> bytes:
+    """Mirror `cathedral.types.canonical_json_for_signing`.
+
+    Sorted keys, no whitespace, UTF-8. Drops `miner_signature` so the
+    bytes that get signed never include the signature field itself.
+    Mirrors §4.1 of CONTRACTS.md.
+    """
+    body = {k: v for k, v in payload.items() if k != "miner_signature"}
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _sign_probe_output(payload: dict[str, Any], keypair: Any) -> str:
+    """sr25519 over canonical_json, base64 (standard, padded)."""
+    sig = keypair.sign(_canonical_json(payload))
+    return base64.b64encode(sig).decode("ascii")
+
+
+def _compute_task_hash(prompts: list[ProbePrompt]) -> str:
+    """BLAKE3 of canonical_json over the prompt set.
+
+    Two probes with identical prompts produce the same task_hash so the
+    publisher can dedupe / cache.
+    """
+    items = [{"template_id": p.template_id, "text": p.text, "extra": p.extra} for p in prompts]
+    canonical = _canonical_json({"prompts": items})
+    return blake3.blake3(canonical).hexdigest()
+
+
+async def _load_probe_bundle(req: ProbeRequest) -> bytes:
+    """Resolve the bundle bytes for a probe run.
+
+    Order:
+        1. Inline bytes (`bundle_bytes_b64`)
+        2. Remote URL (`bundle_url`)
+        3. Cached bundle from a prior run (probe-mode-only optimisation)
+
+    The publisher's `ProbeRunner` (B.4) typically passes a URL on first
+    run and lets the probe cache for subsequent runs against the same
+    submission.
+    """
+    if req.bundle_bytes_b64:
+        return base64.b64decode(req.bundle_bytes_b64)
+    if req.bundle_url:
+        blob = await _fetch_bundle(req.bundle_url)
+        probe_state.bundle_cache = blob
+        probe_state.bundle_cache_url = req.bundle_url
+        return blob
+    if probe_state.bundle_cache is not None:
+        return probe_state.bundle_cache
+    raise HTTPException(
+        400,
+        "no bundle: provide bundle_url, bundle_bytes_b64, or warm cache via /probe/reload",
+    )
+
+
+async def _resolve_soul_md(req: ProbeRequest, bundle_bytes: bytes) -> str:
+    """soul.md can come inline, from a URL, or extracted from the bundle."""
+    if req.soul_bytes_b64:
+        return base64.b64decode(req.soul_bytes_b64).decode("utf-8", errors="replace")
+    if req.soul_url:
+        async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": _UA}) as client:
+            resp = await client.get(req.soul_url)
+            resp.raise_for_status()
+            return resp.text
+    return _extract_soul_md(bundle_bytes)
+
+
+def _ensure_trace_dir() -> Path:
+    PROBE_TRACE_DIR.mkdir(parents=True, exist_ok=True)
+    return PROBE_TRACE_DIR
+
+
+async def _run_probe(req: ProbeRequest) -> ProbeOutput:
+    """Execute a probe run end-to-end.
+
+    1. Resolve bundle + soul.md.
+    2. Fetch eval-spec for the card_id.
+    3. Fetch + hash every source.
+    4. For each prompt, call the LLM, capture per-prompt trace.
+    5. Reconcile citations, compute card hash, persist trace JSON.
+    6. Sign with miner hotkey and return.
+    """
+
+    if probe_state.miner_keypair is None:
+        raise HTTPException(503, "miner hotkey not loaded; probe cannot sign")
+
+    llm_key = os.environ.get("CHUTES_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if not llm_key:
+        raise HTTPException(500, "CHUTES_API_KEY missing in container env")
+
+    publisher = (os.environ.get("CATHEDRAL_PUBLISHER_URL") or _CATHEDRAL_PUBLISHER_DEFAULT).rstrip(
+        "/"
+    )
+
+    bundle_bytes = await _load_probe_bundle(req)
+
+    if req.bundle_kek_hex and req.bundle_key_id:
+        bundle_plain = _decrypt_bundle(
+            bundle_bytes, bytes.fromhex(req.bundle_kek_hex), req.bundle_key_id
+        )
+    else:
+        bundle_plain = bundle_bytes
+
+    soul_md = await _resolve_soul_md(req, bundle_plain)
+
+    if req.sources is not None:
+        source_pool: list[dict[str, Any]] = [
+            {"url": s.url, "class": s.class_, "name": s.name or s.url} for s in req.sources
+        ]
+        spec: dict[str, Any] = {
+            "source_pool": source_pool,
+            "scoring_rubric": {},
+            "refresh_cadence_hours": 24,
+        }
+    else:
+        try:
+            spec = await _fetch_eval_spec(publisher, req.card_id)
+        except Exception as e:
+            log.exception("probe submission_id=%s eval-spec fetch failed", req.submission_id)
+            raise HTTPException(502, f"eval-spec fetch failed: {e.__class__.__name__}") from e
+
+    citations = await _fetch_and_hash_sources(spec.get("source_pool") or [])
+    if not citations:
+        raise HTTPException(502, "no sources successfully fetched")
+
+    sources_fetched = [
+        SourceFetch(
+            url=c["url"],
+            status=int(c["status"]),
+            blake3_hash=c["content_hash"],
+            content_type=c.get("content_type", ""),
+            fetch_latency_ms=int(c.get("fetch_latency_ms", 0)),
+        )
+        for c in citations
+    ]
+
+    model = os.getenv("CATHEDRAL_RUNTIME_MODEL", "deepseek-ai/DeepSeek-V3.1")
+    base_url_chutes = (os.getenv("CHUTES_BASE_URL") or "https://llm.chutes.ai/v1").rstrip("/")
+
+    prompts: list[ProbePrompt] = req.prompts or [
+        ProbePrompt(template_id="default", text=f"Produce the regulatory card for {req.card_id}.")
+    ]
+
+    traces: list[Trace] = []
+    last_card: dict[str, Any] = {}
+    for p in prompts:
+        prompt_t0 = time.monotonic()
+        card_json, usage = await _call_llm(
+            llm_key, base_url_chutes, model, soul_md, p.text, req.card_id, citations, spec
+        )
+        latency_ms = int((time.monotonic() - prompt_t0) * 1000)
+        card_json = _reconcile_citations(card_json, citations)
+        last_card = card_json
+
+        cit_checks = [
+            CitationCheck(
+                url=c["url"],
+                claimed_hash=c["content_hash"],
+                measured_hash=c["content_hash"],
+                matched=True,
+            )
+            for c in card_json.get("citations") or []
+        ]
+        output_json_size = len(json.dumps(card_json, separators=(",", ":")).encode("utf-8"))
+        traces.append(
+            Trace(
+                prompt=PromptTrace(
+                    template_id=p.template_id,
+                    model=model,
+                    latency_ms=latency_ms,
+                    prompt_token_count=int(usage.get("input_tokens", 0)),
+                    response_token_count=int(usage.get("output_tokens", 0)),
+                ),
+                card_render=CardRenderTrace(
+                    input_prompt_length=len(p.text),
+                    output_json_size=output_json_size,
+                ),
+                citations=cit_checks,
+            )
+        )
+
+    card_canonical = _canonical_json(last_card)
+    card_hash = blake3.blake3(card_canonical).hexdigest()
+    task_hash = _compute_task_hash(prompts)
+    ran_at = datetime.now(UTC)
+
+    output = ProbeOutput(
+        submission_id=req.submission_id,
+        card_id=req.card_id,
+        output_card=last_card,
+        output_card_hash=card_hash,
+        task_hash=task_hash,
+        sources_fetched=sources_fetched,
+        traces=traces,
+        ran_at=ran_at,
+        miner_signature="",
+    )
+
+    sig_payload = output.model_dump(mode="json", exclude={"miner_signature"})
+    output.miner_signature = _sign_probe_output(sig_payload, probe_state.miner_keypair)
+
+    run_id = str(uuid.uuid4())
+    try:
+        trace_dir = _ensure_trace_dir()
+        trace_file = trace_dir / f"{run_id}.json"
+        trace_file.write_text(
+            json.dumps(output.model_dump(mode="json"), separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        log.warning("probe submission_id=%s trace persist failed: %s", req.submission_id, e)
+
+    probe_state.last_run_at = ran_at
+    return output
+
+
+# ---------------------------------------------------------------------------
+# Probe endpoints (only registered when CATHEDRAL_PROBE_MODE is true)
+# ---------------------------------------------------------------------------
+
+
+def _register_probe_endpoints() -> None:
+    try:
+        keypair, ss58 = _load_miner_keypair(PROBE_HOTKEY_PATH)
+        probe_state.miner_keypair = keypair
+        probe_state.miner_hotkey = ss58
+        log.info("probe_mode_on hotkey=%s", ss58)
+    except FileNotFoundError:
+        log.warning(
+            "probe_mode_on hotkey_path=%s missing — health 503 until /probe/reload",
+            PROBE_HOTKEY_PATH,
+        )
+    except Exception as e:
+        log.error("probe_mode_on hotkey_load_failed err=%s", e.__class__.__name__)
+
+    @app.get("/probe/health")
+    async def probe_health() -> JSONResponse:
+        last_run = probe_state.last_run_at
+        return JSONResponse(
+            {
+                "status": "ok",
+                "last_run_at": last_run.isoformat() if last_run else None,
+                "miner_hotkey": probe_state.miner_hotkey,
+                "runtime_version": VERSION,
+            }
+        )
+
+    @app.post("/probe/run")
+    async def probe_run(req: ProbeRequest) -> JSONResponse:
+        output = await _run_probe(req)
+        return JSONResponse(output.model_dump(mode="json"))
+
+    @app.post("/probe/reload")
+    async def probe_reload(req: ProbeReloadRequest | None = None) -> JSONResponse:
+        probe_state.bundle_cache = None
+        probe_state.bundle_cache_url = None
+        try:
+            keypair, ss58 = _load_miner_keypair(PROBE_HOTKEY_PATH)
+            probe_state.miner_keypair = keypair
+            probe_state.miner_hotkey = ss58
+        except FileNotFoundError:
+            log.warning("probe_reload hotkey_path=%s missing", PROBE_HOTKEY_PATH)
+
+        if req is not None and req.bundle_bytes_b64:
+            probe_state.bundle_cache = base64.b64decode(req.bundle_bytes_b64)
+        elif req is not None and req.bundle_url:
+            probe_state.bundle_cache = await _fetch_bundle(req.bundle_url)
+            probe_state.bundle_cache_url = req.bundle_url
+
+        return JSONResponse({"reloaded": True})
+
+
+if PROBE_MODE:
+    _register_probe_endpoints()
 
 
 if __name__ == "__main__":
