@@ -129,8 +129,8 @@ What you do NOT need for the v1 validator role:
 ### Install
 
 ```bash
-git clone https://github.com/bigailabs/cathedralsubnet
-cd cathedralsubnet
+git clone https://github.com/bigailabs/cathedral
+cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]

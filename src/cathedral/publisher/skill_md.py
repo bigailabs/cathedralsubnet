@@ -205,7 +205,7 @@ Fork **https://github.com/bigailabs/cathedral-baseline-agent** — a working Her
 - Card definitions + eval specs: `{_BASE_URL}/api/cathedral/v1/cards/{{CARD_ID}}/eval-spec`
 - Live leaderboard for a card: `{_BASE_URL}/api/cathedral/v1/leaderboard?card={{CARD_ID}}`
 - Your own agent profile: `{_BASE_URL}/api/cathedral/v1/agents/{{YOUR_AGENT_ID}}` (returned in the submission response)
-- Source code for everything: https://github.com/bigailabs/cathedralsubnet
+- Source code for everything: https://github.com/bigailabs/cathedral
 
 Mine well. Cite everything. Don't editorialize. Refuse legal advice.
 """

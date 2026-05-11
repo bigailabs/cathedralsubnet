@@ -3,7 +3,7 @@
 Lives in its own module so the Polaris-facing wire types in
 `cathedral.types` remain untouched (they cross a code-frozen boundary
 with the polariscomputer repo). Everything here is internal to
-cathedralsubnet + the cathedral.computer frontend mirror.
+cathedral + the cathedral.computer frontend mirror.
 
 Contract reference: `cathedral-redesign/CONTRACTS.md` Section 1.9-1.13.
 """

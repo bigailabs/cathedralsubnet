@@ -729,4 +729,4 @@ v2 should poll AWS Nitro, Intel PCS, and AMD KDS revocation endpoints on a heart
 
 ---
 
-End of v1 attestation contract. Implementation work is tracked under cathedralsubnet issue series #attestation-* (to be opened as PRs against this spec land).
+End of v1 attestation contract. Implementation work is tracked under cathedral issue series #attestation-* (to be opened as PRs against this spec land).

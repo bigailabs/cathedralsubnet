@@ -52,7 +52,7 @@ The publisher's `card_definitions` table is seeded from `bigailabs/cathedral-eva
 
 In-process source-class requirements and refresh cadences live in `src/cathedral/cards/registry.py`. Full per-card eval-specs (`source_pool`, `task_templates`, `scoring_rubric`) live in `card_definitions` and are queryable at `GET /v1/cards/{card_id}/eval-spec`.
 
-Africa is tracked in [bigailabs/cathedralsubnet#24](https://github.com/bigailabs/cathedralsubnet/issues/24). Scope is open: pan-AU vs. country-specific.
+Africa is tracked in [bigailabs/cathedral#24](https://github.com/bigailabs/cathedral/issues/24). Scope is open: pan-AU vs. country-specific.
 
 ## Architecture
 
@@ -125,19 +125,19 @@ Verified live, 2026-05-11:
 
 Wired in code, not yet running against live signatures:
 
-- Validator pull-loop verifying publisher signatures end-to-end at production scale. The signature path verifies in tests; the live cathedralsubnet validator binary is not yet pulling.
+- Validator pull-loop verifying publisher signatures end-to-end at production scale. The signature path verifies in tests; the live cathedral validator binary is not yet pulling.
 - On-chain Merkle anchoring (weekly `system.remarkWithEvent`). Merkle code path exists in `cathedral.publisher.merkle` and `cathedral.chain.anchor`; not running on a schedule yet.
 - Subtensor weight setting from the new publisher signature stream. The legacy `/v1/claim` weight loop still runs.
 
 Not yet built:
 
 - Live TEE miners. Nitro verifier exists in `cathedral.attestation.nitro`; TDX and SEV-SNP return 501 from the submit endpoint.
-- Africa card ([#24](https://github.com/bigailabs/cathedralsubnet/issues/24)).
+- Africa card ([#24](https://github.com/bigailabs/cathedral/issues/24)).
 
 ## Repo layout
 
 ```
-cathedralsubnet/
+cathedral/
 ├── src/cathedral/
 │   ├── types.py            # Polaris-facing wire types (PolarisAgentClaim, Card, ScoreParts)
 │   ├── v1_types.py         # publisher-side types (AgentSubmission, EvalRun, EvalTask, Merkle)
@@ -171,8 +171,8 @@ Read https://api.cathedral.computer/skill.md and follow it. Mine the eu-ai-act c
 The skill doc carries everything: card schema, canonical signing payload, attestation modes, error codes. If you prefer to drive the legacy `/v1/claim` path from a CLI (for the existing Polaris-evidence flow, not the new agent-bundle pipeline):
 
 ```bash
-git clone https://github.com/bigailabs/cathedralsubnet
-cd cathedralsubnet
+git clone https://github.com/bigailabs/cathedral
+cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -192,8 +192,8 @@ Full miner walkthrough: [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md).
 ## Quick start: validator
 
 ```bash
-git clone https://github.com/bigailabs/cathedralsubnet
-cd cathedralsubnet
+git clone https://github.com/bigailabs/cathedral
+cd cathedral
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
