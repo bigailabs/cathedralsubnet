@@ -3,9 +3,9 @@
 Polaris's `runtime-evaluate` endpoint deploys this image, then POSTs a task
 to `/task`. We fetch the miner's encrypted bundle from R2 by the presigned
 URL we receive in `env_overrides`, decrypt with the KEK Polaris injects,
-load the miner's `soul.md` from the bundle, call Anthropic with that as
-the system prompt + the supplied task, parse the response as Card JSON,
-and return it.
+load the miner's `soul.md` from the bundle, call the configured LLM
+provider with that as the system prompt + the supplied task, parse the
+response as Card JSON, and return it.
 
 Contract with Polaris (`polaris/services/runtime_evaluate.py`):
 
@@ -15,19 +15,24 @@ Contract with Polaris (`polaris/services/runtime_evaluate.py`):
       "task_id":  "...",
       "task":     "...",
       "env":      {"MINER_BUNDLE_URL": "...", "CATHEDRAL_BUNDLE_KEK": "<hex>",
-                   "ANTHROPIC_API_KEY": "...", "CARD_ID": "...", "MINER_HOTKEY": "..."}
+                   "CHUTES_API_KEY": "...", "CARD_ID": "...", "MINER_HOTKEY": "..."}
     }
 
     -> 200
     {
       "output_json":   {... Card ...},
       "duration_ms":   12345,
-      "model":         "claude-...",
+      "model":         "deepseek-ai/DeepSeek-V3.1",
       "input_tokens":  ...,
       "output_tokens": ...
     }
 
     /healthz returns 200 once the model client is initialised.
+
+LLM provider: Chutes (https://llm.chutes.ai/v1) by default, matching
+Polaris's Hermes runtime. Any OpenAI-compatible provider works — drop a
+different `CHUTES_BASE_URL` + key into the container env and the call
+shape is unchanged.
 
 The bundle decryption mirrors `cathedral.storage.crypto.decrypt_bundle`
 exactly so any KEK that worked on the publisher works here.
@@ -35,7 +40,6 @@ exactly so any KEK that worked on the publisher works here.
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import logging
@@ -46,20 +50,16 @@ import zipfile
 from typing import Any
 
 import httpx
-from anthropic import Anthropic
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.0")
+VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.1")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("cathedral-runtime")
-
-
-_TASK_TIMEOUT_S = 600
 
 
 app = FastAPI(title=f"cathedral-runtime {VERSION}")
@@ -81,13 +81,18 @@ async def run_task(req: TaskRequest) -> JSONResponse:
     start = time.monotonic()
     bundle_url = req.env.get("MINER_BUNDLE_URL")
     kek_hex = req.env.get("CATHEDRAL_BUNDLE_KEK", "")
-    anthropic_key = req.env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    llm_key = (
+        req.env.get("CHUTES_API_KEY")
+        or os.environ.get("CHUTES_API_KEY")
+        or req.env.get("ANTHROPIC_API_KEY")  # backward compat shim
+        or os.environ.get("ANTHROPIC_API_KEY")
+    )
     card_id = req.env.get("CARD_ID", "")
 
     if not bundle_url:
         raise HTTPException(400, "MINER_BUNDLE_URL missing in env")
-    if not anthropic_key:
-        raise HTTPException(400, "ANTHROPIC_API_KEY missing in env or container")
+    if not llm_key:
+        raise HTTPException(400, "CHUTES_API_KEY missing in env or container")
 
     log.info("task_id=%s card_id=%s fetching bundle", req.task_id, card_id)
     bundle_bytes = await _fetch_bundle(bundle_url)
@@ -104,10 +109,11 @@ async def run_task(req: TaskRequest) -> JSONResponse:
 
     soul_md = _extract_soul_md(plaintext)
 
-    model = os.getenv("CATHEDRAL_RUNTIME_MODEL", "claude-opus-4-7")
-    log.info("task_id=%s calling Anthropic model=%s", req.task_id, model)
-    card_json, usage = await asyncio.to_thread(
-        _call_anthropic, anthropic_key, model, soul_md, req.task, card_id
+    model = os.getenv("CATHEDRAL_RUNTIME_MODEL", "deepseek-ai/DeepSeek-V3.1")
+    base_url = os.getenv("CHUTES_BASE_URL", "https://llm.chutes.ai/v1").rstrip("/")
+    log.info("task_id=%s calling LLM model=%s", req.task_id, model)
+    card_json, usage = await _call_llm(
+        llm_key, base_url, model, soul_md, req.task, card_id
     )
 
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -143,10 +149,6 @@ def _decrypt_bundle(ciphertext: bytes, kek: bytes) -> bytes:
       wrapped data-key (AES-GCM wrap under KEK) |
       12-byte data-key nonce |
       ciphertext+tag of the bundle.
-
-    The publisher emits this exact layout; we mirror it byte for byte
-    instead of importing the cathedral package to keep the runtime image
-    small and Python-dep-light.
     """
     if len(kek) != 32:
         raise ValueError(f"KEK must be 32 bytes (got {len(kek)})")
@@ -161,8 +163,6 @@ def _decrypt_bundle(ciphertext: bytes, kek: bytes) -> bytes:
     body_nonce = ciphertext[4 + wrap_len : 4 + wrap_len + 12]
     body_ct = ciphertext[4 + wrap_len + 12 :]
 
-    # The wrapped-key blob is itself an AES-GCM ciphertext where the
-    # first 12 bytes are the wrap nonce and the rest is wrap-ct+tag.
     wrap_nonce = wrapped_key[:12]
     wrap_ct = wrapped_key[12:]
     data_key = AESGCM(kek).decrypt(wrap_nonce, wrap_ct, associated_data=None)
@@ -213,13 +213,23 @@ you actually used during your synthesis. Today is {today_iso}.
 """
 
 
-def _call_anthropic(
-    api_key: str, model: str, soul_md: str, task: str, card_id: str
+async def _call_llm(
+    api_key: str,
+    base_url: str,
+    model: str,
+    soul_md: str,
+    task: str,
+    card_id: str,
 ) -> tuple[dict[str, Any], dict[str, int]]:
-    """Block-call Anthropic, return (parsed Card JSON, usage dict)."""
+    """Call an OpenAI-compatible chat-completions endpoint.
+
+    Polaris's Hermes runtime uses Chutes (https://llm.chutes.ai/v1) as
+    its LLM provider; Cathedral's runtime piggy-backs on the same key
+    and base URL by default so a single Polaris-side env serves both
+    runtimes. Any OpenAI-compatible provider works.
+    """
     from datetime import UTC, datetime
 
-    client = Anthropic(api_key=api_key)
     system = _SYSTEM_PROMPT_TEMPLATE.format(
         soul_md=soul_md.strip(),
         today_iso=datetime.now(UTC).isoformat(timespec="seconds"),
@@ -228,20 +238,39 @@ def _call_anthropic(
         f"Card: {card_id}\n\nTask: {task}\n\n"
         "Return only the Card JSON. No prose."
     )
-    resp = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=system,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    text_blocks = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-    if not text_blocks:
-        raise HTTPException(502, "Anthropic returned no text content")
-    raw = "".join(text_blocks).strip()
-    card = _parse_card_json(raw)
+    body = {
+        "model": model,
+        "max_tokens": 4096,
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions", json=body, headers=headers
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            502, f"LLM call failed: {resp.status_code} {resp.text[:500]}"
+        )
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise HTTPException(502, "LLM returned no choices")
+    content = (choices[0].get("message") or {}).get("content", "")
+    if not content:
+        raise HTTPException(502, "LLM returned empty content")
+    card = _parse_card_json(content)
+    usage_blob = data.get("usage") or {}
     usage = {
-        "input_tokens": getattr(resp.usage, "input_tokens", 0),
-        "output_tokens": getattr(resp.usage, "output_tokens", 0),
+        "input_tokens": int(usage_blob.get("prompt_tokens", 0)),
+        "output_tokens": int(usage_blob.get("completion_tokens", 0)),
     }
     return card, usage
 
