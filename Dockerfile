@@ -23,6 +23,12 @@ ENV CATHEDRAL_DB_PATH=/data/publisher.db
 
 EXPOSE 8080
 
+# Force unbuffered Python output so Railway captures stack traces if the
+# publisher crashes at startup. Without this, Python buffers stdout/stderr
+# until the process flushes, which never happens on a hard crash.
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
 # cathedral-publisher CLI: serve subcommand starts the FastAPI app.
 # Railway's PORT env wins over hardcoded 8080.
-CMD ["sh", "-c", "cathedral-publisher serve --db ${CATHEDRAL_DB_PATH} --port ${PORT:-8080} --host 0.0.0.0"]
+CMD ["sh", "-c", "echo '[startup] launching cathedral-publisher serve --db '${CATHEDRAL_DB_PATH}' --port '${PORT:-8080} && cathedral-publisher serve --db ${CATHEDRAL_DB_PATH} --port ${PORT:-8080} --host 0.0.0.0"]
