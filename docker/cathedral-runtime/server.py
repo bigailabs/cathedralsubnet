@@ -55,7 +55,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.1")
+VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.2")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -94,8 +94,12 @@ async def run_task(req: TaskRequest) -> JSONResponse:
     if not llm_key:
         raise HTTPException(400, "CHUTES_API_KEY missing in env or container")
 
-    log.info("task_id=%s card_id=%s fetching bundle", req.task_id, card_id)
-    bundle_bytes = await _fetch_bundle(bundle_url)
+    log.info("task_id=%s card_id=%s fetching bundle from %s", req.task_id, card_id, bundle_url[:120])
+    try:
+        bundle_bytes = await _fetch_bundle(bundle_url)
+    except Exception as e:
+        log.exception("task_id=%s bundle fetch failed", req.task_id)
+        raise HTTPException(502, f"bundle fetch failed: {e.__class__.__name__}: {str(e)[:200]}") from e
     log.info("task_id=%s bundle bytes=%d", req.task_id, len(bundle_bytes))
 
     if kek_hex:
@@ -107,14 +111,27 @@ async def run_task(req: TaskRequest) -> JSONResponse:
     else:
         plaintext = bundle_bytes
 
-    soul_md = _extract_soul_md(plaintext)
+    try:
+        soul_md = _extract_soul_md(plaintext)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("task_id=%s soul.md extract failed", req.task_id)
+        raise HTTPException(422, f"bundle soul.md extract failed: {e.__class__.__name__}") from e
 
     model = os.getenv("CATHEDRAL_RUNTIME_MODEL", "deepseek-ai/DeepSeek-V3.1")
-    base_url = os.getenv("CHUTES_BASE_URL", "https://llm.chutes.ai/v1").rstrip("/")
-    log.info("task_id=%s calling LLM model=%s", req.task_id, model)
-    card_json, usage = await _call_llm(
-        llm_key, base_url, model, soul_md, req.task, card_id
-    )
+    base_url_chutes = os.getenv("CHUTES_BASE_URL") or req.env.get("CHUTES_BASE_URL") or "https://llm.chutes.ai/v1"
+    base_url_chutes = base_url_chutes.rstrip("/")
+    log.info("task_id=%s calling LLM model=%s base=%s", req.task_id, model, base_url_chutes)
+    try:
+        card_json, usage = await _call_llm(
+            llm_key, base_url_chutes, model, soul_md, req.task, card_id
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("task_id=%s LLM call failed", req.task_id)
+        raise HTTPException(502, f"LLM call failed: {e.__class__.__name__}: {str(e)[:200]}") from e
 
     duration_ms = int((time.monotonic() - start) * 1000)
     log.info("task_id=%s done duration_ms=%d", req.task_id, duration_ms)
