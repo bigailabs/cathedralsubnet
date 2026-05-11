@@ -88,6 +88,11 @@ async def submit_agent(
     card_id: str = Form(...),
     display_name: str = Form(...),
     bio: str | None = Form(default=None),
+    # CRIT-1: `submitted_at` MUST come from the server clock. We accept
+    # the form field for backward-compat with existing miners but IGNORE
+    # its value — the server-generated timestamp is always authoritative.
+    # The miner must sign over the server-issued timestamp returned in the
+    # response (or call the prospective /v1/server-time endpoint).
     submitted_at_form: str | None = Form(default=None, alias="submitted_at"),
     logo: UploadFile | None = File(default=None),
     auth: HotkeyAuth = Depends(hotkey_auth_header),
@@ -145,21 +150,48 @@ async def submit_agent(
         )
 
     # ----- timestamp + signature verify --------------------------------
-    # CONTRACTS.md §4.1: signed payload includes `submitted_at`. The miner
-    # supplies this value as a form field; server records it verbatim.
+    # CONTRACTS.md §4.1 + CRIT-1: server clock is the SOLE source of truth
+    # for `submitted_at` recorded in agent_submissions and propagated to
+    # `first_mover_at`. The client-supplied form field (if any) is used
+    # ONLY to verify the hotkey signature — its value is NEVER persisted
+    # and NEVER used for first-mover anchoring. A backdated client value
+    # may still verify the signature, but it loses the first-mover race
+    # to whoever actually arrived at the server first. Additionally, a
+    # client value too far from server time is rejected outright to close
+    # the obvious far-future / far-past window without relying on the
+    # downstream first-mover comparison alone.
+    server_submitted_at = datetime.now(UTC)
+    server_submitted_at_iso = _ms_iso(server_submitted_at)
+
     if submitted_at_form:
-        submitted_at_iso = submitted_at_form
         try:
-            submitted_at = datetime.fromisoformat(
+            client_submitted_at = datetime.fromisoformat(
                 submitted_at_form.replace("Z", "+00:00")
             )
         except ValueError as e:
             raise HTTPException(
                 status_code=400, detail="submitted_at must be ISO-8601"
             ) from e
+        if client_submitted_at.tzinfo is None:
+            client_submitted_at = client_submitted_at.replace(tzinfo=UTC)
+        # ±5 minute clock-skew window — anything wider is considered a
+        # backdating / forward-dating attempt.
+        skew_secs = abs(
+            (server_submitted_at - client_submitted_at).total_seconds()
+        )
+        if skew_secs > 300:
+            logger.info(
+                "submission_clock_skew",
+                hotkey=auth.hotkey_ss58,
+                skew_secs=skew_secs,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="submitted_at outside acceptable clock-skew window",
+            )
+        signed_submitted_at_iso = submitted_at_form
     else:
-        submitted_at = datetime.now(UTC)
-        submitted_at_iso = _ms_iso(submitted_at)
+        signed_submitted_at_iso = server_submitted_at_iso
 
     try:
         verify_hotkey_signature(
@@ -167,7 +199,7 @@ async def submit_agent(
             signature_b64=auth.signature_b64,
             bundle_hash=bundle_hash,
             card_id=card_id,
-            submitted_at=submitted_at_iso,
+            submitted_at=signed_submitted_at_iso,
         )
     except InvalidSignatureError as e:
         logger.info("submission_sig_failed", hotkey=auth.hotkey_ss58)
@@ -175,6 +207,12 @@ async def submit_agent(
             status_code=401, detail="invalid hotkey signature"
         ) from e
     _ = request  # keep for trace-id middleware compatibility
+
+    # Bind the persisted timestamp to the server clock — this is what
+    # `first_mover_at` and the response carry. The client's value (if any)
+    # was used solely to verify the signature.
+    submitted_at = server_submitted_at
+    submitted_at_iso = server_submitted_at_iso
 
     # ----- similarity check --------------------------------------------
     # CONTRACTS.md L7: similarity rejection returns 202 with status=rejected
