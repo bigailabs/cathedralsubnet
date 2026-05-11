@@ -17,7 +17,10 @@ bearer_token_env = "CATHEDRAL_BEARER"
 [weights]
 interval_secs = 600
 disabled = false
-burn_uid = 204
+# SN292 testnet: uid 0 is the subnet owner (hotkey 5C5GQGiMqBEB...).
+# Mainnet SN39 uses uid 204 (also the owner). Same burn-to-owner pattern,
+# different uid because testnet has 40 neurons not 256.
+burn_uid = 0
 forced_burn_percentage = 98.0
 
 [publisher]
