@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+.venv-int
+.venv-local
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.claude
+data/*.db*
+docs
+tests/v1/exploits
+*.egg-info
