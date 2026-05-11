@@ -79,9 +79,7 @@ async def insert_card_definition(
     await conn.commit()
 
 
-async def get_card_definition(
-    conn: aiosqlite.Connection, card_id: str
-) -> dict[str, Any] | None:
+async def get_card_definition(conn: aiosqlite.Connection, card_id: str) -> dict[str, Any] | None:
     cur = await conn.execute(
         """
         SELECT id, display_name, jurisdiction, topic, description,
@@ -216,9 +214,7 @@ def _to_z(dt: datetime) -> str:
 async def get_agent_submission(
     conn: aiosqlite.Connection, submission_id: str
 ) -> dict[str, Any] | None:
-    cur = await conn.execute(
-        "SELECT * FROM agent_submissions WHERE id = ?", (submission_id,)
-    )
+    cur = await conn.execute("SELECT * FROM agent_submissions WHERE id = ?", (submission_id,))
     row = await cur.fetchone()
     if row is None:
         return None
@@ -229,8 +225,7 @@ async def list_submissions_by_hotkey(
     conn: aiosqlite.Connection, hotkey: str
 ) -> list[dict[str, Any]]:
     cur = await conn.execute(
-        "SELECT * FROM agent_submissions WHERE miner_hotkey = ? "
-        "ORDER BY submitted_at DESC",
+        "SELECT * FROM agent_submissions WHERE miner_hotkey = ? ORDER BY submitted_at DESC",
         (hotkey,),
     )
     rows = await cur.fetchall()
@@ -286,8 +281,7 @@ async def list_submissions_all(
     )
     rows = await cur.fetchall()
     cur2 = await conn.execute(
-        "SELECT COUNT(*) FROM agent_submissions "
-        "WHERE status IN ('queued','evaluating','ranked')"
+        "SELECT COUNT(*) FROM agent_submissions WHERE status IN ('queued','evaluating','ranked')"
     )
     total_row = await cur2.fetchone()
     total = int(total_row[0]) if total_row else 0
@@ -317,8 +311,7 @@ async def update_submission_score(
     current_rank: int,
 ) -> None:
     await conn.execute(
-        "UPDATE agent_submissions SET current_score=?, current_rank=?, status='ranked' "
-        "WHERE id=?",
+        "UPDATE agent_submissions SET current_score=?, current_rank=?, status='ranked' WHERE id=?",
         (current_score, current_rank, submission_id),
     )
     await conn.commit()
@@ -424,6 +417,7 @@ async def insert_eval_run(
     cathedral_signature: str,
     ran_at_iso: str | None = None,
     polaris_verified: bool = False,
+    polaris_attestation: dict[str, Any] | None = None,
 ) -> None:
     """Insert an eval_runs row.
 
@@ -436,6 +430,11 @@ async def insert_eval_run(
     runtime and the manifest verified. False for BYO-compute miners. The
     1.10x multiplier is already applied to weighted_score upstream; this
     flag persists the verification status for audit + frontend display.
+
+    `polaris_attestation` is the Polaris-signed proof of execution
+    (Tier A flow). Stored as JSON so future verifiers can re-check the
+    Ed25519 signature without re-running the eval. None for BYO-compute
+    and legacy stub paths.
     """
     await conn.execute(
         """
@@ -443,8 +442,8 @@ async def insert_eval_run(
             id, submission_id, epoch, round_index, polaris_agent_id,
             polaris_run_id, task_json, output_card_json, output_card_hash,
             score_parts, weighted_score, ran_at, duration_ms, errors,
-            cathedral_signature, polaris_verified
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            cathedral_signature, polaris_verified, polaris_attestation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             id,
@@ -463,6 +462,7 @@ async def insert_eval_run(
             json.dumps(errors) if errors is not None else None,
             cathedral_signature,
             1 if polaris_verified else 0,
+            json.dumps(polaris_attestation) if polaris_attestation is not None else None,
         ),
     )
     await conn.commit()
@@ -472,8 +472,7 @@ async def list_eval_runs_for_submission(
     conn: aiosqlite.Connection, submission_id: str, limit: int = 20
 ) -> list[dict[str, Any]]:
     cur = await conn.execute(
-        "SELECT * FROM eval_runs WHERE submission_id = ? "
-        "ORDER BY ran_at DESC LIMIT ?",
+        "SELECT * FROM eval_runs WHERE submission_id = ? ORDER BY ran_at DESC LIMIT ?",
         (submission_id, limit),
     )
     rows = await cur.fetchall()
@@ -520,8 +519,7 @@ async def list_eval_runs_recent(
 ) -> list[dict[str, Any]]:
     """Cross-card recent feed for the validator pull endpoint."""
     cur = await conn.execute(
-        "SELECT * FROM eval_runs WHERE ran_at >= ? "
-        "ORDER BY ran_at ASC LIMIT ?",
+        "SELECT * FROM eval_runs WHERE ran_at >= ? ORDER BY ran_at ASC LIMIT ?",
         (since.isoformat(), limit),
     )
     rows = await cur.fetchall()
@@ -532,8 +530,7 @@ async def list_eval_runs_in_window(
     conn: aiosqlite.Connection, *, start: datetime, end: datetime
 ) -> list[dict[str, Any]]:
     cur = await conn.execute(
-        "SELECT * FROM eval_runs WHERE ran_at >= ? AND ran_at < ? "
-        "ORDER BY id ASC",
+        "SELECT * FROM eval_runs WHERE ran_at >= ? AND ran_at < ? ORDER BY id ASC",
         (start.isoformat(), end.isoformat()),
     )
     rows = await cur.fetchall()
@@ -548,8 +545,7 @@ async def rolling_avg_score(
 
     since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     cur = await conn.execute(
-        "SELECT AVG(weighted_score) FROM eval_runs "
-        "WHERE submission_id = ? AND ran_at >= ?",
+        "SELECT AVG(weighted_score) FROM eval_runs WHERE submission_id = ? AND ran_at >= ?",
         (submission_id, since),
     )
     row = await cur.fetchone()
@@ -558,9 +554,7 @@ async def rolling_avg_score(
     return float(row[0])
 
 
-async def best_eval_run_for_card(
-    conn: aiosqlite.Connection, card_id: str
-) -> dict[str, Any] | None:
+async def best_eval_run_for_card(conn: aiosqlite.Connection, card_id: str) -> dict[str, Any] | None:
     cur = await conn.execute(
         """
         SELECT er.* FROM eval_runs er
@@ -596,12 +590,9 @@ async def incumbent_best_score(
     return float(row[0])
 
 
-async def queued_submissions(
-    conn: aiosqlite.Connection, limit: int = 4
-) -> list[dict[str, Any]]:
+async def queued_submissions(conn: aiosqlite.Connection, limit: int = 4) -> list[dict[str, Any]]:
     cur = await conn.execute(
-        "SELECT * FROM agent_submissions WHERE status='queued' "
-        "ORDER BY submitted_at ASC LIMIT ?",
+        "SELECT * FROM agent_submissions WHERE status='queued' ORDER BY submitted_at ASC LIMIT ?",
         (limit,),
     )
     rows = await cur.fetchall()
@@ -619,6 +610,8 @@ def _row_to_eval_run(
     out["score_parts"] = json.loads(out["score_parts"])
     if out.get("errors"):
         out["errors"] = json.loads(out["errors"])
+    if out.get("polaris_attestation"):
+        out["polaris_attestation"] = json.loads(out["polaris_attestation"])
     return out
 
 
@@ -665,9 +658,7 @@ async def insert_merkle_anchor(
     await conn.commit()
 
 
-async def get_merkle_anchor(
-    conn: aiosqlite.Connection, epoch: int
-) -> dict[str, Any] | None:
+async def get_merkle_anchor(conn: aiosqlite.Connection, epoch: int) -> dict[str, Any] | None:
     cur = await conn.execute(
         "SELECT epoch, merkle_root, eval_count, leaf_hashes_json, "
         "computed_at, on_chain_block, on_chain_extrinsic_index "

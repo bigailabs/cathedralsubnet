@@ -35,9 +35,7 @@ async def get_agent(agent_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="agent not found")
 
     runs = await repository.list_eval_runs_for_submission(ctx.db, agent_id, limit=20)
-    score_history = [
-        {"date": r["ran_at"], "score": r["weighted_score"]} for r in reversed(runs)
-    ]
+    score_history = [{"date": r["ran_at"], "score": r["weighted_score"]} for r in reversed(runs)]
     return {
         "id": sub["id"],
         "display_name": sub["display_name"],
@@ -85,9 +83,7 @@ async def list_agents(
         )
     return {
         "items": [
-            _submission_to_leaderboard_entry(s)
-            for s in items
-            if s["current_score"] is not None
+            _submission_to_leaderboard_entry(s) for s in items if s["current_score"] is not None
         ],
         "total": total,
         "limit": limit,
@@ -112,9 +108,10 @@ async def get_card_summary(card_id: str, request: Request) -> dict[str, Any]:
         ctx.db, card_id, sort="score", limit=200, offset=0
     )
     agent_count = len([s for s in submissions if s["status"] == "ranked"])
-    latest = max((r["ran_at"] for r in await repository.list_eval_runs_for_card(
-        ctx.db, card_id, limit=1
-    )), default=None)
+    latest = max(
+        (r["ran_at"] for r in await repository.list_eval_runs_for_card(ctx.db, card_id, limit=1)),
+        default=None,
+    )
 
     best_eval_output = None
     if best is not None:
@@ -157,9 +154,7 @@ async def get_card_history(
     since_dt = _parse_since(since)
 
     if agent_id:
-        runs = await repository.list_eval_runs_for_submission(
-            ctx.db, agent_id, limit=limit
-        )
+        runs = await repository.list_eval_runs_for_submission(ctx.db, agent_id, limit=limit)
         if since_dt:
             since_iso = since_dt.isoformat()
             runs = [r for r in runs if r.get("ran_at") and r["ran_at"] >= since_iso]
@@ -217,9 +212,7 @@ async def get_card_feed(
     if (await repository.get_card_definition(ctx.db, card_id)) is None:
         raise HTTPException(status_code=404, detail="card not found")
     since_dt = _parse_since(since)
-    runs = await repository.list_eval_runs_for_card(
-        ctx.db, card_id, since=since_dt, limit=limit
-    )
+    runs = await repository.list_eval_runs_for_card(ctx.db, card_id, since=since_dt, limit=limit)
     items: list[dict[str, Any]] = []
     for r in runs:
         sub = await repository.get_agent_submission(ctx.db, r["submission_id"])
@@ -249,9 +242,7 @@ async def get_leaderboard(
         ctx.db, card, sort="score", limit=limit, offset=0
     )
     items = [
-        _submission_to_leaderboard_entry(s)
-        for s in submissions
-        if s["current_score"] is not None
+        _submission_to_leaderboard_entry(s) for s in submissions if s["current_score"] is not None
     ]
     return {"items": items, "computed_at": _now_iso()}
 
@@ -328,8 +319,7 @@ async def get_miner_agents(hotkey: str, request: Request) -> dict[str, Any]:
                 "submitted_at": s["submitted_at"],
                 "recent_evals": [_eval_run_to_output(r, s) for r in runs],
                 "score_history": [
-                    {"date": r["ran_at"], "score": r["weighted_score"]}
-                    for r in reversed(runs)
+                    {"date": r["ran_at"], "score": r["weighted_score"]} for r in reversed(runs)
                 ],
             }
         )
@@ -412,6 +402,7 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
         "output_card_hash": run["output_card_hash"],
         "weighted_score": run["weighted_score"],
         "polaris_verified": bool(run.get("polaris_verified", 0)),
+        "polaris_attestation": run.get("polaris_attestation"),
         "ran_at": run["ran_at"],
         "cathedral_signature": run["cathedral_signature"],
         "merkle_epoch": run.get("merkle_epoch"),
