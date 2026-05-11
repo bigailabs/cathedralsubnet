@@ -336,15 +336,33 @@ def reset_pull_cursor() -> None:
     _LAST_SINCE["value"] = None
 
 
+_SIGNED_EVAL_OUTPUT_KEYS = frozenset(
+    {
+        "id",
+        "agent_id",
+        "agent_display_name",
+        "card_id",
+        "output_card",
+        "output_card_hash",
+        "weighted_score",
+        "polaris_verified",
+        "ran_at",
+    }
+)
+
+
 def verify_eval_output_signature(
     eval_output: dict[str, Any], public_key: Ed25519PublicKey
 ) -> None:
-    """Verify the cathedral signature over the public EvalOutput projection.
+    """Verify the cathedral signature over the publisher's signed payload.
 
-    The publisher signs the wire-shaped EvalOutput (CONTRACTS.md §1.10):
-    `canonical_json({id, agent_id, agent_display_name, card_id,
-                      output_card, weighted_score, ran_at, merkle_epoch})`
-    with `cathedral_signature` excluded from the signed payload.
+    The publisher's `score_and_sign` signs a fixed-key payload
+    (see scoring_pipeline.py:243): id, agent_id, agent_display_name,
+    card_id, output_card, output_card_hash, weighted_score,
+    polaris_verified, ran_at. The wire response carries extra fields
+    (cathedral_signature, merkle_epoch, polaris_attestation) that are
+    NOT part of the signed bytes; we must strip them before
+    canonicalizing or verify fails.
     """
     sig_b64 = eval_output.get("cathedral_signature")
     if not sig_b64:
@@ -353,7 +371,9 @@ def verify_eval_output_signature(
         sig = base64.b64decode(sig_b64)
     except (ValueError, TypeError) as e:
         raise PullVerificationError(f"signature base64 invalid: {e}") from e
-    payload_dict = {k: v for k, v in eval_output.items() if k != "cathedral_signature"}
+    payload_dict = {
+        k: v for k, v in eval_output.items() if k in _SIGNED_EVAL_OUTPUT_KEYS
+    }
     payload = canonical_json(payload_dict)
     try:
         public_key.verify(sig, payload)
