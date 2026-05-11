@@ -68,7 +68,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.5")
+VERSION = os.getenv("CATHEDRAL_RUNTIME_VERSION", "v1.0.6")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -478,6 +478,30 @@ async def _call_llm(
     }
 
 
+_STRING_FIELDS = (
+    "title",
+    "summary",
+    "what_changed",
+    "why_it_matters",
+    "action_notes",
+    "risks",
+    "topic",
+)
+
+
+def _coerce_str_fields(card: dict[str, Any]) -> dict[str, Any]:
+    """Some models emit text fields as JSON arrays of bullet points. The
+    Card Pydantic schema requires strings, so flatten lists to newline-
+    joined strings before we hand off to the publisher."""
+    for k in _STRING_FIELDS:
+        v = card.get(k)
+        if isinstance(v, list):
+            card[k] = "\n".join(str(x).strip() for x in v if x is not None)
+        elif v is None:
+            card[k] = ""
+    return card
+
+
 def _parse_card_json(text: str) -> dict[str, Any]:
     """Tolerant: strip markdown fences if the model added them."""
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
@@ -489,7 +513,7 @@ def _parse_card_json(text: str) -> dict[str, Any]:
         raise HTTPException(502, f"model output is not valid JSON: {e}") from e
     if not isinstance(parsed, dict):
         raise HTTPException(502, "model output is not a JSON object")
-    return parsed
+    return _coerce_str_fields(parsed)
 
 
 if __name__ == "__main__":
