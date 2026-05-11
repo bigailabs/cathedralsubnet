@@ -24,15 +24,21 @@ def apply_burn(
     burn_uid: int,
     forced_burn_percentage: float,
 ) -> list[tuple[int, float]]:
-    """Allocate forced_burn_percentage of total weight to burn_uid.
+    """Route forced_burn_percentage of total weight to burn_uid.
+
+    "Burn" here matches the Basilica convention: validators route a fixed share
+    of weight to the subnet owner uid while the miner set is immature. The
+    chain pays that share to whoever is registered at burn_uid; for the
+    Cathedral subnet that's our owner-controlled hotkey. As miner output
+    quality improves, forced_burn_percentage is dialed down over time.
 
     Pre-normalize: returns a vector of (uid, weight) where burn_uid carries
     forced_burn_percentage/100 of the total mass, and the remaining mass is
-    split proportionally across the original scores. Caller still passes the
-    result through `normalize` to renormalize to sum=1.0 and drop bad values.
+    split proportionally across the original scores. Caller passes the result
+    through `normalize` to renormalize to sum=1.0 and drop bad values.
 
     If scores is empty (or sums to non-positive), returns [(burn_uid, 1.0)] so
-    the validator still emits weights (all to burn).
+    the validator still emits weights (entire share goes to burn_uid).
 
     forced_burn_percentage must be in [0.0, 100.0].
     """
