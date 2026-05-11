@@ -182,7 +182,20 @@ async def score_and_sign(
         submission=submission,
         weighted_score_pre=weighted_pre,
     )
-    weighted_final = weighted_pre * multiplier
+    weighted_after_first_mover = weighted_pre * multiplier
+
+    # Verified-runtime multiplier per CONTRACTS.md §7.3 + Fred's Moltbook
+    # decision: BYO-compute miners (no polaris_agent_id) score normally.
+    # Miners who ran on Polaris and produced a manifest that verified get
+    # a 1.10x quality bonus. Capped at 1.0 afterwards so a top-tier BYO
+    # miner can still hit the ceiling.
+    #
+    # The orchestrator only passes a non-empty polaris_agent_id when the
+    # manifest fetch + signature verification both succeeded. Empty or
+    # None means BYO-compute or failed verification — no multiplier.
+    polaris_verified = bool(polaris_agent_id)
+    verified_multiplier = 1.10 if polaris_verified else 1.0
+    weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)
 
     # CRIT-8: hash the literal `output_card_json` bytes that the publisher
     # both STORES (eval_runs.output_card_json) AND SERVES (EvalOutput.output_card).
@@ -211,6 +224,7 @@ async def score_and_sign(
         "output_card": output_card_json,
         "output_card_hash": output_card_hash,
         "weighted_score": weighted_final,
+        "polaris_verified": polaris_verified,
         "ran_at": ran_at_iso,
     }
     signature = signer.sign(public_payload)
@@ -233,6 +247,7 @@ async def score_and_sign(
         duration_ms=duration_ms,
         errors=errors if errors else None,
         cathedral_signature=signature,
+        polaris_verified=polaris_verified,
     )
 
     # Update rolling 30-day average + rank

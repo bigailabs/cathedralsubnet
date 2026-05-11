@@ -113,14 +113,23 @@ def _decode_card(claim, bundle, miner_hotkey: str) -> Card | None:  # type: igno
 def _coerce_card(  # type: ignore[no-untyped-def]
     raw: dict, work_unit: str, miner_hotkey: str, bundle
 ) -> Card | None:
-    """Fill in the three fields that come from claim context, then validate."""
+    """Fill in the three fields that come from claim context, then validate.
+
+    BYO-compute (`bundle.manifest is None`): there's no Polaris-issued
+    agent id to inject — fall back to the empty string. The Card model
+    requires the field to be a string (not None), so this preserves
+    schema compatibility while making the BYO origin explicit downstream.
+    """
     if not isinstance(raw, dict):
         return None
     card_id = work_unit.removeprefix("card:") if work_unit.startswith("card:") else work_unit
     raw = dict(raw)
     raw.setdefault("id", card_id)
     raw.setdefault("worker_owner_hotkey", miner_hotkey)
-    raw.setdefault("polaris_agent_id", bundle.manifest.polaris_agent_id)
+    polaris_agent_id = (
+        bundle.manifest.polaris_agent_id if bundle.manifest is not None else ""
+    )
+    raw.setdefault("polaris_agent_id", polaris_agent_id)
     try:
         return Card.model_validate(raw)
     except (ValueError, TypeError):

@@ -22,8 +22,16 @@ class StoredClaim:
 
 async def insert_claim(conn: aiosqlite.Connection, claim: PolarisAgentClaim) -> int:
     """Insert a claim and return its id. If a duplicate (miner_hotkey, work_unit,
-    polaris_agent_id) is submitted, return the existing id without changing it."""
+    polaris_agent_id) is submitted, return the existing id without changing it.
+
+    BYO-compute: `claim.polaris_agent_id` may be None. The `claims` table
+    requires the column to be non-NULL (UNIQUE constraint relies on it),
+    so we coerce None -> "" when persisting. The empty string is the
+    sentinel for "no Polaris runtime claimed" — a real polaris_agent_id
+    is always non-empty (validated in PolarisAgentClaim).
+    """
     payload = claim.model_dump_json()
+    polaris_agent_id_db = claim.polaris_agent_id or ""
     cur = await conn.execute(
         """
         INSERT INTO claims (miner_hotkey, owner_wallet, work_unit, polaris_agent_id,
@@ -36,7 +44,7 @@ async def insert_claim(conn: aiosqlite.Connection, claim: PolarisAgentClaim) -> 
             claim.miner_hotkey,
             claim.owner_wallet,
             claim.work_unit,
-            claim.polaris_agent_id,
+            polaris_agent_id_db,
             payload,
             claim.submitted_at.isoformat(),
         ),
@@ -45,7 +53,7 @@ async def insert_claim(conn: aiosqlite.Connection, claim: PolarisAgentClaim) -> 
     if row is None:
         cur = await conn.execute(
             "SELECT id FROM claims WHERE miner_hotkey=? AND work_unit=? AND polaris_agent_id=?",
-            (claim.miner_hotkey, claim.work_unit, claim.polaris_agent_id),
+            (claim.miner_hotkey, claim.work_unit, polaris_agent_id_db),
         )
         existing = await cur.fetchone()
         await conn.commit()
@@ -138,6 +146,13 @@ async def mark_verified(
             now,
         ),
     )
+    # BYO-compute: when bundle.manifest is None there's no owner_wallet
+    # from a verified Polaris manifest. Fall back to the miner's hotkey
+    # as the owner identifier — the existing schema requires a non-NULL
+    # string and the hotkey is the only authenticated identity we have.
+    owner_wallet = (
+        bundle.manifest.owner_wallet if bundle.manifest is not None else miner_hotkey
+    )
     await conn.execute(
         """
         INSERT INTO cards (
@@ -158,7 +173,7 @@ async def mark_verified(
             card.id,
             miner_hotkey,
             card.polaris_agent_id,
-            bundle.manifest.owner_wallet,
+            owner_wallet,
             claim_id,
             card.model_dump_json(),
             score.weighted(),

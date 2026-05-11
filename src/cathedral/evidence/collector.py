@@ -3,6 +3,12 @@
 Implements issue #2 acceptance criteria. Partial-failure policy:
 - Manifest signature/hash failure or agent_id mismatch → fatal (claim rejected)
 - Per-record run/artifact/usage failure → drop the record, count for telemetry
+
+BYO-compute path: when `claim.polaris_agent_id` is None, the collector
+skips manifest/run/artifact/usage fetches entirely and returns an empty
+bundle (manifest=None). Only the hotkey signature on the claim is
+verified upstream. The card scoring still runs, but without a
+verified-runtime multiplier (CONTRACTS.md §7.3).
 """
 
 from __future__ import annotations
@@ -36,6 +42,25 @@ class EvidenceCollector:
         self.pubkey = polaris_pubkey
 
     async def collect(self, claim: PolarisAgentClaim) -> EvidenceBundle:
+        # BYO-compute path: no Polaris identifier means no manifest to
+        # fetch, no runs/artifacts/usage to verify. Return an empty
+        # bundle so the rest of the pipeline (preflight + score_card)
+        # still runs against `claim.card_payload`.
+        if claim.polaris_agent_id is None:
+            logger.info(
+                "byo_compute_claim",
+                miner_hotkey=claim.miner_hotkey,
+                work_unit=claim.work_unit,
+            )
+            return EvidenceBundle(
+                manifest=None,
+                runs=[],
+                artifacts=[],
+                usage=[],
+                verified_at=datetime.now(UTC),
+                filtered_usage_count=0,
+            )
+
         try:
             manifest = await self.fetcher.fetch_manifest(claim.polaris_agent_id)
         except MissingRecordError as e:

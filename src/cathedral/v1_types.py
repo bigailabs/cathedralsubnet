@@ -80,7 +80,15 @@ class EvalTask(BaseModel):
 
 
 class EvalRun(BaseModel):
-    """Section 1.10."""
+    """Section 1.10.
+
+    `polaris_verified` is True when the eval ran on a Polaris-managed
+    runtime and the manifest was fetched + verified successfully. False
+    for BYO-compute miners and for failed Polaris runs. The verified
+    multiplier (CONTRACTS.md §7.3) is reflected in `weighted_score`;
+    this flag lets downstream consumers display the verification status
+    without re-deriving it from the score.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -99,6 +107,7 @@ class EvalRun(BaseModel):
     duration_ms: int
     errors: list[str] | None = None
     cathedral_signature: str
+    polaris_verified: bool = False
 
 
 # --------------------------------------------------------------------------

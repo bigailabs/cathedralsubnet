@@ -423,6 +423,7 @@ async def insert_eval_run(
     errors: list[str] | None,
     cathedral_signature: str,
     ran_at_iso: str | None = None,
+    polaris_verified: bool = False,
 ) -> None:
     """Insert an eval_runs row.
 
@@ -430,6 +431,11 @@ async def insert_eval_run(
     trailing 'Z'). It MUST match the value the cathedral signature was
     computed over, otherwise downstream verifiers will reject. When omitted,
     falls back to `ran_at.isoformat()` (legacy callers).
+
+    `polaris_verified` is True when the eval ran on a Polaris-managed
+    runtime and the manifest verified. False for BYO-compute miners. The
+    1.10x multiplier is already applied to weighted_score upstream; this
+    flag persists the verification status for audit + frontend display.
     """
     await conn.execute(
         """
@@ -437,8 +443,8 @@ async def insert_eval_run(
             id, submission_id, epoch, round_index, polaris_agent_id,
             polaris_run_id, task_json, output_card_json, output_card_hash,
             score_parts, weighted_score, ran_at, duration_ms, errors,
-            cathedral_signature
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            cathedral_signature, polaris_verified
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             id,
@@ -456,6 +462,7 @@ async def insert_eval_run(
             duration_ms,
             json.dumps(errors) if errors is not None else None,
             cathedral_signature,
+            1 if polaris_verified else 0,
         ),
     )
     await conn.commit()

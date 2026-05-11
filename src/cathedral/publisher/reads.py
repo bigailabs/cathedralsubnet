@@ -394,6 +394,7 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
         "output_card": run["output_card_json"],
         "output_card_hash": run["output_card_hash"],
         "weighted_score": run["weighted_score"],
+        "polaris_verified": bool(run.get("polaris_verified", 0)),
         "ran_at": run["ran_at"],
         "cathedral_signature": run["cathedral_signature"],
         "merkle_epoch": run.get("merkle_epoch"),
