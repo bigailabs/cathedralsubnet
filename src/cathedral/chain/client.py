@@ -88,16 +88,28 @@ class BittensorChain:
     def _ensure_clients(self) -> None:
         if self._subtensor is not None:
             return
-        import bittensor as bt  # local import; heavy
+        # The bittensor SDK's Config machinery reads sys.argv via argparse
+        # and tries to YAML-load whatever path follows --config. Our CLI
+        # uses --config to point at /etc/cathedral/testnet.toml, which is
+        # TOML, not YAML, so bt blows up. Hide our argv from bt while
+        # importing/instantiating; restore after.
+        import sys
 
-        wallet_kwargs: dict[str, Any] = {
-            "name": self.wallet_name,
-            "hotkey": self.wallet_hotkey,
-        }
-        if self.wallet_path:
-            wallet_kwargs["path"] = self.wallet_path
-        self._wallet = bt.Wallet(**wallet_kwargs)
-        self._subtensor = bt.Subtensor(network=self.network)
+        saved_argv = sys.argv
+        sys.argv = sys.argv[:1]
+        try:
+            import bittensor as bt  # local import; heavy
+
+            wallet_kwargs: dict[str, Any] = {
+                "name": self.wallet_name,
+                "hotkey": self.wallet_hotkey,
+            }
+            if self.wallet_path:
+                wallet_kwargs["path"] = self.wallet_path
+            self._wallet = bt.Wallet(**wallet_kwargs)
+            self._subtensor = bt.Subtensor(network=self.network)
+        finally:
+            sys.argv = saved_argv
 
     async def metagraph(self) -> Metagraph:
         def _read() -> Metagraph:
