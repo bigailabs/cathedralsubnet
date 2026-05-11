@@ -29,6 +29,19 @@ EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONFAULTHANDLER=1
 
-# cathedral-publisher CLI: serve subcommand starts the FastAPI app.
-# Railway's PORT env wins over hardcoded 8080.
-CMD ["sh", "-c", "echo '[startup] launching cathedral-publisher serve --db '${CATHEDRAL_DB_PATH}' --port '${PORT:-8080} && cathedral-publisher serve --db ${CATHEDRAL_DB_PATH} --port ${PORT:-8080} --host 0.0.0.0"]
+# Bootstrap on every container start:
+# 1. seed-cards — idempotent INSERT-or-UPDATE of the 5 launch card_definitions
+#    rows. Cheap; runs even if rows already exist.
+# 2. load-eval-spec — pulls real per-card content from the public
+#    cathedral-eval-spec GitHub repo and updates the rows. Idempotent.
+#    Failure is non-fatal (logs to stderr, container still starts) — we'd
+#    rather serve placeholder content than refuse to start.
+# 3. serve — start uvicorn + the FastAPI app + background eval orchestrator.
+CMD ["sh", "-c", "\
+  echo '[startup] seed-cards' && \
+  cathedral-publisher seed-cards --db ${CATHEDRAL_DB_PATH} && \
+  echo '[startup] load-eval-spec' && \
+  cathedral-publisher load-eval-spec --db ${CATHEDRAL_DB_PATH} || echo '[startup] load-eval-spec failed; continuing with placeholder content' && \
+  echo '[startup] serve --db '${CATHEDRAL_DB_PATH}' --port '${PORT:-8080} && \
+  cathedral-publisher serve --db ${CATHEDRAL_DB_PATH} --port ${PORT:-8080} --host 0.0.0.0 \
+"]

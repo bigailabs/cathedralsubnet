@@ -138,8 +138,18 @@ def build_publisher_app(
             content={"detail": str(detail) if detail else "error"},
         )
 
-    app.include_router(submit_router)
-    app.include_router(reads_router)
+    # CONTRACTS Section 2 locks the public surface at `/api/cathedral/v1/...`
+    # (matches the cross-repo contract test mirror, the frontend's API client,
+    # and the polariscomputer-side routes already deployed). Mount BOTH:
+    # - /api/cathedral/v1/...   — canonical contract surface
+    # - /v1/... (and /health)   — back-compat for direct callers + infra
+    #   healthchecks (Railway, k8s) that expect `/health` at root
+    # FastAPI handlers are stateless, so dual-mounting is just two route
+    # entries pointing at the same function — no duplicated state.
+    app.include_router(submit_router, prefix="/api/cathedral")
+    app.include_router(reads_router, prefix="/api/cathedral")
+    app.include_router(submit_router, include_in_schema=False)
+    app.include_router(reads_router, include_in_schema=False)
 
     # Agent-facing onboarding — Moltbook-style. A miner pastes
     # `Read https://api.cathedral.computer/skill.md and follow the
