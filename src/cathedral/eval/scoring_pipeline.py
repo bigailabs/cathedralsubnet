@@ -63,6 +63,8 @@ class ScoredEval:
     multiplier: float
     cathedral_signature: str
     errors: list[str]
+    polaris_verified: bool = False
+    polaris_attestation: dict[str, Any] | None = None
 
 
 class EvalSigner:
@@ -82,9 +84,7 @@ class EvalSigner:
         except ValueError as e:
             raise ValueError("CATHEDRAL_EVAL_SIGNING_KEY must be hex") from e
         if len(raw) != 32:
-            raise ValueError(
-                f"signing key must be 32 bytes, got {len(raw)}"
-            )
+            raise ValueError(f"signing key must be 32 bytes, got {len(raw)}")
         return cls(Ed25519PrivateKey.from_private_bytes(raw))
 
     def sign(self, eval_run_dict: dict[str, Any]) -> str:
@@ -124,6 +124,7 @@ async def score_and_sign(
     polaris_errors: list[str],
     registry: CardRegistry,
     signer: EvalSigner,
+    polaris_attestation: dict[str, Any] | None = None,
 ) -> ScoredEval:
     """Run preflight + scorer, apply first-mover delta, build + sign EvalRun.
 
@@ -185,15 +186,21 @@ async def score_and_sign(
     weighted_after_first_mover = weighted_pre * multiplier
 
     # Verified-runtime multiplier per CONTRACTS.md §7.3 + Fred's Moltbook
-    # decision: BYO-compute miners (no polaris_agent_id) score normally.
-    # Miners who ran on Polaris and produced a manifest that verified get
-    # a 1.10x quality bonus. Capped at 1.0 afterwards so a top-tier BYO
-    # miner can still hit the ceiling.
+    # decision: BYO-compute miners score normally. Miners whose eval ran
+    # on Polaris and produced a verified Ed25519 attestation get a 1.10x
+    # quality bonus. Capped at 1.0 afterwards so a top-tier BYO miner can
+    # still hit the ceiling.
     #
-    # The orchestrator only passes a non-empty polaris_agent_id when the
-    # manifest fetch + signature verification both succeeded. Empty or
-    # None means BYO-compute or failed verification — no multiplier.
-    polaris_verified = bool(polaris_agent_id)
+    # Tier-A (Polaris-runtime) flow: the runner only returns a non-None
+    # attestation after verifying the signature and re-deriving both the
+    # task_hash and output_hash. A `polaris_attestation` dict here means
+    # verification already succeeded; we just record it.
+    #
+    # Legacy flow (HttpPolarisRunner / stubs): no attestation, but
+    # `polaris_agent_id` is non-empty when Polaris ran the work. Keep
+    # that path eligible for the multiplier so existing stub tests
+    # continue to assert the historical behaviour.
+    polaris_verified = polaris_attestation is not None or bool(polaris_agent_id)
     verified_multiplier = 1.10 if polaris_verified else 1.0
     weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)
 
@@ -248,6 +255,7 @@ async def score_and_sign(
         errors=errors if errors else None,
         cathedral_signature=signature,
         polaris_verified=polaris_verified,
+        polaris_attestation=polaris_attestation,
     )
 
     # Update rolling 30-day average + rank
@@ -278,6 +286,8 @@ async def score_and_sign(
         multiplier=multiplier,
         cathedral_signature=signature,
         errors=errors,
+        polaris_verified=polaris_verified,
+        polaris_attestation=polaris_attestation,
     )
 
 
@@ -300,9 +310,7 @@ async def _first_mover_multiplier(
     is_first = first is None or str(first["id"]) == str(submission_id)
 
     submitted_at = _parse_iso(submission.get("submitted_at"))
-    incumbent_best = await repository.incumbent_best_score(
-        conn, card_id, submitted_at
-    ) or 0.0
+    incumbent_best = await repository.incumbent_best_score(conn, card_id, submitted_at) or 0.0
     first_mover_at = _parse_iso(
         first.get("first_mover_at") if first else submission.get("first_mover_at")
     )
@@ -316,9 +324,7 @@ async def _first_mover_multiplier(
     )
 
 
-async def _compute_rank(
-    conn: aiosqlite.Connection, card_id: str, my_score: float
-) -> int:
+async def _compute_rank(conn: aiosqlite.Connection, card_id: str, my_score: float) -> int:
     """1-indexed rank within `card_id` by current_score DESC."""
     cur = await conn.execute(
         "SELECT COUNT(*) FROM agent_submissions "

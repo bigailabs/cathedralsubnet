@@ -1,20 +1,20 @@
 """Eval scheduler loop (CONTRACTS.md Section 6 step 3).
 
-    SELECT submissions WHERE status='queued' ORDER BY submitted_at ASC
-        LIMIT max_concurrent
-    per submission:
-        1. UPDATE status='evaluating'
-        2. resolve epoch + round_index for this card
-        3. generate EvalTask deterministically
-        4. fetch encrypted bundle from Hippius, decrypt to temp dir
-        5. POST to Polaris orchestrator: spawn hermes container, run task
-        6. capture container stdout last line as Card JSON
-        7. terminate container, delete ephemeral volume
-    on Polaris API failure: retry up to 3x with exponential backoff
-        (60s, 120s, 240s); after 3 failures, leave status='evaluating'
-        for the operator dashboard
-    on bundle decryption failure: status='rejected'
-    on Card JSON parse failure: record EvalRun with errors=[...], score=0
+SELECT submissions WHERE status='queued' ORDER BY submitted_at ASC
+    LIMIT max_concurrent
+per submission:
+    1. UPDATE status='evaluating'
+    2. resolve epoch + round_index for this card
+    3. generate EvalTask deterministically
+    4. fetch encrypted bundle from Hippius, decrypt to temp dir
+    5. POST to Polaris orchestrator: spawn hermes container, run task
+    6. capture container stdout last line as Card JSON
+    7. terminate container, delete ephemeral volume
+on Polaris API failure: retry up to 3x with exponential backoff
+    (60s, 120s, 240s); after 3 failures, leave status='evaluating'
+    for the operator dashboard
+on bundle decryption failure: status='rejected'
+on Card JSON parse failure: record EvalRun with errors=[...], score=0
 """
 
 from __future__ import annotations
@@ -118,9 +118,7 @@ class EvalOrchestrator:
             log.warning("eval_card_def_missing")
             return
 
-        await repository.update_submission_status(
-            self.db, submission["id"], status="evaluating"
-        )
+        await repository.update_submission_status(self.db, submission["id"], status="evaluating")
 
         # Generate deterministic task for this round
         epoch = epoch_for(datetime.now(UTC))
@@ -215,8 +213,7 @@ class EvalOrchestrator:
                         "_polaris_unreachable": True,
                     },
                     duration_ms=0,
-                    polaris_errors=polaris_errors
-                    or ["polaris exhausted retries"],
+                    polaris_errors=polaris_errors or ["polaris exhausted retries"],
                     registry=self.registry,
                     signer=self.signer,
                 )
@@ -228,6 +225,11 @@ class EvalOrchestrator:
                 )
                 return
 
+            attestation_dict = (
+                polaris_result.attestation.to_storage_dict()
+                if polaris_result.attestation is not None
+                else None
+            )
             await score_and_sign(
                 self.db,
                 submission=submission,
@@ -241,6 +243,7 @@ class EvalOrchestrator:
                 polaris_errors=polaris_errors + polaris_result.errors,
                 registry=self.registry,
                 signer=self.signer,
+                polaris_attestation=attestation_dict,
             )
             log.info("eval_run_complete", epoch=epoch, round_index=round_index)
         finally:
@@ -268,9 +271,7 @@ class EvalOrchestrator:
             log.error("eval_retryable_exhausted", reason=reason)
         else:
             # Re-queue
-            await repository.update_submission_status(
-                self.db, submission["id"], status="queued"
-            )
+            await repository.update_submission_status(self.db, submission["id"], status="queued")
             log.warning(
                 "eval_retry_queued",
                 reason=reason,
@@ -340,9 +341,7 @@ async def _sleep_or_stop(stop: asyncio.Event, secs: float) -> None:
 # --------------------------------------------------------------------------
 
 
-async def _evaluating_submissions(
-    conn: Any, limit: int = 10
-) -> list[dict[str, Any]]:
+async def _evaluating_submissions(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
     cur = await conn.execute(
         "SELECT * FROM agent_submissions WHERE status='evaluating' "
         "ORDER BY submitted_at ASC LIMIT ?",
@@ -355,15 +354,30 @@ async def _evaluating_submissions(
 
 def _resolve_polaris_runner_from_env() -> PolarisRunner:
     """Re-build a Polaris runner from the current env so monkeypatched
-    `CATHEDRAL_EVAL_MODE` mid-test takes effect on the next tick."""
+    `CATHEDRAL_EVAL_MODE` mid-test takes effect on the next tick.
+
+    Mode dispatch (CONTRACTS.md §6 + Tier A Polaris-runtime addendum):
+
+      stub*               -> StubPolarisRunner family (smoke tests)
+      stub-fail-polaris   -> FailingStubPolarisRunner
+      stub-bad-card       -> MalformedStubPolarisRunner
+      bundle              -> BundleCardRunner (BYO-compute path)
+      polaris             -> PolarisRuntimeRunner (Tier A — Polaris-hosted)
+      http-polaris (legacy)-> HttpPolarisRunner
+      anything else       -> HttpPolarisRunner (legacy default)
+    """
     import os
 
     from cathedral.eval.polaris_runner import (
         BundleCardRunner,
         FailingStubPolarisRunner,
+        HippiusPresignedUrlResolver,
         HttpPolarisRunner,
         HttpPolarisRunnerConfig,
         MalformedStubPolarisRunner,
+        PolarisRunnerError,
+        PolarisRuntimeRunner,
+        PolarisRuntimeRunnerConfig,
         StubPolarisRunner,
     )
 
@@ -376,11 +390,36 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         return StubPolarisRunner()
     if mode == "bundle":
         return BundleCardRunner()
+    if mode in {"polaris", "polaris-runtime"}:
+        # Tier A — Polaris-hosted miners. Polaris fetches the bundle via
+        # presigned URL, runs Cathedral's runtime image, signs an
+        # attestation over the result.
+        from cathedral.publisher.app import latest_ctx
+
+        ctx = latest_ctx()
+        if ctx is None:
+            raise PolarisRunnerError(
+                "CATHEDRAL_EVAL_MODE=polaris requires the publisher app to be "
+                "running so the HippiusClient is available for presigned URLs"
+            )
+        attestation_key = os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY", "").strip()
+        if not attestation_key:
+            raise PolarisRunnerError(
+                "CATHEDRAL_EVAL_MODE=polaris requires POLARIS_ATTESTATION_PUBLIC_KEY"
+            )
+        return PolarisRuntimeRunner(
+            PolarisRuntimeRunnerConfig(
+                base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
+                api_token=os.environ.get("POLARIS_API_TOKEN", ""),
+                submission_id=os.environ.get("POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID", ""),
+                attestation_public_key_hex=attestation_key,
+                bundle_url_resolver=HippiusPresignedUrlResolver(ctx.hippius),
+                bundle_encryption_key_hex=os.environ.get("CATHEDRAL_BUNDLE_KEK", ""),
+            )
+        )
     return HttpPolarisRunner(
         HttpPolarisRunnerConfig(
-            base_url=os.environ.get(
-                "POLARIS_BASE_URL", "https://api.polaris.computer"
-            ),
+            base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
             api_token=os.environ.get("POLARIS_API_TOKEN", ""),
         )
     )
@@ -428,9 +467,7 @@ async def _run_once_async() -> int:
     # Phase 1: promote queued -> evaluating (work happens next tick).
     queued = await repository.queued_submissions(ctx.db, limit=10)
     for s in queued:
-        await repository.update_submission_status(
-            ctx.db, s["id"], status="evaluating"
-        )
+        await repository.update_submission_status(ctx.db, s["id"], status="evaluating")
         advanced += 1
 
     return advanced
@@ -442,9 +479,7 @@ def run_once() -> int:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             # Inside an async context already — schedule and wait.
-            return asyncio.run_coroutine_threadsafe(
-                _run_once_async(), loop
-            ).result(timeout=60)
+            return asyncio.run_coroutine_threadsafe(_run_once_async(), loop).result(timeout=60)
     except RuntimeError:
         pass
     return asyncio.run(_run_once_async())

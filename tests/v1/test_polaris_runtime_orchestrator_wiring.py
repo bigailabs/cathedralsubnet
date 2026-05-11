@@ -1,0 +1,408 @@
+"""Orchestrator + scoring-pipeline wiring tests for the Polaris-runtime path.
+
+These tests pin the integration glue between `PolarisRuntimeRunner`
+and the rest of the eval pipeline:
+
+1. `_resolve_polaris_runner_from_env` returns `PolarisRuntimeRunner`
+   when `CATHEDRAL_EVAL_MODE=polaris`.
+2. A valid attestation flowing through `score_and_sign` flips the
+   `polaris_verified` flag on the persisted `eval_runs` row.
+3. The persisted attestation JSON round-trips through the public
+   `EvalOutput` projection so downstream verifiers can re-check the
+   Ed25519 signature without re-running the eval.
+4. The 1.10x quality multiplier per CONTRACTS §7.3 applies when a
+   non-None attestation is supplied (Tier A) and is omitted when the
+   runner returns no attestation (BYO-compute Tier B).
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from typing import Any
+from uuid import uuid4
+
+import aiosqlite
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+# Pre-warm the publisher import path so the circular import between
+# `cathedral.eval.orchestrator` and `cathedral.publisher.app` resolves
+# in the same order it does at production startup. Tests that touch
+# orchestrator-level functions must do this before the first
+# `from cathedral.eval.orchestrator import ...` call.
+import cathedral.publisher.app  # noqa: F401  pre-warm
+
+# --------------------------------------------------------------------------
+# Test 1 — env-mode dispatch
+# --------------------------------------------------------------------------
+
+
+def test_resolve_polaris_runner_from_env_polaris_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CATHEDRAL_EVAL_MODE=polaris` -> `PolarisRuntimeRunner` is returned."""
+    from cathedral.eval.orchestrator import _resolve_polaris_runner_from_env
+    from cathedral.eval.polaris_runner import (
+        PolarisRunnerError,
+        PolarisRuntimeRunner,
+    )
+
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "polaris")
+    monkeypatch.setenv("POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID", "sub_cathedral_runtime_v1")
+    monkeypatch.setenv("POLARIS_API_TOKEN", "test-token")
+    # Provide a 32-byte hex Ed25519 public key.
+    public_key_hex = "11" * 32
+    monkeypatch.setenv("POLARIS_ATTESTATION_PUBLIC_KEY", public_key_hex)
+
+    # The Polaris-mode resolver needs the publisher ctx for the HippiusClient.
+    # Stub one with the minimum surface used by HippiusPresignedUrlResolver.
+    class _StubCtx:
+        def __init__(self) -> None:
+            class _StubHippius:
+                def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str:
+                    return f"https://r2.example.invalid/{key}?exp={expires_in}"
+
+            self.hippius = _StubHippius()
+            self.db = None  # not used by dispatch
+            self.signer = None
+            self.registry = None
+
+    monkeypatch.setattr(
+        "cathedral.publisher.app.latest_ctx",
+        lambda: _StubCtx(),
+    )
+
+    runner = _resolve_polaris_runner_from_env()
+    assert isinstance(runner, PolarisRuntimeRunner)
+
+    # `polaris-runtime` is also accepted as an alias.
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "polaris-runtime")
+    runner2 = _resolve_polaris_runner_from_env()
+    assert isinstance(runner2, PolarisRuntimeRunner)
+
+    # Missing attestation key -> hard failure (no silent fallback).
+    monkeypatch.delenv("POLARIS_ATTESTATION_PUBLIC_KEY")
+    with pytest.raises(PolarisRunnerError):
+        _resolve_polaris_runner_from_env()
+
+
+def test_resolve_polaris_runner_other_modes_still_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adding the `polaris` mode must not break existing dispatch."""
+    from cathedral.eval.orchestrator import _resolve_polaris_runner_from_env
+    from cathedral.eval.polaris_runner import (
+        BundleCardRunner,
+        FailingStubPolarisRunner,
+        HttpPolarisRunner,
+        MalformedStubPolarisRunner,
+        StubPolarisRunner,
+    )
+
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "stub")
+    assert isinstance(_resolve_polaris_runner_from_env(), StubPolarisRunner)
+
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "stub-fail-polaris")
+    assert isinstance(_resolve_polaris_runner_from_env(), FailingStubPolarisRunner)
+
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "stub-bad-card")
+    assert isinstance(_resolve_polaris_runner_from_env(), MalformedStubPolarisRunner)
+
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "bundle")
+    assert isinstance(_resolve_polaris_runner_from_env(), BundleCardRunner)
+
+    # Default / legacy: HttpPolarisRunner.
+    monkeypatch.setenv("CATHEDRAL_EVAL_MODE", "http-polaris")
+    assert isinstance(_resolve_polaris_runner_from_env(), HttpPolarisRunner)
+
+
+# --------------------------------------------------------------------------
+# Tests 2+3 — score_and_sign persists attestation + flips polaris_verified
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def conn() -> Any:
+    """Fresh aiosqlite connection with the schema applied."""
+    from cathedral.validator.db import connect
+
+    c = await connect(":memory:")
+    yield c
+    await c.close()
+
+
+@pytest.fixture
+def signer() -> Any:
+    """In-memory Ed25519 signer matching `EvalSigner`'s contract."""
+    from cathedral.eval.scoring_pipeline import EvalSigner
+
+    sk = Ed25519PrivateKey.generate()
+    return EvalSigner(sk)
+
+
+@pytest.fixture
+def registry() -> Any:
+    from cathedral.cards.registry import CardRegistry
+
+    return CardRegistry.baseline()
+
+
+def _valid_card_dict() -> dict[str, Any]:
+    iso = "2026-05-10T10:00:00.000Z"
+    return {
+        "id": "eu-ai-act",
+        "jurisdiction": "eu",
+        "topic": "EU AI Act",
+        "worker_owner_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        "polaris_agent_id": "polaris-runtime:dep_abc",
+        "title": "EU AI Act update",
+        "summary": "Substantive policy summary.",
+        "what_changed": "GPAI obligations live since 2025-08-02.",
+        "why_it_matters": "Providers face up to 3% turnover fines.",
+        "action_notes": "Map deployments to Annex III categories.",
+        "risks": "Penalties phase in alongside obligations.",
+        "citations": [
+            {
+                "url": "https://eur-lex.europa.eu/eli/reg/2024/1689/oj",
+                "class": "official_journal",
+                "fetched_at": iso,
+                "status": 200,
+                "content_hash": "a" * 64,
+            }
+        ],
+        "confidence": 0.72,
+        "no_legal_advice": True,
+        "last_refreshed_at": iso,
+        "refresh_cadence_hours": 24,
+    }
+
+
+async def _ensure_card_definition(c: aiosqlite.Connection) -> None:
+    """Seed the FK target for `agent_submissions.card_id`."""
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    await c.execute(
+        """
+        INSERT OR IGNORE INTO card_definitions (
+            id, display_name, jurisdiction, topic, description,
+            eval_spec_md, source_pool, task_templates, scoring_rubric,
+            refresh_cadence_hours, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "eu-ai-act",
+            "EU AI Act",
+            "eu",
+            "ai-regulation",
+            "EU AI Act regulatory tracking",
+            "# Eval spec",
+            json.dumps([]),
+            json.dumps([]),
+            json.dumps({}),
+            24,
+            "active",
+            now,
+            now,
+        ),
+    )
+    await c.commit()
+
+
+async def _insert_minimal_submission(
+    c: aiosqlite.Connection, *, hotkey_seed: str = "alice"
+) -> dict[str, Any]:
+    """Insert just enough of an `agent_submissions` row to score against.
+
+    Uses `hotkey_seed` to make repeat inserts unique on the
+    (miner_hotkey, card_id, bundle_hash) unique-index target.
+    """
+    await _ensure_card_definition(c)
+    submitted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    sub_id = str(uuid4())
+    miner_hotkey = f"5MinerHotkey{hotkey_seed}".ljust(48, "0")
+    bundle_hash = f"{hotkey_seed}".ljust(64, "f")
+    metadata_fp = f"fp{hotkey_seed}".ljust(64, "0")
+    await c.execute(
+        """
+        INSERT INTO agent_submissions (
+            id, miner_hotkey, card_id, bundle_hash, bundle_size_bytes,
+            bundle_blob_key, encryption_key_id, bundle_signature,
+            display_name, bio, logo_url, soul_md_preview,
+            metadata_fingerprint, similarity_check_passed,
+            status, submitted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            sub_id,
+            miner_hotkey,
+            "eu-ai-act",
+            bundle_hash,
+            1024,
+            "agents/sub.bin.enc",
+            "kek_id_v1",
+            "sigsig",
+            f"miner-{hotkey_seed}",
+            None,
+            None,
+            None,
+            metadata_fp,
+            1,
+            "evaluating",
+            submitted_at,
+        ),
+    )
+    await c.commit()
+    return {
+        "id": sub_id,
+        "miner_hotkey": miner_hotkey,
+        "card_id": "eu-ai-act",
+        "bundle_hash": bundle_hash,
+        "metadata_fingerprint": metadata_fp,
+        "display_name": f"miner-{hotkey_seed}",
+        "submitted_at": submitted_at,
+    }
+
+
+@pytest.mark.asyncio
+async def test_attestation_persists_and_flips_polaris_verified(
+    conn: aiosqlite.Connection, signer: Any, registry: Any
+) -> None:
+    """A non-None attestation must (a) set polaris_verified=true on the row,
+    (b) round-trip through the JSON column, and (c) apply the 1.10x quality
+    multiplier per CONTRACTS §7.3.
+    """
+    from cathedral.eval.scoring_pipeline import score_and_sign
+
+    sub = await _insert_minimal_submission(conn, hotkey_seed="alice")
+
+    attestation = {
+        "version": "polaris-v1",
+        "payload": {
+            "submission_id": "sub_cathedral_runtime_v1",
+            "task_id": "cathedral-eu-ai-act-e1r0",
+            "task_hash": "ab" * 32,
+            "output_hash": "cd" * 32,
+            "deployment_id": "dep_abc",
+            "completed_at": "2026-05-10T10:01:23.456Z",
+        },
+        "signature": "Zm9vYmFy",  # opaque to score_and_sign
+        "public_key": "11" * 32,
+    }
+    card = _valid_card_dict()
+
+    # Polaris-verified path.
+    polaris = await score_and_sign(
+        conn,
+        submission=sub,
+        epoch=1,
+        round_index=0,
+        polaris_agent_id="polaris-runtime:dep_abc",
+        polaris_run_id="cathedral-eu-ai-act-e1r0",
+        task_json={"card_id": "eu-ai-act", "epoch": 1, "round_index": 0},
+        output_card_json=card,
+        duration_ms=1234,
+        polaris_errors=[],
+        registry=registry,
+        signer=signer,
+        polaris_attestation=attestation,
+    )
+    assert polaris.polaris_verified is True
+    assert polaris.polaris_attestation == attestation
+
+    # Read it back from sqlite and confirm the column is hydrated.
+    cur = await conn.execute(
+        "SELECT polaris_verified, polaris_attestation FROM eval_runs WHERE id = ?",
+        (polaris.eval_run_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 1
+    stored = json.loads(row[1])
+    assert stored == attestation
+
+    # BYO-compute baseline — no attestation, no Polaris agent id.
+    sub2 = await _insert_minimal_submission(conn, hotkey_seed="bob")
+    byo = await score_and_sign(
+        conn,
+        submission=sub2,
+        epoch=1,
+        round_index=0,
+        polaris_agent_id="",  # BYO-compute path
+        polaris_run_id="bundle-eu-ai-act-e1r0",
+        task_json={"card_id": "eu-ai-act", "epoch": 1, "round_index": 0},
+        output_card_json=card,
+        duration_ms=12,
+        polaris_errors=[],
+        registry=registry,
+        signer=signer,
+        polaris_attestation=None,
+    )
+    assert byo.polaris_verified is False
+    assert byo.polaris_attestation is None
+
+    # 1.10x runtime multiplier applies on the verified path and is omitted
+    # on BYO. Identical card+registry means score_parts are identical, so
+    # the verified score must be strictly higher (capped at 1.0). Skip the
+    # assertion if either score saturates at the cap.
+    if polaris.weighted_score < 1.0 and byo.weighted_score < 1.0:
+        assert polaris.weighted_score > byo.weighted_score, (
+            f"§7.3: verified runtime must score higher than BYO baseline "
+            f"(verified={polaris.weighted_score}, byo={byo.weighted_score})"
+        )
+
+
+@pytest.mark.asyncio
+async def test_eval_output_projection_carries_attestation(
+    conn: aiosqlite.Connection, signer: Any, registry: Any
+) -> None:
+    """The public EvalOutput projection exposes `polaris_attestation`.
+
+    Validators and the frontend can replay the Ed25519 verification
+    without re-running the eval.
+    """
+    from cathedral.eval.scoring_pipeline import score_and_sign
+    from cathedral.publisher.reads import _eval_run_to_output
+    from cathedral.publisher.repository import list_eval_runs_for_submission
+
+    sub = await _insert_minimal_submission(conn, hotkey_seed="charlie")
+    attestation = {
+        "version": "polaris-v1",
+        "payload": {
+            "submission_id": "sub_x",
+            "task_id": "tid",
+            "task_hash": "ab" * 32,
+            "output_hash": "cd" * 32,
+            "deployment_id": "dep",
+            "completed_at": "2026-05-10T10:00:00.000Z",
+        },
+        "signature": "AAAA",
+        "public_key": "22" * 32,
+    }
+    await score_and_sign(
+        conn,
+        submission=sub,
+        epoch=1,
+        round_index=0,
+        polaris_agent_id="polaris-runtime:dep",
+        polaris_run_id="rid",
+        task_json={"card_id": "eu-ai-act", "epoch": 1, "round_index": 0},
+        output_card_json=_valid_card_dict(),
+        duration_ms=42,
+        polaris_errors=[],
+        registry=registry,
+        signer=signer,
+        polaris_attestation=attestation,
+    )
+
+    runs = await list_eval_runs_for_submission(conn, sub["id"])
+    assert len(runs) == 1
+    projection = _eval_run_to_output(
+        runs[0],
+        {
+            "id": sub["id"],
+            "display_name": sub["display_name"],
+            "card_id": sub["card_id"],
+        },
+    )
+    assert projection["polaris_verified"] is True
+    assert projection["polaris_attestation"] == attestation

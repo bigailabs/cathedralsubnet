@@ -49,9 +49,7 @@ class HippiusConfig:
             "HIPPIUS_S3_SECRET_ACCESS_KEY"
         )
         if not access or not secret:
-            raise HippiusError(
-                "missing HIPPIUS_S3_ACCESS_KEY / HIPPIUS_S3_SECRET_KEY env vars"
-            )
+            raise HippiusError("missing HIPPIUS_S3_ACCESS_KEY / HIPPIUS_S3_SECRET_KEY env vars")
         env = os.environ.get("CATHEDRAL_ENV", "").lower()
         prefix = "staging/" if env == "staging" else ""
         return cls(
@@ -155,6 +153,32 @@ class HippiusClient:
 
         return await asyncio.to_thread(_get)
 
+    def presigned_get_url(self, blob_key: str, *, expires_in: int = 3600) -> str:
+        """Generate a short-lived presigned GET URL for an encrypted bundle.
+
+        Used by `PolarisRuntimeRunner` so Polaris can fetch the miner's
+        bundle directly from R2/Hippius without Cathedral having to stream
+        the bytes through its own HTTP request. The bundle remains
+        encrypted at rest; the runtime image decrypts it using the KEK
+        passed via `env_overrides`.
+
+        Synchronous: presign is a pure local signing operation (no
+        network), so wrapping it in `asyncio.to_thread` would only add
+        overhead. Callers from async contexts may invoke it directly.
+        """
+        key = self._key_from_uri(blob_key)
+        client = self._ensure_client()
+        try:
+            url = client.generate_presigned_url(  # type: ignore[attr-defined]
+                ClientMethod="get_object",
+                Params={"Bucket": self.config.bucket, "Key": key},
+                ExpiresIn=expires_in,
+            )
+        except Exception as e:
+            raise HippiusError(f"presign get_object failed: {e}") from e
+        assert isinstance(url, str)
+        return url
+
     async def delete_bundle(self, blob_key: str) -> None:
         key = self._key_from_uri(blob_key)
 
@@ -171,9 +195,7 @@ class HippiusClient:
     # Logo (public-read, plaintext)
     # ------------------------------------------------------------------
 
-    async def put_logo(
-        self, submission_id: str, raw: bytes, *, content_type: str, ext: str
-    ) -> str:
+    async def put_logo(self, submission_id: str, raw: bytes, *, content_type: str, ext: str) -> str:
         """Upload logo with public-read ACL. Returns the public HTTPS URL."""
         key = self._key("logos/", f"{submission_id}.{ext}")
 

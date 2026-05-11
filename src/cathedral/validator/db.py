@@ -153,7 +153,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     duration_ms         INTEGER NOT NULL,
     errors              TEXT,
     cathedral_signature TEXT NOT NULL,
-    polaris_verified    INTEGER NOT NULL DEFAULT 0
+    polaris_verified    INTEGER NOT NULL DEFAULT 0,
+    polaris_attestation TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_eval_submission_time
     ON eval_runs(submission_id, ran_at DESC);
@@ -208,3 +209,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "ALTER TABLE eval_runs ADD COLUMN polaris_verified INTEGER NOT NULL DEFAULT 0"
         )
+    # eval_runs.polaris_attestation — added for the Tier A Polaris-runtime
+    # flow. Nullable JSON blob; only populated when the runner returned a
+    # verified attestation. Existing rows stay NULL.
+    if "polaris_attestation" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN polaris_attestation TEXT")
