@@ -220,6 +220,7 @@ class EvalOrchestrator:
                         bundle_hash=submission["bundle_hash"],
                         task=task,
                         miner_hotkey=submission["miner_hotkey"],
+                        submission=submission,
                     )
                     break
                 except PolarisRunnerError as e:

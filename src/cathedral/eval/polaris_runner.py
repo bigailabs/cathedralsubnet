@@ -117,6 +117,7 @@ class PolarisRunner(Protocol):
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
+        submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult: ...
 
 
@@ -156,6 +157,8 @@ class StubPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
+
+        submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         self._counter += 1
         agent_id = f"agt_stub_{task.card_id}_{self._counter:04d}"
@@ -216,6 +219,8 @@ class FailingStubPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
+
+        submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_bytes, bundle_hash, task, miner_hotkey
         raise PolarisRunnerError("stub-fail-polaris: simulated transport failure")
@@ -231,6 +236,8 @@ class MalformedStubPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
+
+        submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_bytes, bundle_hash
         return PolarisRunResult(
@@ -330,6 +337,8 @@ class BundleCardRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
+
+        submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_hash, miner_hotkey  # not needed; scoring_pipeline re-pins attribution
 
@@ -420,6 +429,8 @@ class HttpPolarisRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
+
+        submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         import base64
 
@@ -617,11 +628,17 @@ class PolarisRuntimeRunner:
         bundle_hash: str,
         task: EvalTask,
         miner_hotkey: str,
+
+        submission: dict[str, Any] | None = None,
     ) -> PolarisRunResult:
         del bundle_bytes  # Polaris fetches the bundle itself via presigned URL.
         del miner_hotkey  # scoring_pipeline re-pins attribution server-side.
 
-        submission = self._submission_from_task(task, bundle_hash)
+        # Prefer the real submission row when the orchestrator passed it.
+        # The fallback shim is for unit tests that mock the runner without
+        # plumbing through a DB row.
+        if submission is None:
+            submission = self._submission_from_task(task, bundle_hash)
         bundle_url = self.config.bundle_url_resolver.url_for(submission)
 
         # Cathedral correlates the deployment via the EvalTask coordinates;
