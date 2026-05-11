@@ -55,6 +55,8 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                     ctx.health,
                     interval_secs=ctx.settings.weights.interval_secs,
                     disabled=ctx.settings.weights.disabled,
+                    burn_uid=ctx.settings.weights.burn_uid,
+                    forced_burn_percentage=ctx.settings.weights.forced_burn_percentage,
                     stop=stop,
                 )
             ),

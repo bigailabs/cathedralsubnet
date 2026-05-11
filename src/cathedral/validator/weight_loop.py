@@ -7,7 +7,7 @@ import asyncio
 import aiosqlite
 import structlog
 
-from cathedral.chain import Chain, normalize
+from cathedral.chain import Chain, apply_burn, normalize
 from cathedral.chain.client import WeightStatus
 from cathedral.validator import queue
 from cathedral.validator.health import Health
@@ -22,6 +22,8 @@ async def run_weight_loop(
     health: Health,
     interval_secs: int = 1200,
     disabled: bool = False,
+    burn_uid: int = 204,
+    forced_burn_percentage: float = 98.0,
     stop: asyncio.Event | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
@@ -63,7 +65,12 @@ async def run_weight_loop(
                 logger.debug("pulled_scores_unavailable", error=str(ex))
             uid_by_hotkey = metagraph.hotkey_to_uid()
             raw = [(uid_by_hotkey[hk], s) for hk, s in scores.items() if hk in uid_by_hotkey]
-            normalized = normalize(raw)
+            burned = apply_burn(
+                raw,
+                burn_uid=burn_uid,
+                forced_burn_percentage=forced_burn_percentage,
+            )
+            normalized = normalize(burned)
 
             status = await chain.set_weights(normalized)
             await health.update(weight_status=status)

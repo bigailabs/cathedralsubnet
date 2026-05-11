@@ -48,6 +48,8 @@ class HttpConfig(BaseModel):
 class WeightsConfig(BaseModel):
     interval_secs: int = 1200
     disabled: bool = False
+    burn_uid: int = 204
+    forced_burn_percentage: float = 98.0
 
 
 class StorageConfig(BaseModel):
