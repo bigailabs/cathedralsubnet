@@ -15,10 +15,10 @@ while true; do
   latest=$(git tag -l "${TAG_PREFIX}*" --sort=-version:refname | head -1)
 
   if [[ -n "$latest" && "$current" != "$latest" ]]; then
-    echo "$(date -u +%FT%TZ) updater: current=$current latest=$latest — verifying signature"
+    echo "$(date -u +%FT%TZ) updater: current=$current latest=$latest - verifying signature"
 
     if ! git tag -v "$latest" 2>&1 | grep -q "Good signature"; then
-      echo "$(date -u +%FT%TZ) updater: bad signature on $latest — refusing to update"
+      echo "$(date -u +%FT%TZ) updater: bad signature on $latest - refusing to update"
       sleep "$POLL_SECS"
       continue
     fi
