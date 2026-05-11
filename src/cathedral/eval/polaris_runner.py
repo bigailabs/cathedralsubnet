@@ -884,7 +884,18 @@ class HippiusPresignedUrlResolver:
         self._expires_in = expires_in
 
     def url_for(self, submission: dict[str, Any]) -> str:
-        key = submission.get("bundle_blob_key") or submission.get("bundle_hash") or ""
+        # Diagnostic: ensure bundle_blob_key actually carries the s3 uri.
+        # In prod we saw the URL fall through to bundle_hash even though
+        # submit.py writes a real blob_key.
+        bbk = submission.get("bundle_blob_key")
+        bh = submission.get("bundle_hash")
+        logger.info(
+            "presign_resolver",
+            submission_id=submission.get("id"),
+            bundle_blob_key=bbk,
+            bundle_hash_short=bh[:16] if isinstance(bh, str) else None,
+        )
+        key = bbk or bh or ""
         if not key:
             raise PolarisRunnerError(
                 "submission has no bundle_blob_key — cannot presign for Polaris"
