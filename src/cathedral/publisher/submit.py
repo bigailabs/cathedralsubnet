@@ -137,6 +137,11 @@ async def submit_agent(
     ssh_host: str | None = Form(default=None),
     ssh_port: int | None = Form(default=None),
     ssh_user: str | None = Form(default=None),
+    # `hermes_port` is deprecated as of v1.1.0 (issue #75 — Hermes is
+    # CLI-shaped, not HTTP-shaped; the probe SSHes in and runs `hermes`
+    # rather than curling an HTTP endpoint). Accepted from the wire for
+    # back-compat with v1.0.x miner clients but its value is logged and
+    # ignored — every new submission persists hermes_port=NULL.
     hermes_port: int | None = Form(default=None),
     auth: HotkeyAuth = Depends(hotkey_auth_header),
 ) -> dict[str, str]:
@@ -186,17 +191,31 @@ async def submit_agent(
 
     # ----- ssh-probe coordinates (v2 free tier) --------------------------
     # When attestation_mode='ssh-probe', the miner runs Hermes themselves
-    # and Cathedral SSHs in to query it. All four coordinates are required.
-    # For every other mode, ssh_* fields are silently ignored — we don't
+    # and Cathedral SSHs in to invoke `hermes -z "<task>"` as a subprocess.
+    # ssh_host + ssh_user are required; ssh_port defaults to 22. For
+    # every other mode, ssh_* fields are silently ignored — we don't
     # want a typo in a free-tier field to block a Tier A submission.
+    #
+    # `hermes_port` is logged for back-compat observation (v1.0.x clients
+    # may still send it) but is never persisted on new rows. Hermes is
+    # CLI-shaped; there is no HTTP endpoint to point at. See issue #75.
+    if hermes_port is not None:
+        logger.info(
+            "submit_hermes_port_ignored",
+            value=hermes_port,
+            mode=attestation_mode,
+            note="hermes_port deprecated in v1.1.0 (issue #75)",
+        )
+    hermes_port = None
+
     if attestation_mode == "ssh-probe":
-        if not ssh_host or not ssh_user or not hermes_port:
+        if not ssh_host or not ssh_user:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "attestation_mode='ssh-probe' requires ssh_host, "
-                    "ssh_user, and hermes_port (ssh_port defaults to 22). "
-                    "See cathedral.computer/verification for the free-tier "
+                    "attestation_mode='ssh-probe' requires ssh_host and "
+                    "ssh_user (ssh_port defaults to 22). See "
+                    "cathedral.computer/verification for the free-tier "
                     "registration shape."
                 ),
             )
@@ -207,11 +226,6 @@ async def submit_agent(
                 status_code=400,
                 detail=f"ssh_port out of range: {ssh_port}",
             )
-        if not (1 <= hermes_port <= 65535):
-            raise HTTPException(
-                status_code=400,
-                detail=f"hermes_port out of range: {hermes_port}",
-            )
         if len(ssh_host) > 253 or len(ssh_user) > 32:
             raise HTTPException(status_code=400, detail="ssh_host / ssh_user too long")
     else:
@@ -219,7 +233,6 @@ async def submit_agent(
         ssh_host = None
         ssh_port = None
         ssh_user = None
-        hermes_port = None
 
     # ----- form validation ---------------------------------------------
     display_name = display_name.strip()

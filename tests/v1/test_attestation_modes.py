@@ -33,7 +33,6 @@ from tests.v1.conftest import (
     blake3_hex,
     make_valid_bundle,
     sign_submission_payload,
-    submit_multipart,
 )
 from tests.v1.nitro_fixtures import (
     build_chain,
@@ -108,22 +107,30 @@ def db_path(tmp_path: Path) -> Path:
 # --------------------------------------------------------------------------
 
 
-def test_submit_polaris_mode_default_returns_pending_check(
+def test_submit_bundle_mode_explicit_returns_pending_check(
     publisher_client, alice_keypair, tmp_path
 ):
-    """Omitting attestation_mode defaults to ``bundle`` (BYO-compute, v2).
+    """Explicit ``attestation_mode=bundle`` returns 202 + status='queued'.
 
-    Was ``polaris`` in v1; PR #53 changed the default to ``bundle`` after
-    the legacy Polaris runtime-evaluate shim proved unreliable in
-    production. Tests that explicitly want the legacy path now pass
-    ``attestation_mode='polaris'``.
+    History of the default:
+    - v1: defaulted to ``polaris`` (legacy LLM-shim path, since deprecated)
+    - PR #53: flipped default to ``bundle`` (BYO-compute, v2)
+    - PR #73: flipped default to ``ssh-probe`` (Tier B canonical path
+      for v1.1.0, per cathedralai/cathedral#70 — both Polaris-flavored
+      modes gated behind CATHEDRAL_ENABLE_POLARIS_DEPLOY)
+
+    A bare submission with no ``attestation_mode`` now lands as
+    ``ssh-probe`` and 400s without ssh_host/ssh_user. Tests that want
+    the bundled-card BYO path must pass ``attestation_mode='bundle'``
+    explicitly.
     """
-    bundle = make_valid_bundle(soul_md="# default mode\n")
-    resp = submit_multipart(
+    bundle = make_valid_bundle(soul_md="# bundle mode\n")
+    resp = _submit_with_mode(
         publisher_client,
         keypair=alice_keypair,
         card_id="eu-ai-act",
         bundle=bundle,
+        attestation_mode="bundle",
     )
     assert resp.status_code == 202, resp.text
     body = resp.json()
@@ -138,8 +145,16 @@ def test_submit_polaris_mode_default_returns_pending_check(
     assert row["status"] == "queued"
 
 
-def test_submit_explicit_polaris_mode(publisher_client, alice_keypair, tmp_path):
-    """Explicit ``attestation_mode=polaris`` matches the default path."""
+def test_submit_explicit_polaris_mode_rejected_in_v1(publisher_client, alice_keypair):
+    """Explicit ``attestation_mode=polaris`` returns 400 in v1.
+
+    Per PR #73 / cathedralai/cathedral#70, both Polaris-flavored modes
+    (``polaris`` legacy LLM-shim and ``polaris-deploy`` v2 Polaris-native
+    deploy) are gated behind ``CATHEDRAL_ENABLE_POLARIS_DEPLOY``. With
+    the flag unset in production, the submit handler returns 400 with
+    ``rejection_reason='tier_a_disabled_for_v1'`` and points at the
+    Tier B ssh-probe path.
+    """
     bundle = make_valid_bundle(soul_md="# explicit polaris\n")
     resp = _submit_with_mode(
         publisher_client,
@@ -148,10 +163,22 @@ def test_submit_explicit_polaris_mode(publisher_client, alice_keypair, tmp_path)
         bundle=bundle,
         attestation_mode="polaris",
     )
-    assert resp.status_code == 202, resp.text
-    assert resp.json()["status"] == "pending_check"
-    row = _read_submission_row(tmp_path / "publisher.db", resp.json()["id"])
-    assert row["attestation_mode"] == "polaris"
+    assert resp.status_code == 400, resp.text
+    assert "tier_a_disabled_for_v1" in resp.json()["detail"]
+
+
+def test_submit_explicit_polaris_deploy_mode_rejected_in_v1(publisher_client, alice_keypair):
+    """``attestation_mode=polaris-deploy`` is gated the same way."""
+    bundle = make_valid_bundle(soul_md="# explicit polaris-deploy\n")
+    resp = _submit_with_mode(
+        publisher_client,
+        keypair=alice_keypair,
+        card_id="eu-ai-act",
+        bundle=bundle,
+        attestation_mode="polaris-deploy",
+    )
+    assert resp.status_code == 400, resp.text
+    assert "tier_a_disabled_for_v1" in resp.json()["detail"]
 
 
 # --------------------------------------------------------------------------
@@ -463,3 +490,136 @@ def test_bundled_nitro_root_is_aws_g1():
     cert = x509.load_pem_x509_certificate(_NITRO_ROOT_G1_PEM_DEFAULT)
     # Subject == Issuer for a self-signed root.
     assert cert.subject.rfc4514_string() == cert.issuer.rfc4514_string()
+
+
+# --------------------------------------------------------------------------
+# ssh-probe — hermes_port deprecated in v1.1.0 (issue #75)
+# --------------------------------------------------------------------------
+
+
+def _submit_ssh_probe(
+    client: Any,
+    *,
+    keypair: Any,
+    card_id: str,
+    bundle: bytes,
+    ssh_host: str | None = "miner.example.com",
+    ssh_user: str | None = "cathedral-probe",
+    ssh_port: int | None = None,
+    hermes_port: int | None = None,
+) -> Any:
+    """Submit with attestation_mode=ssh-probe and the supplied coords.
+
+    hermes_port is sent for back-compat tests; v1.1.0 logs + ignores it.
+    """
+    submitted_at = _now_iso_ms()
+    bundle_hash = blake3_hex(bundle)
+    sig_b64 = sign_submission_payload(
+        keypair,
+        bundle_hash=bundle_hash,
+        card_id=card_id,
+        submitted_at=submitted_at,
+    )
+    headers = {
+        CONTRACT_SIGNATURE_HEADER: sig_b64,
+        CONTRACT_HOTKEY_HEADER: keypair.ss58_address,
+    }
+    files = {"bundle": ("agent.zip", bundle, "application/zip")}
+    data: dict[str, str] = {
+        "card_id": card_id,
+        "display_name": "SSH Probe Agent",
+        "submitted_at": submitted_at,
+        "attestation_mode": "ssh-probe",
+    }
+    if ssh_host is not None:
+        data["ssh_host"] = ssh_host
+    if ssh_user is not None:
+        data["ssh_user"] = ssh_user
+    if ssh_port is not None:
+        data["ssh_port"] = str(ssh_port)
+    if hermes_port is not None:
+        data["hermes_port"] = str(hermes_port)
+    return client.post("/v1/agents/submit", headers=headers, data=data, files=files)
+
+
+def test_submit_ssh_probe_without_hermes_port_succeeds(publisher_client, alice_keypair, tmp_path):
+    """In v1.1.0, ssh-probe requires only ssh_host + ssh_user.
+
+    The legacy hermes_port field is deprecated (issue #75 — Hermes is
+    CLI-shaped, not HTTP-shaped; Cathedral invokes ``hermes -z`` over
+    SSH rather than curling an HTTP endpoint). A submission with no
+    hermes_port now returns 202; the row persists hermes_port=NULL.
+    """
+    bundle = make_valid_bundle(soul_md="# ssh-probe no port\n")
+    resp = _submit_ssh_probe(
+        publisher_client,
+        keypair=alice_keypair,
+        card_id="eu-ai-act",
+        bundle=bundle,
+        ssh_host="miner.example.com",
+        ssh_user="cathedral-probe",
+    )
+    assert resp.status_code == 202, resp.text
+
+    row = _read_submission_row(tmp_path / "publisher.db", resp.json()["id"])
+    assert row["attestation_mode"] == "ssh-probe"
+    assert row["ssh_host"] == "miner.example.com"
+    assert row["ssh_user"] == "cathedral-probe"
+    assert row["ssh_port"] == 22  # default
+    assert row["hermes_port"] is None
+
+
+def test_submit_ssh_probe_with_legacy_hermes_port_succeeds_but_ignored(
+    publisher_client, alice_keypair, tmp_path
+):
+    """Back-compat: v1.0.x clients sending hermes_port get 202; value
+    is logged and dropped before persistence. The row's hermes_port
+    column is NULL even though the wire carried a value.
+    """
+    bundle = make_valid_bundle(soul_md="# ssh-probe legacy port\n")
+    resp = _submit_ssh_probe(
+        publisher_client,
+        keypair=alice_keypair,
+        card_id="eu-ai-act",
+        bundle=bundle,
+        ssh_host="miner.example.com",
+        ssh_user="cathedral-probe",
+        hermes_port=18789,  # old client sends this; publisher ignores it
+    )
+    assert resp.status_code == 202, resp.text
+
+    row = _read_submission_row(tmp_path / "publisher.db", resp.json()["id"])
+    assert row["attestation_mode"] == "ssh-probe"
+    assert row["hermes_port"] is None, (
+        "hermes_port should be NULL even when client sent a value (issue #75)"
+    )
+
+
+def test_submit_ssh_probe_missing_ssh_host_returns_400(publisher_client, alice_keypair):
+    """ssh-probe still requires ssh_host."""
+    bundle = make_valid_bundle(soul_md="# ssh-probe missing host\n")
+    resp = _submit_ssh_probe(
+        publisher_client,
+        keypair=alice_keypair,
+        card_id="eu-ai-act",
+        bundle=bundle,
+        ssh_host=None,
+        ssh_user="cathedral-probe",
+    )
+    assert resp.status_code == 400, resp.text
+    assert "ssh_host" in resp.json()["detail"]
+
+
+def test_submit_ssh_probe_missing_ssh_user_returns_400(publisher_client, alice_keypair):
+    """ssh-probe still requires ssh_user."""
+    bundle = make_valid_bundle(soul_md="# ssh-probe missing user\n")
+    resp = _submit_ssh_probe(
+        publisher_client,
+        keypair=alice_keypair,
+        card_id="eu-ai-act",
+        bundle=bundle,
+        ssh_host="miner.example.com",
+        ssh_user=None,
+    )
+    assert resp.status_code == 400, resp.text
+    assert "ssh_user" in resp.json()["detail"]
