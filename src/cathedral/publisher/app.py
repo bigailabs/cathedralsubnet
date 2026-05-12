@@ -120,6 +120,11 @@ def build_publisher_app(
                     return _resolve_polaris_runner_for_mode("polaris")
                 if mode == "tee":
                     return _resolve_polaris_runner_for_mode("bundle")
+                if mode == "bundle":
+                    # BYO-compute: miner baked the produced card into the
+                    # bundle at artifacts/last-card.json. Publisher reads
+                    # and scores without re-running the agent.
+                    return _resolve_polaris_runner_for_mode("bundle")
                 return _resolve_polaris_runner_from_env()
 
             eval_task = asyncio.create_task(
