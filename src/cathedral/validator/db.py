@@ -302,15 +302,11 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     # table's CREATE statement and look for the narrow tuple. If found,
     # rebuild the table with the widened constraint.
     cur = await conn.execute(
-        "SELECT sql FROM sqlite_master "
-        "WHERE type='table' AND name='agent_submissions'"
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_submissions'"
     )
     row = await cur.fetchone()
     create_sql = (row[0] if row else "") or ""
-    needs_widen = (
-        "attestation_mode IN" in create_sql
-        and "'polaris-deploy'" not in create_sql
-    )
+    needs_widen = "attestation_mode IN" in create_sql and "'polaris-deploy'" not in create_sql
     if needs_widen:
         await _widen_attestation_mode_check(conn)
 
@@ -328,6 +324,26 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
     if "hermes_port" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
+
+    # Tier A drain (cathedralai/cathedral#70). When the publisher boots
+    # with CATHEDRAL_ENABLE_POLARIS_DEPLOY unset/false, sweep any
+    # in-flight Tier A submissions to 'rejected' so the eval orchestrator
+    # doesn't keep retrying them against a runner that's gated off at
+    # the submit boundary. Existing 'ranked' rows are untouched — their
+    # scores are real receipts. Idempotent: re-running matches zero rows
+    # on a clean DB. Re-entry: flipping the flag back to true does NOT
+    # un-reject these rows; miners resubmit if they want to retry.
+    import os as _os
+
+    _tier_a_enabled = _os.environ.get("CATHEDRAL_ENABLE_POLARIS_DEPLOY", "").lower() == "true"
+    if not _tier_a_enabled:
+        await conn.execute(
+            "UPDATE agent_submissions "
+            "SET status = 'rejected', "
+            "    rejection_reason = 'tier_a_disabled_for_v1' "
+            "WHERE status IN ('queued', 'evaluating') "
+            "  AND attestation_mode IN ('polaris', 'polaris-deploy')"
+        )
 
 
 async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
@@ -406,14 +422,31 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
     cur = await conn.execute("PRAGMA table_info(agent_submissions)")
     old_cols = {row[1] for row in await cur.fetchall()}
     carry_cols = [
-        "id", "miner_hotkey", "card_id", "bundle_blob_key", "bundle_hash",
-        "bundle_size_bytes", "encryption_key_id", "bundle_signature",
-        "display_name", "bio", "logo_url", "soul_md_preview",
-        "metadata_fingerprint", "similarity_check_passed",
-        "rejection_reason", "submitted_at", "status",
-        "current_score", "current_rank", "first_mover_at",
-        "attestation_mode", "attestation_type", "attestation_blob",
-        "attestation_verified_at", "discovery_only",
+        "id",
+        "miner_hotkey",
+        "card_id",
+        "bundle_blob_key",
+        "bundle_hash",
+        "bundle_size_bytes",
+        "encryption_key_id",
+        "bundle_signature",
+        "display_name",
+        "bio",
+        "logo_url",
+        "soul_md_preview",
+        "metadata_fingerprint",
+        "similarity_check_passed",
+        "rejection_reason",
+        "submitted_at",
+        "status",
+        "current_score",
+        "current_rank",
+        "first_mover_at",
+        "attestation_mode",
+        "attestation_type",
+        "attestation_blob",
+        "attestation_verified_at",
+        "discovery_only",
     ]
     # ssh_* may not exist on the old table — only carry them if so.
     for col in ("ssh_host", "ssh_port", "ssh_user", "hermes_port"):
@@ -421,17 +454,14 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
             carry_cols.append(col)
     cols_sql = ", ".join(carry_cols)
     await conn.execute(
-        f"INSERT INTO agent_submissions_new ({cols_sql}) "
-        f"SELECT {cols_sql} FROM agent_submissions"
+        f"INSERT INTO agent_submissions_new ({cols_sql}) SELECT {cols_sql} FROM agent_submissions"
     )
 
     # Step 4: drop the old table (drops associated indexes too).
     await conn.execute("DROP TABLE agent_submissions")
 
     # Step 5: rename.
-    await conn.execute(
-        "ALTER TABLE agent_submissions_new RENAME TO agent_submissions"
-    )
+    await conn.execute("ALTER TABLE agent_submissions_new RENAME TO agent_submissions")
 
     # Step 6: recreate indexes (matches canonical SCHEMA).
     await conn.execute(
@@ -439,8 +469,7 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
         "ON agent_submissions(miner_hotkey, card_id, bundle_hash)"
     )
     await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_card_status "
-        "ON agent_submissions(card_id, status)"
+        "CREATE INDEX IF NOT EXISTS idx_agent_card_status ON agent_submissions(card_id, status)"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_card_score "

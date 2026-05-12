@@ -123,17 +123,12 @@ async def submit_agent(
     # response (or call the prospective /v1/server-time endpoint).
     submitted_at_form: str | None = Form(default=None, alias="submitted_at"),
     logo: UploadFile | None = File(default=None),
-    # Attestation-mode branching. Default is 'bundle' (BYO-compute):
-    # miners run their agent locally, bake the produced card into the
-    # bundle at artifacts/last-card.json, and the publisher scores it
-    # against the rubric without re-running. The historical 'polaris'
-    # default re-ran the bundle on Polaris compute, but Polaris's
-    # runtime-evaluate endpoint is currently unreachable from the
-    # publisher and was returning stub cards (every submission scored
-    # 0.0). 'bundle' is the right default for v1: trust the miner's
-    # signature on the bundle, score the output quality. 'polaris',
-    # 'probe', 'tee', 'unverified' remain available as explicit opt-ins.
-    attestation_mode: str = Form(default="bundle"),
+    # Per cathedralai/cathedral#70 the v1 default is 'ssh-probe' — the
+    # BYO-compute free tier. Tier A modes ('polaris', 'polaris-deploy')
+    # are accepted only when CATHEDRAL_ENABLE_POLARIS_DEPLOY=true; off
+    # by default in production, they 400 with rejection_reason
+    # 'tier_a_disabled_for_v1' and a pointer to the Tier B docs.
+    attestation_mode: str = Form(default="ssh-probe"),
     attestation: str | None = Form(default=None),
     attestation_type: str | None = Form(default=None),
     # v2 free tier (ssh-probe). Only required when attestation_mode='ssh-probe';
@@ -166,6 +161,29 @@ async def submit_agent(
             ),
         )
 
+    # ----- Tier A gate (cathedralai/cathedral#70) ------------------------
+    # Both Polaris-flavored modes route to Cathedral-owned compute and
+    # depend on shared Verda balance + cathedral-runtime availability. v1
+    # collapses to Tier B (ssh-probe / bundle / tee / unverified) until
+    # we ship paid Tier A with proper isolation. The runner code stays;
+    # the door is closed at the submit boundary.
+    import os as _os
+
+    _tier_a = {"polaris", "polaris-deploy"}
+    _tier_a_enabled = _os.environ.get("CATHEDRAL_ENABLE_POLARIS_DEPLOY", "").lower() == "true"
+    if attestation_mode in _tier_a and not _tier_a_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "tier_a_disabled_for_v1: attestation_mode "
+                f"{attestation_mode!r} is not accepted on v1. "
+                "Mine on Tier B instead — see "
+                "https://api.cathedral.computer/skill.md for the "
+                "ssh-probe flow. Tier A returns as a paid tier; "
+                "track cathedralai/cathedral#70 for status."
+            ),
+        )
+
     # ----- ssh-probe coordinates (v2 free tier) --------------------------
     # When attestation_mode='ssh-probe', the miner runs Hermes themselves
     # and Cathedral SSHs in to query it. All four coordinates are required.
@@ -195,9 +213,7 @@ async def submit_agent(
                 detail=f"hermes_port out of range: {hermes_port}",
             )
         if len(ssh_host) > 253 or len(ssh_user) > 32:
-            raise HTTPException(
-                status_code=400, detail="ssh_host / ssh_user too long"
-            )
+            raise HTTPException(status_code=400, detail="ssh_host / ssh_user too long")
     else:
         # Don't persist stale ssh_* on non-ssh-probe submissions.
         ssh_host = None

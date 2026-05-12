@@ -49,6 +49,12 @@ _FIRST_MOVER_WINDOW_DAYS = FIRST_MOVER_WINDOW_DAYS
 _FIRST_MOVER_DELTA_THRESHOLD = FIRST_MOVER_DELTA
 _FIRST_MOVER_PENALTY_MULTIPLIER = FIRST_MOVER_PENALTY_MULTIPLIER
 
+# Verified-runtime multiplier for Tier A (Polaris-hosted, attested) runs.
+# cathedralai/cathedral#70: gated behind CATHEDRAL_ENABLE_POLARIS_DEPLOY;
+# kept in source so re-entry is a single env flip. DO NOT REMOVE — dead
+# code by design until Tier A returns as a paid tier.
+_TIER_A_MULTIPLIER = 1.10
+
 
 @dataclass(frozen=True)
 class ScoredEval:
@@ -229,7 +235,13 @@ async def score_and_sign(
     polaris_verified = (
         polaris_attestation is not None or polaris_manifest is not None or bool(polaris_agent_id)
     )
-    verified_multiplier = 1.10 if polaris_verified else 1.0
+    # cathedralai/cathedral#70: the 1.10x verified-runtime multiplier is
+    # gated behind CATHEDRAL_ENABLE_POLARIS_DEPLOY. v1 ships with the flag
+    # off so every scored run uses the raw weighted score.
+    import os as _os
+
+    _tier_a_enabled = _os.environ.get("CATHEDRAL_ENABLE_POLARIS_DEPLOY", "").lower() == "true"
+    verified_multiplier = _TIER_A_MULTIPLIER if (polaris_verified and _tier_a_enabled) else 1.0
     weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)
 
     # CRIT-8: hash the literal `output_card_json` bytes that the publisher
