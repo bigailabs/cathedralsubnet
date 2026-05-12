@@ -359,6 +359,13 @@ async def submit_agent(
             # UNIQUE index too); "exact bundle duplicate" = cross-hotkey.
             # Both 409.
             if msg in {"duplicate submission", "exact bundle duplicate"}:
+                logger.warning(
+                    "submission_rejected_409_similarity",
+                    hotkey=auth.hotkey_ss58,
+                    card_id=card_id,
+                    bundle_hash=bundle_hash,
+                    reason=msg,
+                )
                 raise HTTPException(status_code=409, detail=msg) from e
             # Other similarity rejections: 202 + status=rejected.
             rejection_reason = msg
@@ -517,6 +524,14 @@ async def submit_agent(
     except aiosqlite.IntegrityError as e:
         # idx_agent_unique violation = same hotkey + same card + same bundle.
         # Best-effort cleanup of the freshly uploaded blob.
+        logger.warning(
+            "submission_rejected_409_integrity",
+            hotkey=auth.hotkey_ss58,
+            card_id=card_id,
+            bundle_hash=bundle_hash,
+            attestation_mode=attestation_mode,
+            error=str(e),
+        )
         try:
             await ctx.hippius.delete_bundle(blob_key)
         except HippiusError:
