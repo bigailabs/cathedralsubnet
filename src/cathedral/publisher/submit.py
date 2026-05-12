@@ -123,12 +123,17 @@ async def submit_agent(
     # response (or call the prospective /v1/server-time endpoint).
     submitted_at_form: str | None = Form(default=None, alias="submitted_at"),
     logo: UploadFile | None = File(default=None),
-    # Attestation-mode branching. Default 'polaris' for back-compat with
-    # miners that pre-date the contract — they were always on the
-    # Cathedral-re-runs-eval path. See `cathedral.attestation` for the
-    # verifier implementations and the docs in `skill_md.py` for the
-    # miner-facing contract.
-    attestation_mode: str = Form(default="polaris"),
+    # Attestation-mode branching. Default is 'bundle' (BYO-compute):
+    # miners run their agent locally, bake the produced card into the
+    # bundle at artifacts/last-card.json, and the publisher scores it
+    # against the rubric without re-running. The historical 'polaris'
+    # default re-ran the bundle on Polaris compute, but Polaris's
+    # runtime-evaluate endpoint is currently unreachable from the
+    # publisher and was returning stub cards (every submission scored
+    # 0.0). 'bundle' is the right default for v1: trust the miner's
+    # signature on the bundle, score the output quality. 'polaris',
+    # 'probe', 'tee', 'unverified' remain available as explicit opt-ins.
+    attestation_mode: str = Form(default="bundle"),
     attestation: str | None = Form(default=None),
     attestation_type: str | None = Form(default=None),
     # v2 free tier (ssh-probe). Only required when attestation_mode='ssh-probe';
