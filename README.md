@@ -235,7 +235,8 @@ Full validator procedure (mechanism, anti-cheating, requirements, known limits, 
 
 - [docs/VALIDATOR.md](docs/VALIDATOR.md): mechanism, anti-cheating, requirements, known limits, eval verification walkthrough
 - [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md): operational runbook for the validator binary
-- [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md): legacy miner CLI walkthrough
+- [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md): miner walkthrough — both tiers
+- [docs/miner/QUICKSTART_LEGACY_V1_CLAIM.md](docs/miner/QUICKSTART_LEGACY_V1_CLAIM.md): legacy `/v1/claim` CLI walkthrough (retained for operators still on that path)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): validator binary internals (loops, modules, sqlite schema)
 - [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_CONTRACT.md): full v1 attestation contract (Tier A + Tier B+ wire formats)
 - [docs/protocol/CLAIM.md](docs/protocol/CLAIM.md): legacy `/v1/claim` wire format
