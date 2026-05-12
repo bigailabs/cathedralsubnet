@@ -8,6 +8,8 @@ The subnet publishes **jobs** - standing work with a source pool, task templates
 
 First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, UK AI Whitepaper, Singapore PDPC, Japan METI/MIC). The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
 
+**Latest release:** [v1.0.7 — Polaris-native v2 runtime, two-tier mining](RELEASES.md#v107--polaris-native-v2-runtime-two-tier-mining) · 2026-05-12
+
 - **Mainnet:** SN39 (`finney`)
 - **Testnet:** SN292 (`test`)
 - **Site:** https://cathedral.computer
