@@ -55,6 +55,7 @@ def make_signed_eval_output(sk: Ed25519PrivateKey, *, idx: int = 0) -> dict[str,
         "output_card": output_card,
         "output_card_hash": output_card_hash,
         "weighted_score": 0.5 + 0.01 * idx,
+        "polaris_verified": False,
         "ran_at": "2026-05-10T12:00:00.000Z",
     }
     blob = canonical_json_for_signing(signed)
