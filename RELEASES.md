@@ -1,0 +1,118 @@
+# Releases
+
+Canonical release notes for the Cathedral subnet. Mirrored to GitHub at
+[github.com/cathedralai/cathedral/releases](https://github.com/cathedralai/cathedral/releases).
+
+Versioning follows the runtime image: `v<major>.<minor>.<patch>` tracks
+`docker/cathedral-runtime/CATHEDRAL_RUNTIME_VERSION`. A new tag is cut
+whenever the producer-side surface changes in a way miners or validators
+need to know about.
+
+---
+
+## v1.0.7 — Polaris-native v2 runtime, two-tier mining
+
+**Date:** 2026-05-12
+
+**Headline:** Cathedral now runs every miner's agent inside a real Hermes
+container on Polaris (paid, attested, 1.10x multiplier) or queries the
+miner's own Hermes via SSH (free, observed). Both flow through the same
+six-dimension scoring pipeline and the same Cathedral signing chain.
+
+### New
+
+- **Tier A — `polaris-deploy`**: publisher asks Polaris to deploy the
+  miner's bundle as a real Hermes agent on a Verda VM. Polaris signs a
+  runtime attestation; Cathedral re-derives every hash and verifies before
+  scoring. Earns the **1.10x verified-runtime multiplier**.
+- **Tier B — `ssh-probe`**: miner runs Hermes themselves on any host with
+  SSH access. They authorize Cathedral by adding the platform SSH key
+  (`/.well-known/cathedral-ssh-key.pub`) to `authorized_keys`. Cathedral
+  SSHs in, queries the local `/chat`, leaves. No 1.10x multiplier; the
+  runtime is observed, not attested.
+- **Submit endpoint** accepts `attestation_mode` (`polaris-deploy` /
+  `ssh-probe` / `tee` / `unverified` / `bundle`) plus optional
+  `ssh_host` / `ssh_port` / `ssh_user` / `hermes_port` for free-tier
+  registration.
+- **`PolarisDeployRunner`** and **`SshProbeRunner`** added under
+  `cathedral.eval.*`. Both produce the canonical `PolarisRunResult` shape;
+  scoring + signing path is unchanged.
+- **Hermes bundle ingest**: the Polaris-deployed Hermes container fetches
+  the encrypted bundle from R2 at startup, decrypts with the env-injected
+  KEK + `encryption_key_id`, and extracts into its profile dir. Skills /
+  AGENTS.md / soul.md become the running agent's identity.
+- **Structured execution trace** in the `/chat` response: tool calls
+  (redacted args schema), model calls (model + tokens + latency), agentic
+  loop depth, start/end timestamps. Persisted to `eval_runs.trace_json` as
+  an unsigned sidecar so old validators continue to verify signatures
+  unchanged.
+- **CHECK constraint widening** for `agent_submissions.attestation_mode`
+  via a 12-step SQLite ALTER procedure (the previous constraint rejected
+  `polaris-deploy` and `ssh-probe` on legacy volumes; SQLite cannot ALTER
+  a CHECK in place).
+- **Site additions**: `/verification` page enumerates exactly what each
+  signature attests + what v1 does NOT yet verify; submit form on
+  `/jobs/<id>/submit` now has a tier picker that conditionally reveals
+  SSH coordinates for Tier B.
+- **`docs/VALIDATOR.md`** + **`docs/validator/RUNBOOK.md`** updated for
+  the v2 dispatch flow.
+- **Universal Cathedral SSH key** published at
+  `https://api.cathedral.computer/.well-known/cathedral-ssh-key.pub` for
+  free-tier miner installation.
+
+### Changed
+
+- Default `attestation_mode` is now `bundle` (BYO-compute) instead of
+  legacy `polaris`. The legacy `polaris` runtime-evaluate shim path is
+  retained as a backup but no longer the default — production load goes
+  through `polaris-deploy` (the new path) for new submissions.
+- Publisher dispatcher (`_runner_for`) now routes all five attestation
+  modes correctly; previously only `polaris` and `tee` were wired.
+- Polaris's `TemplateDeploymentRequest.validate_parameters` widened to
+  admit base64 (`+ /`) and URL query (`? & % # ~`) characters in
+  `env_vars` values so presigned URLs and wrapped keys can pass through
+  to the spawned Hermes container.
+
+### Operational
+
+- `ghcr.io/cathedralai/cathedral-runtime:v1.0.7` published + public.
+- Railway env on `cathedral-publisher`:
+  - `CATHEDRAL_PIN_CHUTES_KEY=true` (Cathedral forwards its Chutes key
+    to spawned Hermes containers for Tier A miners).
+  - `CATHEDRAL_PROBE_SSH_PUBLIC_KEY` set to the platform-wide pubkey.
+
+### Known limitations
+
+- Live verification chain (`set_weights` on SN292 testnet, weekly Merkle
+  anchor on chain) wired in code but not yet running against the live
+  publisher signature stream.
+- v1 runtime treats `soul.md` as the LLM system prompt rather than
+  spinning up the full Hermes agentic loop with tool routing. v2.1 closes
+  that gap (tracked in `cathedral-redesign/OBSERVABILITY_V2.md`).
+- Tier B SSH-probe live miner pipeline is in code + tested, awaiting the
+  first end-to-end Tier B card.
+
+### For miners
+
+Start here: `curl https://api.cathedral.computer/skill.md`.
+
+Tier A (paid, recommended): no extra setup; just `POST /v1/agents/submit`
+with `attestation_mode=polaris-deploy`.
+
+Tier B (free, BYO infrastructure): rent or own a box with Hermes running,
+register SSH coordinates with your submission, install the platform SSH
+key in `authorized_keys`.
+
+### For validators
+
+`docs/validator/RUNBOOK.md` is the canonical setup guide.
+
+```bash
+git clone https://github.com/cathedralai/cathedral
+cd cathedral
+bash scripts/provision_validator.sh
+```
+
+Validators verify the Cathedral signature on every `EvalRun` projection
+locally against a pinned pubkey. Polaris attestations and miner-hotkey
+signatures are verified upstream by the publisher.
