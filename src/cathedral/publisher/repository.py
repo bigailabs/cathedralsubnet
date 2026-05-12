@@ -544,6 +544,8 @@ async def insert_eval_run(
     ran_at_iso: str | None = None,
     polaris_verified: bool = False,
     polaris_attestation: dict[str, Any] | None = None,
+    trace_json: dict[str, Any] | None = None,
+    polaris_manifest: dict[str, Any] | None = None,
 ) -> None:
     """Insert an eval_runs row.
 
@@ -558,9 +560,19 @@ async def insert_eval_run(
     flag persists the verification status for audit + frontend display.
 
     `polaris_attestation` is the Polaris-signed proof of execution
-    (Tier A flow). Stored as JSON so future verifiers can re-check the
-    Ed25519 signature without re-running the eval. None for BYO-compute
-    and legacy stub paths.
+    (legacy Tier A flow — cathedral-runtime image). Stored as JSON so
+    future verifiers can re-check the Ed25519 signature without re-running
+    the eval. None for BYO-compute and legacy stub paths.
+
+    `trace_json` is the Hermes-emitted structured trace from the v2
+    Polaris-native deploy flow (tool_calls + model_calls + ...). Stored
+    as an UNSIGNED sidecar — not part of cathedral_signature bytes —
+    so old validators verify v2 rows unchanged. Promoted to signed in
+    v2.1 once the schema settles.
+
+    `polaris_manifest` is the verified manifest pulled from
+    `/api/cathedral/v1/agents/{id}/manifest` after the v2 deploy. Stored
+    so future audits can re-verify the Ed25519 signature.
     """
     await conn.execute(
         """
@@ -568,8 +580,9 @@ async def insert_eval_run(
             id, submission_id, epoch, round_index, polaris_agent_id,
             polaris_run_id, task_json, output_card_json, output_card_hash,
             score_parts, weighted_score, ran_at, duration_ms, errors,
-            cathedral_signature, polaris_verified, polaris_attestation
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            cathedral_signature, polaris_verified, polaris_attestation,
+            trace_json, polaris_manifest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             id,
@@ -589,6 +602,8 @@ async def insert_eval_run(
             cathedral_signature,
             1 if polaris_verified else 0,
             json.dumps(polaris_attestation) if polaris_attestation is not None else None,
+            json.dumps(trace_json) if trace_json is not None else None,
+            json.dumps(polaris_manifest) if polaris_manifest is not None else None,
         ),
     )
     await conn.commit()

@@ -112,6 +112,16 @@ class PolarisRunResult:
     # orchestrator persists it alongside the Polaris attestation on the
     # eval_runs row.
     probe_attestation: dict[str, Any] | None = None
+    # v2.0: structured Hermes trace captured by `PolarisDeployRunner`.
+    # None for legacy runners (Stub / Bundle / Runtime). Persisted in
+    # `eval_runs.trace_json` as an unsigned sidecar — additive,
+    # backward-compatible, doesn't change the canonical signed bytes.
+    trace: dict[str, Any] | None = None
+    # v2.0: signed Polaris manifest fetched after the deploy. None when
+    # the runner couldn't reach the manifest endpoint (transport error)
+    # or when the agent owner has no registered TAO address. Used by
+    # the orchestrator to flag `polaris_verified=True` on the row.
+    manifest: dict[str, Any] | None = None
 
 
 class PolarisRunner(Protocol):

@@ -125,6 +125,8 @@ async def score_and_sign(
     registry: CardRegistry,
     signer: EvalSigner,
     polaris_attestation: dict[str, Any] | None = None,
+    trace_json: dict[str, Any] | None = None,
+    polaris_manifest: dict[str, Any] | None = None,
 ) -> ScoredEval:
     """Run preflight + scorer, apply first-mover delta, build + sign EvalRun.
 
@@ -185,7 +187,9 @@ async def score_and_sign(
         except PreflightError as e:
             errors.append(f"preflight: {e}")
             logger.warning(
-                "preflight_rejected", submission_id=submission_id, error=str(e),
+                "preflight_rejected",
+                submission_id=submission_id,
+                error=str(e),
             )
     else:
         logger.warning(
@@ -217,7 +221,14 @@ async def score_and_sign(
     # `polaris_agent_id` is non-empty when Polaris ran the work. Keep
     # that path eligible for the multiplier so existing stub tests
     # continue to assert the historical behaviour.
-    polaris_verified = polaris_attestation is not None or bool(polaris_agent_id)
+    # v2 Polaris-native deploys carry a verified manifest, NOT a per-task
+    # attestation — the manifest is the unit of trust because Polaris
+    # signs the deployment itself, not each /chat round trip. Treat a
+    # non-None manifest as equivalent to a non-None attestation for the
+    # purposes of the verified-runtime multiplier.
+    polaris_verified = (
+        polaris_attestation is not None or polaris_manifest is not None or bool(polaris_agent_id)
+    )
     verified_multiplier = 1.10 if polaris_verified else 1.0
     weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)
 
@@ -273,6 +284,8 @@ async def score_and_sign(
         cathedral_signature=signature,
         polaris_verified=polaris_verified,
         polaris_attestation=polaris_attestation,
+        trace_json=trace_json,
+        polaris_manifest=polaris_manifest,
     )
 
     # Update rolling 30-day average + rank

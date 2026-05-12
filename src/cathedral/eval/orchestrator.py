@@ -23,10 +23,10 @@ import asyncio
 import shutil
 import tempfile
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 
 import aiosqlite
@@ -288,6 +288,10 @@ class EvalOrchestrator:
                 registry=self.registry,
                 signer=self.signer,
                 polaris_attestation=attestation_dict,
+                # v2 additions — None for every runner except
+                # PolarisDeployRunner, which always populates them.
+                trace_json=polaris_result.trace,
+                polaris_manifest=polaris_result.manifest,
             )
             log.info("eval_run_complete", epoch=epoch, round_index=round_index)
         finally:
@@ -414,6 +418,7 @@ def _resolve_polaris_runner_for_mode(mode: str) -> PolarisRunner:
     the per-submission dispatch already knows which tier this row is.
     """
     import os as _os
+
     _saved = _os.environ.get("CATHEDRAL_EVAL_MODE")
     _os.environ["CATHEDRAL_EVAL_MODE"] = mode
     try:
@@ -429,18 +434,27 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
     """Re-build a Polaris runner from the current env so monkeypatched
     `CATHEDRAL_EVAL_MODE` mid-test takes effect on the next tick.
 
-    Mode dispatch (CONTRACTS.md §6 + Tier A Polaris-runtime addendum):
+    Mode dispatch (CONTRACTS.md §6 + Tier A Polaris-runtime addendum +
+    v2 Polaris-native deploy):
 
-      stub*               -> StubPolarisRunner family (smoke tests)
-      stub-fail-polaris   -> FailingStubPolarisRunner
-      stub-bad-card       -> MalformedStubPolarisRunner
-      bundle              -> BundleCardRunner (BYO-compute path)
-      polaris             -> PolarisRuntimeRunner (Tier A — Polaris-hosted)
+      stub*                -> StubPolarisRunner family (smoke tests)
+      stub-fail-polaris    -> FailingStubPolarisRunner
+      stub-bad-card        -> MalformedStubPolarisRunner
+      bundle               -> BundleCardRunner (BYO-compute path)
+      polaris              -> PolarisRuntimeRunner (legacy Tier A —
+                              cathedral-runtime shim; kept as backup
+                              during v2 migration per POLARIS_NATIVE_V2.md)
+      polaris-deploy       -> PolarisDeployRunner (v2 — real Hermes via
+                              Polaris's native deploy pipeline)
       http-polaris (legacy)-> HttpPolarisRunner
-      anything else       -> HttpPolarisRunner (legacy default)
+      anything else        -> HttpPolarisRunner (legacy default)
     """
     import os
 
+    from cathedral.eval.polaris_deploy_runner import (
+        PolarisDeployRunner,
+        PolarisDeployRunnerConfig,
+    )
     from cathedral.eval.polaris_runner import (
         BundleCardRunner,
         FailingStubPolarisRunner,
@@ -463,6 +477,52 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         return StubPolarisRunner()
     if mode == "bundle":
         return BundleCardRunner()
+    if mode == "polaris-deploy":
+        # v2 — Polaris-native Hermes deploy. Skips the cathedral-runtime
+        # image entirely; uses the standard marketplace-eval pipeline
+        # against `ghcr.io/bigailabs/polaris-hermes`. Requires the
+        # publisher app for the Hippius client (presigned URLs).
+        from cathedral.publisher.app import latest_ctx
+
+        ctx = latest_ctx()
+        if ctx is None:
+            raise PolarisRunnerError(
+                "CATHEDRAL_EVAL_MODE=polaris-deploy requires the publisher "
+                "app to be running so the HippiusClient is available for "
+                "presigned bundle URLs"
+            )
+        attestation_key = os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY", "").strip()
+        if not attestation_key:
+            raise PolarisRunnerError(
+                "CATHEDRAL_EVAL_MODE=polaris-deploy requires POLARIS_ATTESTATION_PUBLIC_KEY"
+            )
+        kek_hex = (
+            os.environ.get("CATHEDRAL_BUNDLE_KEK")
+            or os.environ.get("CATHEDRAL_KEK_HEX")
+            or os.environ.get("CATHEDRAL_MASTER_ENCRYPTION_KEY")
+            or ""
+        )
+        if not kek_hex:
+            raise PolarisRunnerError(
+                "CATHEDRAL_EVAL_MODE=polaris-deploy requires CATHEDRAL_BUNDLE_KEK"
+            )
+        chutes_pin = (os.environ.get("CATHEDRAL_PIN_CHUTES_KEY") or "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        return PolarisDeployRunner(
+            PolarisDeployRunnerConfig(
+                base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
+                api_token=os.environ.get("POLARIS_API_TOKEN", ""),
+                bundle_url_resolver=HippiusPresignedUrlResolver(ctx.hippius),
+                attestation_public_key_hex=attestation_key,
+                bundle_encryption_key_hex=kek_hex,
+                ttl_minutes=int(os.environ.get("POLARIS_DEPLOY_TTL_MINUTES", "30")),
+                pin_chutes_key=chutes_pin,
+                chutes_api_key=os.environ.get("CHUTES_API_KEY", "") if chutes_pin else "",
+            )
+        )
     if mode in {"polaris", "polaris-runtime"}:
         # Tier A — Polaris-hosted miners. Polaris fetches the bundle via
         # presigned URL, runs Cathedral's runtime image, signs an
@@ -537,32 +597,57 @@ async def _run_once_async() -> int:
         if env_mode.startswith("stub"):
             r = _resolve_polaris_runner_from_env()
             logger.info(
-                "runner_dispatch", submission_id=submission.get("id"),
-                attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
+                "runner_dispatch",
+                submission_id=submission.get("id"),
+                attestation_mode=mode,
+                env_mode=env_mode,
+                chosen=type(r).__name__,
                 reason="stub-env-wins",
+            )
+            return r
+        if mode == "polaris-deploy" and has_polaris_key:
+            # v2 — opted into the Polaris-native Hermes flow.
+            r = _resolve_polaris_runner_for_mode("polaris-deploy")
+            logger.info(
+                "runner_dispatch",
+                submission_id=submission.get("id"),
+                attestation_mode=mode,
+                env_mode=env_mode,
+                chosen=type(r).__name__,
+                reason="polaris-deploy-tier-v2",
             )
             return r
         if mode == "polaris" and has_polaris_key:
             r = _resolve_polaris_runner_for_mode("polaris")
             logger.info(
-                "runner_dispatch", submission_id=submission.get("id"),
-                attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
+                "runner_dispatch",
+                submission_id=submission.get("id"),
+                attestation_mode=mode,
+                env_mode=env_mode,
+                chosen=type(r).__name__,
                 reason="polaris-tier",
             )
             return r
         if mode == "tee":
             r = _resolve_polaris_runner_for_mode("bundle")
             logger.info(
-                "runner_dispatch", submission_id=submission.get("id"),
-                attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
+                "runner_dispatch",
+                submission_id=submission.get("id"),
+                attestation_mode=mode,
+                env_mode=env_mode,
+                chosen=type(r).__name__,
                 reason="tee-pre-verified",
             )
             return r
         r = _resolve_polaris_runner_from_env()
         logger.info(
-            "runner_dispatch", submission_id=submission.get("id"),
-            attestation_mode=mode, env_mode=env_mode, chosen=type(r).__name__,
-            reason="env-fallback", polaris_key_present=has_polaris_key,
+            "runner_dispatch",
+            submission_id=submission.get("id"),
+            attestation_mode=mode,
+            env_mode=env_mode,
+            chosen=type(r).__name__,
+            reason="env-fallback",
+            polaris_key_present=has_polaris_key,
         )
         return r
 

@@ -98,15 +98,23 @@ CREATE TABLE IF NOT EXISTS card_definitions (
 -- Miner-uploaded agent submissions. Bundles live encrypted in Hippius.
 --
 -- `attestation_mode` branches at intake (see cathedral.publisher.submit):
---   * 'polaris'    — Cathedral re-runs eval on a Polaris-managed runtime.
---                    No miner-side attestation needed at submission time.
---   * 'tee'        — Miner attached a TEE attestation document (Nitro/
---                    TDX/SEV-SNP). `attestation_blob` carries the raw
---                    bytes; `attestation_type` carries the verifier
---                    label; `attestation_verified_at` records when
---                    Cathedral verified it.
---   * 'unverified' — Discovery-only. No eval is run, no score persisted.
---                    `status` is 'discovery'; `discovery_only` is true.
+--   * 'polaris'        — Cathedral re-runs eval on a Polaris-managed
+--                        runtime (legacy cathedral-runtime image). No
+--                        miner-side attestation needed at submission time.
+--                        Kept as a backup during v2 migration.
+--   * 'polaris-deploy' — v2. Polaris deploys the canonical Hermes
+--                        runtime against the miner's bundle and Cathedral
+--                        drives /chat. Manifest is fetched + verified;
+--                        no per-task attestation needed because the
+--                        deployment is the unit of trust.
+--   * 'tee'            — Miner attached a TEE attestation document
+--                        (Nitro/TDX/SEV-SNP). `attestation_blob` carries
+--                        the raw bytes; `attestation_type` carries the
+--                        verifier label; `attestation_verified_at`
+--                        records when Cathedral verified it.
+--   * 'unverified'     — Discovery-only. No eval is run, no score
+--                        persisted. `status` is 'discovery';
+--                        `discovery_only` is true.
 CREATE TABLE IF NOT EXISTS agent_submissions (
     id                       TEXT PRIMARY KEY,
     miner_hotkey             TEXT NOT NULL,
@@ -133,7 +141,7 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     first_mover_at           TEXT,
     attestation_mode         TEXT NOT NULL DEFAULT 'polaris'
                              CHECK (attestation_mode IN
-                               ('polaris','tee','unverified')),
+                               ('polaris','polaris-deploy','tee','unverified')),
     attestation_type         TEXT,
     attestation_blob         BLOB,
     attestation_verified_at  TEXT,
@@ -233,6 +241,22 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     # verified attestation. Existing rows stay NULL.
     if "polaris_attestation" not in cols:
         await conn.execute("ALTER TABLE eval_runs ADD COLUMN polaris_attestation TEXT")
+
+    # eval_runs.trace_json — added for the v2 Polaris-native Hermes flow.
+    # Nullable JSON blob holding the Hermes-emitted trace (tool_calls,
+    # model_calls, source_fetches, agentic_loop_depth, start_at, end_at).
+    # Stored as an UNSIGNED sidecar: it does NOT participate in the
+    # canonical signed bytes (cathedral_signature is computed before the
+    # trace is attached), so old validators verify v2 rows unchanged.
+    # Promoted to signed in v2.1 once the schema is stable.
+    if "trace_json" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN trace_json TEXT")
+
+    # eval_runs.polaris_manifest — v2 deploy runner pulls the signed
+    # manifest after the chat round trips so it can be persisted
+    # alongside the trace. Nullable; only populated for v2 runs.
+    if "polaris_manifest" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN polaris_manifest TEXT")
 
     # agent_submissions: attestation_mode branching (polaris/tee/unverified).
     # Existing rows default to 'polaris' so back-compat with pre-attestation
