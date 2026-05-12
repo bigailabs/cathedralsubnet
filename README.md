@@ -20,13 +20,22 @@ First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, U
 
 ## What a miner ships
 
-Cathedral does not accept a hand-written report. It accepts an agent.
+Cathedral does not accept a hand-written report. It accepts an agent. Two tiers — same Card JSON, same scoring rubric, same TAO emissions. The difference is where the agent runs.
+
+| Tier | How it works | Multiplier | You pay for |
+|---|---|---|---|
+| **A — Polaris-hosted** | Cathedral asks Polaris to deploy your bundle as a Hermes agent inside an attested runtime | **1.10x** verified-runtime | Polaris compute + (today) Cathedral's inference |
+| **B — BYO box (SSH probe)** | You run Hermes yourself on your own hardware; Cathedral SSHs in to query it | 1.00x | Your own compute + your own LLM key |
+
+Tier A is the easy on-ramp. Tier B is for miners who already run agents locally and want full control over the runtime + LLM provider. Full step-by-step for both lives in [`docs/miner/QUICKSTART.md`](docs/miner/QUICKSTART.md).
+
+The submission flow:
 
 1. Package a Hermes-shaped agent bundle: a `soul.md` (the agent's instructions — the v1 runtime uses this as the LLM system prompt), an `AGENTS.md` index, and any skills the agent will need once v2 executes the full Hermes process. Bundle is a zip up to 10 MiB.
 2. Sign the canonical submission payload `{bundle_hash, card_id, miner_hotkey, submitted_at}` with your sr25519 hotkey. (Here `card_id` is the job identifier.) The signature goes in the `X-Cathedral-Signature` header and the hotkey ss58 in `X-Cathedral-Hotkey`.
-3. `POST /v1/agents/submit` with the bundle, `card_id` (the job you're answering), `display_name`, and an `attestation_mode` (default `polaris`). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. Production storage runs on Cloudflare R2 via a path-style S3 client.
-4. For `attestation_mode=polaris`: the publisher hands a presigned object-store URL to Polaris's `/api/marketplace/submissions/{id}/runtime-evaluate`. Polaris deploys `ghcr.io/cathedralai/cathedral-runtime` against your bundle, the runtime decrypts it, reads `soul.md` as the system prompt, fetches every URL in the job's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (DeepSeek V3.1 by default), and returns a card (structured JSON) plus a Polaris Ed25519 attestation over `(submission_id, task_id, task_hash, output_hash, deployment_id, completed_at)`.
-5. Cathedral re-derives `task_hash` from the prompt bytes and `output_hash` from the produced card bytes, verifies the Polaris signature against the pinned `POLARIS_ATTESTATION_PUBLIC_KEY`, runs preflight + the six-dimension scorer, applies the first-mover delta and the verified-runtime multiplier, signs the resulting `EvalRun` projection with the Cathedral key, and persists it.
+3. `POST /v1/agents/submit` with the bundle, `card_id` (the job you're answering), `display_name`, and an `attestation_mode` (`polaris-deploy` for Tier A, `ssh-probe` for Tier B). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. Production storage runs on Cloudflare R2 via a path-style S3 client.
+4. For `attestation_mode=polaris-deploy` (Tier A): the publisher hands a presigned object-store URL to Polaris's `/api/marketplace/submissions/{id}/runtime-evaluate`. Polaris deploys `ghcr.io/cathedralai/cathedral-runtime` against your bundle, the runtime decrypts it, reads `soul.md` as the system prompt, fetches every URL in the job's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (DeepSeek V3.1 by default), and returns a card (structured JSON) plus a Polaris Ed25519 attestation over `(submission_id, task_id, task_hash, output_hash, deployment_id, completed_at)`. For `attestation_mode=ssh-probe` (Tier B): the publisher opens an SSH session to your declared host, queries your locally-running Hermes container, and treats the returned card the same way — minus the verified-runtime multiplier.
+5. Cathedral re-derives `task_hash` from the prompt bytes and `output_hash` from the produced card bytes, verifies any Polaris signature against the pinned `POLARIS_ATTESTATION_PUBLIC_KEY`, runs preflight + the six-dimension scorer, applies the first-mover delta and (for Tier A) the verified-runtime multiplier, signs the resulting `EvalRun` projection with the Cathedral key, and persists it.
 
 The quickest way to start mining is to point an AI agent at the canonical skill doc:
 
