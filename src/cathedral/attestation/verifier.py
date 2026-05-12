@@ -18,7 +18,9 @@ from cathedral.attestation.nitro import verify_nitro_attestation
 
 # Mode and type vocabularies are pinned here so the submit handler, the
 # DB schema, and the docs all reference the same source of truth.
-ATTESTATION_MODES: Final[frozenset[str]] = frozenset({"polaris", "tee", "unverified"})
+ATTESTATION_MODES: Final[frozenset[str]] = frozenset(
+    {"polaris", "polaris-deploy", "ssh-probe", "tee", "unverified"}
+)
 ATTESTATION_TYPES: Final[frozenset[str]] = frozenset({"nitro-v1", "tdx-v1", "sev-snp-v1"})
 
 
