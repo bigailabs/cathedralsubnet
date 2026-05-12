@@ -66,13 +66,13 @@ jobs:
           args: --file=docker/cathedral-runtime/Dockerfile --sarif-file-output=snyk-docker.sarif
       - name: Upload SARIF (python)
         if: needs.budget-check.outputs.sca_under_budget == 'true' && hashFiles('snyk-python.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-python.sarif
           category: snyk-python
       - name: Upload SARIF (docker)
         if: needs.budget-check.outputs.container_under_budget == 'true' && hashFiles('snyk-docker.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-docker.sarif
           category: snyk-docker
