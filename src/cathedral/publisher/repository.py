@@ -166,6 +166,10 @@ async def insert_agent_submission(
     attestation_blob: bytes | None = None,
     attestation_verified_at: datetime | None = None,
     discovery_only: bool = False,
+    ssh_host: str | None = None,
+    ssh_port: int | None = None,
+    ssh_user: str | None = None,
+    hermes_port: int | None = None,
 ) -> None:
     """Insert an `agent_submissions` row.
 
@@ -178,6 +182,10 @@ async def insert_agent_submission(
     ``attestation_mode='tee'`` (+ blob / type / verified_at) when a
     miner submitted a TEE attestation, and ``attestation_mode='unverified'``
     + ``discovery_only=True`` for discovery submissions.
+
+    The ssh_* fields are only populated when ``attestation_mode='ssh-probe'``
+    (v2 free tier). They tell the SshProbeRunner how to reach the miner's
+    long-lived Hermes process. Nullable for every other mode.
     """
     await conn.execute(
         """
@@ -188,10 +196,11 @@ async def insert_agent_submission(
             metadata_fingerprint, similarity_check_passed,
             rejection_reason, submitted_at, status, first_mover_at,
             attestation_mode, attestation_type, attestation_blob,
-            attestation_verified_at, discovery_only
+            attestation_verified_at, discovery_only,
+            ssh_host, ssh_port, ssh_user, hermes_port
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?)
+                ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             id,
@@ -217,6 +226,10 @@ async def insert_agent_submission(
             attestation_blob,
             _to_z(attestation_verified_at) if attestation_verified_at else None,
             1 if discovery_only else 0,
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            hermes_port,
         ),
     )
     await conn.commit()

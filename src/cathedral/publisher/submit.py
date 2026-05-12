@@ -131,6 +131,13 @@ async def submit_agent(
     attestation_mode: str = Form(default="polaris"),
     attestation: str | None = Form(default=None),
     attestation_type: str | None = Form(default=None),
+    # v2 free tier (ssh-probe). Only required when attestation_mode='ssh-probe';
+    # ignored for every other mode. The miner must have Cathedral's public SSH
+    # key installed in ~ssh_user/.ssh/authorized_keys on ssh_host.
+    ssh_host: str | None = Form(default=None),
+    ssh_port: int | None = Form(default=None),
+    ssh_user: str | None = Form(default=None),
+    hermes_port: int | None = Form(default=None),
     auth: HotkeyAuth = Depends(hotkey_auth_header),
 ) -> dict[str, str]:
     ctx: PublisherContext = request.app.state.ctx
@@ -153,6 +160,45 @@ async def submit_agent(
                 f"must be one of {sorted(ATTESTATION_MODES)}"
             ),
         )
+
+    # ----- ssh-probe coordinates (v2 free tier) --------------------------
+    # When attestation_mode='ssh-probe', the miner runs Hermes themselves
+    # and Cathedral SSHs in to query it. All four coordinates are required.
+    # For every other mode, ssh_* fields are silently ignored — we don't
+    # want a typo in a free-tier field to block a Tier A submission.
+    if attestation_mode == "ssh-probe":
+        if not ssh_host or not ssh_user or not hermes_port:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "attestation_mode='ssh-probe' requires ssh_host, "
+                    "ssh_user, and hermes_port (ssh_port defaults to 22). "
+                    "See cathedral.computer/verification for the free-tier "
+                    "registration shape."
+                ),
+            )
+        if ssh_port is None:
+            ssh_port = 22
+        if not (1 <= ssh_port <= 65535):
+            raise HTTPException(
+                status_code=400,
+                detail=f"ssh_port out of range: {ssh_port}",
+            )
+        if not (1 <= hermes_port <= 65535):
+            raise HTTPException(
+                status_code=400,
+                detail=f"hermes_port out of range: {hermes_port}",
+            )
+        if len(ssh_host) > 253 or len(ssh_user) > 32:
+            raise HTTPException(
+                status_code=400, detail="ssh_host / ssh_user too long"
+            )
+    else:
+        # Don't persist stale ssh_* on non-ssh-probe submissions.
+        ssh_host = None
+        ssh_port = None
+        ssh_user = None
+        hermes_port = None
 
     # ----- form validation ---------------------------------------------
     display_name = display_name.strip()
@@ -458,6 +504,10 @@ async def submit_agent(
                 attestation_result.verified_at if attestation_result is not None else None
             ),
             discovery_only=discovery_only,
+            ssh_host=ssh_host,
+            ssh_port=ssh_port,
+            ssh_user=ssh_user,
+            hermes_port=hermes_port,
         )
     except aiosqlite.IntegrityError as e:
         # idx_agent_unique violation = same hotkey + same card + same bundle.

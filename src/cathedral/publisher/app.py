@@ -123,7 +123,7 @@ def build_publisher_app(
             yield
         finally:
             stop.set()
-            _LATEST_CTX_RESET = None  # noqa: F841 - declared so we can clear below
+            _LATEST_CTX_RESET = None
             globals()["_LATEST_CTX"] = None
             for t in ctx.background_tasks:
                 t.cancel()
@@ -186,6 +186,7 @@ def build_publisher_app(
     # instructions to mine the eu-ai-act card` into their AI agent;
     # the agent fetches this URL and self-registers.
     from fastapi.responses import PlainTextResponse
+
     from cathedral.publisher.skill_md import SKILL_MD_CONTENT
 
     @app.get("/skill.md", response_class=PlainTextResponse, include_in_schema=False)
@@ -194,6 +195,37 @@ def build_publisher_app(
             SKILL_MD_CONTENT,
             media_type="text/markdown; charset=utf-8",
         )
+
+    # Cathedral's public SSH key for v2 free-tier (ssh-probe) miners.
+    # Miners install this line in their box's ~/.ssh/authorized_keys for
+    # the user they nominate in their submission's `ssh_user` field.
+    # Source: env var CATHEDRAL_PROBE_SSH_PUBLIC_KEY. We do NOT load this
+    # from disk because the publisher's Railway container doesn't get
+    # the platform-wide key material baked in.
+    @app.get(
+        "/.well-known/cathedral-ssh-key.pub",
+        response_class=PlainTextResponse,
+        include_in_schema=False,
+    )
+    async def _ssh_pubkey() -> PlainTextResponse:
+        import os as _os
+
+        pub = _os.environ.get("CATHEDRAL_PROBE_SSH_PUBLIC_KEY", "").strip()
+        if not pub:
+            # Surface a clear error rather than serve an empty file —
+            # miners would silently fail to authorize otherwise.
+            return PlainTextResponse(
+                "# Cathedral probe SSH key not yet configured on the publisher.\n"
+                "# CATHEDRAL_PROBE_SSH_PUBLIC_KEY env var is empty.\n"
+                "# Email ops@cathedral.computer for the canonical key while we wire this up.\n",
+                status_code=503,
+                media_type="text/plain; charset=utf-8",
+            )
+        # Always return a single-line public key + a trailing newline so
+        # miners can `curl ... >> ~/.ssh/authorized_keys` directly.
+        if not pub.endswith("\n"):
+            pub = pub + "\n"
+        return PlainTextResponse(pub, media_type="text/plain; charset=utf-8")
 
     return app
 
