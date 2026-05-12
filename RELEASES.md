@@ -116,3 +116,9 @@ bash scripts/provision_validator.sh
 Validators verify the Cathedral signature on every `EvalRun` projection
 locally against a pinned pubkey. Polaris attestations and miner-hotkey
 signatures are verified upstream by the publisher.
+
+### Signed commits
+
+Every commit landing on `main` from 2026-05-12 onward is SSH-signed and
+shows as "Verified" on GitHub, so validators auditing the source tree can
+trust each revision back to a known maintainer key.
