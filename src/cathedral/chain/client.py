@@ -154,11 +154,14 @@ class BittensorChain:
             uids = [u for u, _ in weights]
             values = [v for _, v in weights]
             try:
+                from cathedral import SPEC_VERSION
+
                 resp = self._subtensor.set_weights(
                     wallet=self._wallet,
                     netuid=self.netuid,
                     uids=uids,
                     weights=values,
+                    version_key=SPEC_VERSION,
                     wait_for_inclusion=True,
                     wait_for_finalization=False,
                     raise_error=False,
