@@ -248,6 +248,96 @@ def build_publisher_app(
             pub = pub + "\n"
         return PlainTextResponse(pub, media_type="text/plain; charset=utf-8")
 
+    # Cathedral's signing pubkey + the pinned Polaris attestation pubkey,
+    # published so validators can fetch them without DMing ops. Mirrors
+    # the convention referenced in cathedral.validator.pull_loop.
+    #
+    # Cathedral signs every EvalRun projection with this key. Validators
+    # pin it once and verify the signature on `/v1/leaderboard/recent`
+    # rows locally. The Polaris key is published alongside as context
+    # (the publisher uses it internally to verify Polaris attestations
+    # before scoring); validators do not need to verify Polaris
+    # signatures themselves.
+    @app.get(
+        "/.well-known/cathedral-jwks.json",
+        include_in_schema=False,
+    )
+    async def _jwks() -> dict[str, Any]:
+        import base64 as _b64
+        import os as _os
+
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            PublicFormat,
+        )
+
+        out: dict[str, Any] = {
+            "issuer": "cathedral.computer",
+            "keys": [],
+        }
+
+        # Cathedral signing pubkey — derived from the private seed in
+        # CATHEDRAL_EVAL_SIGNING_KEY. We never serve the private key.
+        sk_hex = _os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY", "").strip()
+        if sk_hex:
+            try:
+                seed = bytes.fromhex(sk_hex)
+                priv = Ed25519PrivateKey.from_private_bytes(seed)
+                pub = priv.public_key().public_bytes(
+                    Encoding.Raw, PublicFormat.Raw
+                )
+                out["keys"].append(
+                    {
+                        "kid": "cathedral-eval-signing",
+                        "use": "sig",
+                        "alg": "EdDSA",
+                        "kty": "OKP",
+                        "crv": "Ed25519",
+                        "x": _b64.urlsafe_b64encode(pub).rstrip(b"=").decode(),
+                        "public_key_hex": pub.hex(),
+                        "purpose": (
+                            "Cathedral signs every EvalRun projection "
+                            "served from /v1/leaderboard/recent. Pin this "
+                            "key in your validator config."
+                        ),
+                    }
+                )
+            except Exception:
+                pass
+
+        # Polaris attestation pubkey — the key the publisher pins when
+        # verifying Polaris's runtime attestations during scoring.
+        polaris_hex = _os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY", "").strip()
+        if polaris_hex:
+            try:
+                polaris_bytes = bytes.fromhex(polaris_hex)
+                out["keys"].append(
+                    {
+                        "kid": "polaris-runtime-attestation",
+                        "use": "sig",
+                        "alg": "EdDSA",
+                        "kty": "OKP",
+                        "crv": "Ed25519",
+                        "x": _b64.urlsafe_b64encode(polaris_bytes)
+                        .rstrip(b"=")
+                        .decode(),
+                        "public_key_hex": polaris_hex,
+                        "purpose": (
+                            "Polaris signs runtime attestations over each "
+                            "Cathedral eval. The publisher verifies before "
+                            "scoring; validators do not need to verify "
+                            "this signature themselves."
+                        ),
+                    }
+                )
+            except Exception:
+                pass
+
+        return out
+
     return app
 
 
