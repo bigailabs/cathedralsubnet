@@ -46,7 +46,7 @@ jobs:
     needs: budget-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run Snyk SCA (Python)
         if: needs.budget-check.outputs.sca_under_budget == 'true'
         uses: snyk/actions/python@master
