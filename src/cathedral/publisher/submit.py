@@ -137,11 +137,15 @@ async def submit_agent(
     ssh_host: str | None = Form(default=None),
     ssh_port: int | None = Form(default=None),
     ssh_user: str | None = Form(default=None),
-    # `hermes_port` is deprecated as of v1.1.0 (issue #75 — Hermes is
-    # CLI-shaped, not HTTP-shaped; the probe SSHes in and runs `hermes`
-    # rather than curling an HTTP endpoint). Accepted from the wire for
-    # back-compat with v1.0.x miner clients but its value is logged and
-    # ignored — every new submission persists hermes_port=NULL.
+    # `hermes_port` is deprecated as of v1.1.0 (cathedralai/cathedral#75,
+    # PR #77 — Hermes is CLI-shaped, not HTTP-shaped; the probe SSHes
+    # in and runs `hermes` rather than curling an HTTP endpoint).
+    # Accepted from the wire for back-compat with v1.0.x miner clients
+    # but its value is logged and ignored — every new submission
+    # persists hermes_port=NULL.
+    #
+    # Removable in v1.2.0 once all v1.0.x miner clients have upgraded.
+    # Search marker: `removable-in-v1-2-0`.
     hermes_port: int | None = Form(default=None),
     auth: HotkeyAuth = Depends(hotkey_auth_header),
 ) -> dict[str, str]:

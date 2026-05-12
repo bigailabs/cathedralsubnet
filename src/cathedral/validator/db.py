@@ -157,6 +157,10 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     ssh_host                 TEXT,
     ssh_port                 INTEGER,
     ssh_user                 TEXT,
+    -- DEPRECATED v1.1.0 (cathedralai/cathedral#75, PR #77). New rows
+    -- write NULL; v1.0.x rows keep their port value. Removable in
+    -- v1.2.0 once all historical rows have aged out of the 30-day
+    -- rolling window. Search marker: `removable-in-v1-2-0`.
     hermes_port              INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique
@@ -328,6 +332,11 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_port INTEGER")
     if "ssh_user" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
+    # DEPRECATED v1.1.0 (cathedralai/cathedral#75, PR #77). The column is
+    # kept so v1.0.x historical rows preserve their port value through
+    # the transition; new rows always write NULL. Removable in v1.2.0
+    # once all historical rows have aged out of the 30-day rolling
+    # window. Search marker: `removable-in-v1-2-0`.
     if "hermes_port" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
 
@@ -427,6 +436,8 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
             ssh_host                 TEXT,
             ssh_port                 INTEGER,
             ssh_user                 TEXT,
+            -- DEPRECATED v1.1.0 (#75, PR #77). Removable in v1.2.0.
+            -- Search marker: `removable-in-v1-2-0`.
             hermes_port              INTEGER
         )
         """
