@@ -262,6 +262,16 @@ async def score_and_sign(
     # frontend / validators can pin the byte-exact card the cathedral
     # signed. `merkle_epoch` is appended post-anchor and is EXCLUDED from
     # the signed bytes via `canonical_json` (see v1_types).
+    #
+    # TODO(v1.2.0, miner-side rewrite): once the new eval data model
+    # lands (eval_card_excerpt / eval_artifact_manifest /
+    # eval_artifact_bundle_url, per the Hermes re-alignment brief), add
+    # `eval_output_schema_version` to this signed payload and bump it
+    # to 2 here. The validator's verifier already dispatches on that
+    # field via `_SIGNED_KEYS_BY_VERSION` in
+    # cathedral.validator.pull_loop — register the new key set there
+    # alongside this bump. Keep version=1 emission during the dual-write
+    # cutover window so v1.1.0 validators continue verifying.
     display_name = submission.get("display_name", "")
     public_payload = {
         "id": eval_run_id,
