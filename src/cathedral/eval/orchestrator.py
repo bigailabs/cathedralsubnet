@@ -444,8 +444,11 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
       polaris              -> PolarisRuntimeRunner (legacy Tier A —
                               cathedral-runtime shim; kept as backup
                               during v2 migration per POLARIS_NATIVE_V2.md)
-      polaris-deploy       -> PolarisDeployRunner (v2 — real Hermes via
-                              Polaris's native deploy pipeline)
+      polaris-deploy       -> PolarisDeployRunner (v2 paid — real Hermes
+                              via Polaris's native deploy pipeline)
+      ssh-probe            -> SshProbeRunner (v2 free — Cathedral SSHs
+                              into the miner's box, no Polaris attestation,
+                              no verified-runtime multiplier)
       http-polaris (legacy)-> HttpPolarisRunner
       anything else        -> HttpPolarisRunner (legacy default)
     """
@@ -477,6 +480,35 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         return StubPolarisRunner()
     if mode == "bundle":
         return BundleCardRunner()
+    if mode == "ssh-probe":
+        # v2 free tier — Cathedral SSHs into the miner's box and queries
+        # the running Hermes locally. No Polaris attestation, no 1.10x
+        # multiplier; lands on `attestation_mode=unverified` rows so
+        # the scoring pipeline omits the verified-runtime multiplier.
+        # See `docs/VALIDATOR.md` for failure-mode codes.
+        from cathedral.eval.ssh_probe_runner import (
+            SshProbeRunner,
+            SshProbeRunnerConfig,
+        )
+
+        ssh_key_path = (
+            os.environ.get("CATHEDRAL_SSH_KEY_PATH")
+            or os.path.expanduser("~/.ssh/cathedral_probe_ed25519")
+        )
+        return SshProbeRunner(
+            SshProbeRunnerConfig(
+                ssh_private_key_path=ssh_key_path,
+                connect_timeout_secs=float(
+                    os.environ.get("CATHEDRAL_SSH_CONNECT_TIMEOUT", "10")
+                ),
+                prompt_timeout_secs=float(
+                    os.environ.get("CATHEDRAL_SSH_PROMPT_TIMEOUT", "60")
+                ),
+                visit_budget_secs=float(
+                    os.environ.get("CATHEDRAL_SSH_VISIT_BUDGET", "300")
+                ),
+            )
+        )
     if mode == "polaris-deploy":
         # v2 — Polaris-native Hermes deploy. Skips the cathedral-runtime
         # image entirely; uses the standard marketplace-eval pipeline
@@ -637,6 +669,21 @@ async def _run_once_async() -> int:
                 env_mode=env_mode,
                 chosen=type(r).__name__,
                 reason="tee-pre-verified",
+            )
+            return r
+        if mode == "ssh-probe":
+            # v2 free tier — Cathedral SSHs into the miner's box. No
+            # Polaris attestation chain (manifest will be None on the
+            # PolarisRunResult), so the verified-runtime 1.10x multiplier
+            # is not applied at scoring.
+            r = _resolve_polaris_runner_for_mode("ssh-probe")
+            logger.info(
+                "runner_dispatch",
+                submission_id=submission.get("id"),
+                attestation_mode=mode,
+                env_mode=env_mode,
+                chosen=type(r).__name__,
+                reason="ssh-probe-tier-free",
             )
             return r
         r = _resolve_polaris_runner_from_env()

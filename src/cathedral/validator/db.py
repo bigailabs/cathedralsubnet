@@ -102,11 +102,17 @@ CREATE TABLE IF NOT EXISTS card_definitions (
 --                        runtime (legacy cathedral-runtime image). No
 --                        miner-side attestation needed at submission time.
 --                        Kept as a backup during v2 migration.
---   * 'polaris-deploy' — v2. Polaris deploys the canonical Hermes
+--   * 'polaris-deploy' — v2 paid. Polaris deploys the canonical Hermes
 --                        runtime against the miner's bundle and Cathedral
 --                        drives /chat. Manifest is fetched + verified;
 --                        no per-task attestation needed because the
 --                        deployment is the unit of trust.
+--   * 'ssh-probe'      — v2 free. Miner runs Hermes themselves on any
+--                        host with SSH access; Cathedral SSHs in, queries
+--                        the local /chat, leaves. No Polaris attestation
+--                        chain, no 1.10x verified-runtime multiplier.
+--                        `ssh_host`, `ssh_port`, `ssh_user`, `hermes_port`
+--                        come in via the submit-starter form.
 --   * 'tee'            — Miner attached a TEE attestation document
 --                        (Nitro/TDX/SEV-SNP). `attestation_blob` carries
 --                        the raw bytes; `attestation_type` carries the
@@ -141,11 +147,17 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     first_mover_at           TEXT,
     attestation_mode         TEXT NOT NULL DEFAULT 'polaris'
                              CHECK (attestation_mode IN
-                               ('polaris','polaris-deploy','tee','unverified')),
+                               ('polaris','polaris-deploy','ssh-probe','tee','unverified')),
     attestation_type         TEXT,
     attestation_blob         BLOB,
     attestation_verified_at  TEXT,
-    discovery_only           INTEGER NOT NULL DEFAULT 0
+    discovery_only           INTEGER NOT NULL DEFAULT 0,
+    -- ssh-probe coordinates (free tier). Nullable; only set when
+    -- attestation_mode='ssh-probe'. See ssh_probe_runner.SshProbeRunner.
+    ssh_host                 TEXT,
+    ssh_port                 INTEGER,
+    ssh_user                 TEXT,
+    hermes_port              INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique
     ON agent_submissions(miner_hotkey, card_id, bundle_hash);
@@ -281,3 +293,15 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "ALTER TABLE agent_submissions ADD COLUMN discovery_only INTEGER NOT NULL DEFAULT 0"
         )
+
+    # ssh-probe free-tier coordinates. Only populated when
+    # attestation_mode='ssh-probe'. The publisher's submit-starter form
+    # collects these; the SshProbeRunner reads them off the submission row.
+    if "ssh_host" not in sub_cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_host TEXT")
+    if "ssh_port" not in sub_cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_port INTEGER")
+    if "ssh_user" not in sub_cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
+    if "hermes_port" not in sub_cols:
+        await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
