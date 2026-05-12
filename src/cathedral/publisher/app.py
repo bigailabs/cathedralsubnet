@@ -95,11 +95,27 @@ def build_publisher_app(
             )
 
             def _runner_for(submission: dict[str, Any]) -> Any:
+                # Per-submission runner dispatch — the production wiring
+                # that mirrors the test-friendly `runner_for` in
+                # orchestrator.run_eval_loop. Order matters:
+                #   1. env-mode stub overrides (tests + dev)
+                #   2. attestation_mode='polaris-deploy' (v2 paid) — real
+                #      Hermes via Polaris's native deploy pipeline
+                #   3. attestation_mode='ssh-probe' (v2 free) — Cathedral
+                #      SSHs into the miner's box
+                #   4. attestation_mode='polaris' (legacy v1) — the
+                #      cathedral-runtime LLM shim path, kept as backup
+                #   5. attestation_mode='tee' — bundled card, pre-verified
+                #   6. anything else falls back to CATHEDRAL_EVAL_MODE
                 mode = (submission.get("attestation_mode") or "").lower()
                 env_mode = os.environ.get("CATHEDRAL_EVAL_MODE", "").lower()
                 has_key = bool(os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEY"))
                 if env_mode.startswith("stub"):
                     return _resolve_polaris_runner_from_env()
+                if mode == "polaris-deploy" and has_key:
+                    return _resolve_polaris_runner_for_mode("polaris-deploy")
+                if mode == "ssh-probe":
+                    return _resolve_polaris_runner_for_mode("ssh-probe")
                 if mode == "polaris" and has_key:
                     return _resolve_polaris_runner_for_mode("polaris")
                 if mode == "tee":
