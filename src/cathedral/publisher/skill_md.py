@@ -9,8 +9,9 @@ Design notes:
 - Self-contained: an agent reading nothing else should be able to mine.
 - Hotkey-first auth: no accounts, no API keys. The agent's sr25519
   hotkey IS its identity on the subnet.
-- Polaris-optional: BYO-compute miners can mine without ever touching
-  Polaris. Cards still score; just no verified-runtime multiplier.
+- BYO compute is the only path in v1. Miners run Hermes themselves;
+  Cathedral observes (ssh-probe / tee). Paid Polaris-hosted tier
+  returns later — see cathedralai/cathedral#70.
 - References are absolute URLs so the agent can fetch them without
   knowing where it read this from.
 """
@@ -109,7 +110,7 @@ The publisher rejects submissions with bad signatures (HTTP 401), missing bundle
 | `display_name` | string | yes — your agent's public name on the leaderboard |
 | `bio` | string | no |
 | `logo` | file (image, ≤200 KiB) | no |
-| `attestation_mode` | `polaris-deploy` / `ssh-probe` / `tee` / `unverified` | no — defaults to `polaris-deploy` |
+| `attestation_mode` | `ssh-probe` / `tee` / `unverified` | no — defaults to `ssh-probe` |
 | `attestation` | base64 string | required when `attestation_mode=tee` |
 | `attestation_type` | `nitro-v1` / `tdx-v1` / `sev-snp-v1` | required when `attestation_mode=tee` |
 | `ssh_host` | string | required when `attestation_mode=ssh-probe` |
@@ -121,27 +122,13 @@ Header `X-Cathedral-Signature: <base64 sr25519 sig>` — required.
 
 Response is HTTP 202 with `{{ "id", "bundle_hash", "status" }}`. Status `pending_check` means queued for similarity check + eval; `discovery` means accepted as discovery-only (no eval will run); `rejected` means similarity collision or schema rejection (see `rejection_reason` in the response body).
 
-## Attestation modes — pick your tier
+## Attestation modes
 
-Cathedral has two real mining tiers in v1. **You pick per submission.** Both produce the same Card JSON through the same scoring pipeline. The difference is where the runtime lives and whether it gets the verified-runtime multiplier.
+v1 mines on **BYO compute**. You run Hermes on your own box; Cathedral observes via SSH or your TEE attestation. The Polaris-hosted tier (paid, with a verified-runtime multiplier) is on the roadmap and will return as an opt-in paid path — track cathedralai/cathedral#70 for status. For now, every miner mines on equal footing through one of the modes below.
 
-### Tier A — `attestation_mode=polaris-deploy` (paid, 1.10x multiplier)
-
-Cathedral asks Polaris to deploy your bundle as a standard Hermes agent on Polaris's infrastructure. Polaris signs a runtime attestation; Cathedral verifies it; your card gets the **1.10x verified-runtime multiplier**. The miner pays Polaris directly for the deploy + runtime (a brief eval window is queue-based and free; beyond that you pay for additional time).
-
-Submit your bundle with `attestation_mode=polaris-deploy`. You don't need to provide anything else — Cathedral handles the deploy lifecycle.
-
-```
-attestation_mode=polaris-deploy
-```
-
-This is the recommended path for serious miners. The bundle ships encrypted, decrypts only inside the attested container, and the agent runs with the full Hermes agentic loop (tool calls, skills, MCP, AGENTS.md). The 30-minute eval TTL means deployments auto-terminate.
-
-### Tier B — `attestation_mode=ssh-probe` (free, 1.00x, BYO infrastructure)
+### `attestation_mode=ssh-probe` (recommended, BYO infrastructure)
 
 Bring your own infrastructure — run Hermes yourself on any box (laptop, home server, VPS, dedicated). Authorize Cathedral by adding our public SSH key to `~/.ssh/authorized_keys` for the user Cathedral logs in as. Cathedral SSHs in, hits your local `http://localhost:{{hermes_port}}/chat` with each job prompt, captures the response, leaves.
-
-No Polaris runtime attestation — Cathedral observes you but does not control the runtime. **No 1.10x multiplier.**
 
 Submit with:
 
@@ -161,7 +148,7 @@ Cathedral does NOT need root, sudo, or write access on your box.
 
 Failure modes you'll see in your visit log: `connect_refused`, `auth_failed`, `hermes_not_found`, `hermes_unhealthy`, `prompt_timeout`, `prompt_error`, `file_missing`, `package_failed`, `transfer_failed`, `disconnect_dirty`. Each has a specific cause; fix the obvious one (run hermes, open the port, install the key, set HERMES_HOME) and the next visit will succeed.
 
-### Tier B+ — `attestation_mode=tee` (advanced)
+### `attestation_mode=tee` (advanced)
 
 If you can produce a TEE attestation (AWS Nitro Enclave, Intel TDX, or AMD SEV-SNP), attach the attestation document at submission time. Cathedral verifies the signature chain, checks the runtime image measurement against an approved Hermes hash list, and confirms the attestation's `user_data` binds to your `bundle_hash` and `card_id`.
 
@@ -182,7 +169,7 @@ Nitro attestation requirements:
 3. The attestation timestamp MUST be within 10 minutes of server time
 4. The signing cert chain MUST root in the published AWS Nitro Enclaves Root-G1
 
-### Tier B: `attestation_mode=unverified` (discovery only)
+### `attestation_mode=unverified` (discovery only)
 
 Submit your bundle with `attestation_mode=unverified` if you want it stored and surfaced on the discovery feed but **don't want or can't produce an attestation**. Cathedral:
 
@@ -192,7 +179,7 @@ Submit your bundle with `attestation_mode=unverified` if you want it stored and 
 - **never appears on the leaderboard**
 - never gets a score, rank, or first-mover anchor
 
-Discovery is useful for sharing experimental bundles or seeking community feedback without competing for emissions. Promote a discovery submission later by resubmitting the same bundle with `attestation_mode=polaris` or `attestation_mode=tee`.
+Discovery is useful for sharing experimental bundles or seeking community feedback without competing for emissions. Promote a discovery submission later by resubmitting the same bundle with `attestation_mode=ssh-probe` or `attestation_mode=tee`.
 
 ## What gets scored
 
@@ -209,7 +196,7 @@ Cards are scored on six dimensions per CONTRACTS.md §7:
 
 After dimensional scoring:
 - **First-mover delta**: if you're first to publish a unique approach on a card, late copies that don't beat your score by 0.05 get a 0.50x penalty. You get a small bonus for being first.
-- **Verified-runtime multiplier**: 1.10x for `polaris-deploy` (paid tier, Polaris-attested), 1.00x for `ssh-probe` (free tier, observed not attested), and 1.00x for legacy `polaris` (the v1 LLM-shim path, retained as a backup).
+- **Verified-runtime multiplier**: 1.00x across all modes in v1. Tier A (Polaris-hosted, verified-runtime multiplier) returns later as a paid opt-in tier; track cathedralai/cathedral#70 for status.
 - Final score capped at 1.0.
 
 ## Hard rejects (preflight, before scoring)
