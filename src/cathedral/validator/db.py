@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     first_mover_at           TEXT,
     attestation_mode         TEXT NOT NULL DEFAULT 'polaris'
                              CHECK (attestation_mode IN
-                               ('polaris','polaris-deploy','ssh-probe','tee','unverified')),
+                               ('bundle','polaris','polaris-deploy','ssh-probe','tee','unverified')),
     attestation_type         TEXT,
     attestation_blob         BLOB,
     attestation_verified_at  TEXT,
@@ -294,9 +294,32 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
             "ALTER TABLE agent_submissions ADD COLUMN discovery_only INTEGER NOT NULL DEFAULT 0"
         )
 
+    # agent_submissions.attestation_mode CHECK constraint widening.
+    # SQLite cannot ALTER a CHECK in place; tables created before v2
+    # carry the old constraint `IN ('polaris','tee','unverified')` which
+    # rejects 'polaris-deploy' and 'ssh-probe' inserts with
+    # "CHECK constraint failed". Detection: read sqlite_master for the
+    # table's CREATE statement and look for the narrow tuple. If found,
+    # rebuild the table with the widened constraint.
+    cur = await conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='agent_submissions'"
+    )
+    row = await cur.fetchone()
+    create_sql = (row[0] if row else "") or ""
+    needs_widen = (
+        "attestation_mode IN" in create_sql
+        and "'polaris-deploy'" not in create_sql
+    )
+    if needs_widen:
+        await _widen_attestation_mode_check(conn)
+
     # ssh-probe free-tier coordinates. Only populated when
     # attestation_mode='ssh-probe'. The publisher's submit-starter form
     # collects these; the SshProbeRunner reads them off the submission row.
+    # Re-read columns in case the table was just rebuilt above.
+    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
+    sub_cols = {row[1] for row in await cur.fetchall()}
     if "ssh_host" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_host TEXT")
     if "ssh_port" not in sub_cols:
@@ -305,3 +328,127 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
     if "hermes_port" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
+
+
+async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
+    """Rebuild agent_submissions with the widened attestation_mode CHECK.
+
+    SQLite does not support ALTER TABLE to modify a CHECK constraint, so
+    we follow the canonical 12-step alter procedure:
+    https://www.sqlite.org/lang_altertable.html#otheralter
+
+    1. Disable foreign keys (we have none on agent_submissions)
+    2. CREATE TABLE agent_submissions_new with the new schema
+    3. INSERT INTO ... SELECT FROM the old table
+    4. DROP the old table
+    5. RENAME the new table to the canonical name
+    6. Recreate indexes
+
+    The new schema mirrors the canonical SCHEMA above. Any columns the
+    old table had but the new schema doesn't are dropped silently; any
+    new columns the new schema has get NULL defaults. Caller is
+    expected to follow up with the column ALTERs for ssh_*.
+    """
+    import structlog as _structlog
+
+    _log = _structlog.get_logger(__name__)
+    _log.info("widen_attestation_mode_check_start")
+
+    # Step 2: create the replacement table. Carries the full new
+    # constraint set including 'polaris-deploy' and 'ssh-probe', plus
+    # the ssh_* columns inlined. Keep column order matching the
+    # canonical SCHEMA so the INSERT...SELECT works without column
+    # listing on the SELECT side.
+    await conn.execute(
+        """
+        CREATE TABLE agent_submissions_new (
+            id                       TEXT PRIMARY KEY,
+            miner_hotkey             TEXT NOT NULL,
+            card_id                  TEXT NOT NULL REFERENCES card_definitions(id),
+            bundle_blob_key          TEXT NOT NULL,
+            bundle_hash              TEXT NOT NULL,
+            bundle_size_bytes        INTEGER NOT NULL,
+            encryption_key_id        TEXT NOT NULL,
+            bundle_signature         TEXT NOT NULL,
+            display_name             TEXT NOT NULL,
+            bio                      TEXT,
+            logo_url                 TEXT,
+            soul_md_preview          TEXT,
+            metadata_fingerprint     TEXT NOT NULL,
+            similarity_check_passed  INTEGER NOT NULL,
+            rejection_reason         TEXT,
+            submitted_at             TEXT NOT NULL,
+            status                   TEXT NOT NULL CHECK (status IN
+                                       ('pending_check','queued','evaluating',
+                                        'ranked','rejected','withdrawn',
+                                        'discovery')),
+            current_score            REAL,
+            current_rank             INTEGER,
+            first_mover_at           TEXT,
+            attestation_mode         TEXT NOT NULL DEFAULT 'polaris'
+                                     CHECK (attestation_mode IN
+                                       ('bundle','polaris','polaris-deploy','ssh-probe','tee','unverified')),
+            attestation_type         TEXT,
+            attestation_blob         BLOB,
+            attestation_verified_at  TEXT,
+            discovery_only           INTEGER NOT NULL DEFAULT 0,
+            ssh_host                 TEXT,
+            ssh_port                 INTEGER,
+            ssh_user                 TEXT,
+            hermes_port              INTEGER
+        )
+        """
+    )
+
+    # Step 3: copy. The old table may or may not have ssh_* columns
+    # depending on which migration ran first; the new table has them,
+    # so we list the carry-over columns explicitly.
+    cur = await conn.execute("PRAGMA table_info(agent_submissions)")
+    old_cols = {row[1] for row in await cur.fetchall()}
+    carry_cols = [
+        "id", "miner_hotkey", "card_id", "bundle_blob_key", "bundle_hash",
+        "bundle_size_bytes", "encryption_key_id", "bundle_signature",
+        "display_name", "bio", "logo_url", "soul_md_preview",
+        "metadata_fingerprint", "similarity_check_passed",
+        "rejection_reason", "submitted_at", "status",
+        "current_score", "current_rank", "first_mover_at",
+        "attestation_mode", "attestation_type", "attestation_blob",
+        "attestation_verified_at", "discovery_only",
+    ]
+    # ssh_* may not exist on the old table — only carry them if so.
+    for col in ("ssh_host", "ssh_port", "ssh_user", "hermes_port"):
+        if col in old_cols:
+            carry_cols.append(col)
+    cols_sql = ", ".join(carry_cols)
+    await conn.execute(
+        f"INSERT INTO agent_submissions_new ({cols_sql}) "
+        f"SELECT {cols_sql} FROM agent_submissions"
+    )
+
+    # Step 4: drop the old table (drops associated indexes too).
+    await conn.execute("DROP TABLE agent_submissions")
+
+    # Step 5: rename.
+    await conn.execute(
+        "ALTER TABLE agent_submissions_new RENAME TO agent_submissions"
+    )
+
+    # Step 6: recreate indexes (matches canonical SCHEMA).
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique "
+        "ON agent_submissions(miner_hotkey, card_id, bundle_hash)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_card_status "
+        "ON agent_submissions(card_id, status)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_card_score "
+        "ON agent_submissions(card_id, current_score DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_first_mover "
+        "ON agent_submissions(card_id, first_mover_at)"
+    )
+
+    _log.info("widen_attestation_mode_check_done")

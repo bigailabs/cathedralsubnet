@@ -111,8 +111,14 @@ def db_path(tmp_path: Path) -> Path:
 def test_submit_polaris_mode_default_returns_pending_check(
     publisher_client, alice_keypair, tmp_path
 ):
-    """Omitting attestation_mode defaults to ``polaris`` for back-compat."""
-    bundle = make_valid_bundle(soul_md="# default polaris mode\n")
+    """Omitting attestation_mode defaults to ``bundle`` (BYO-compute, v2).
+
+    Was ``polaris`` in v1; PR #53 changed the default to ``bundle`` after
+    the legacy Polaris runtime-evaluate shim proved unreliable in
+    production. Tests that explicitly want the legacy path now pass
+    ``attestation_mode='polaris'``.
+    """
+    bundle = make_valid_bundle(soul_md="# default mode\n")
     resp = submit_multipart(
         publisher_client,
         keypair=alice_keypair,
@@ -124,7 +130,7 @@ def test_submit_polaris_mode_default_returns_pending_check(
     assert body["status"] == "pending_check"
 
     row = _read_submission_row(tmp_path / "publisher.db", body["id"])
-    assert row["attestation_mode"] == "polaris"
+    assert row["attestation_mode"] == "bundle"
     assert row["attestation_type"] is None
     assert row["attestation_blob"] is None
     assert row["attestation_verified_at"] is None
