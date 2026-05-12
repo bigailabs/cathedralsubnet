@@ -110,9 +110,7 @@ def pull_loop_module():
 # --------------------------------------------------------------------------
 
 
-def test_pull_loop_persists_verified_entries(
-    pull_loop_module, alice_keypair, monkeypatch
-):
+def test_pull_loop_persists_verified_entries(pull_loop_module, alice_keypair, monkeypatch):
     """ARCHITECTURE step 8: validator pulls + verifies + persists.
 
     The implementer should expose a `pull_once(...)` (or similar) entry
@@ -165,9 +163,7 @@ def test_pull_loop_persists_verified_entries(
     )
 
 
-def test_pull_loop_skips_bad_signature_entries(
-    pull_loop_module, monkeypatch
-):
+def test_pull_loop_skips_bad_signature_entries(pull_loop_module, monkeypatch):
     """§6 — entries with invalid cathedral signature must be SKIPPED, not persisted."""
     sk = Ed25519PrivateKey.generate()
     pk = sk.public_key()
@@ -314,3 +310,262 @@ def test_legacy_verify_rejects_tampered_record(pull_loop_module):
 
     with pytest.raises(pull_loop_module.PullVerificationError):
         pull_loop_module.verify_eval_run_signature(record, pk)
+
+
+# --------------------------------------------------------------------------
+# v1.1.0 — tuple cursor + saturation pull + versioned verifier
+# --------------------------------------------------------------------------
+
+
+def _make_signed_eval_output_at(sk: Ed25519PrivateKey, *, idx: int, ran_at: str) -> dict[str, Any]:
+    """Variant of make_signed_eval_output with a caller-chosen ``ran_at``.
+
+    Used by the millisecond-collision regression test that writes many
+    rows at the exact same ``ran_at`` to force the page-boundary case
+    flagged in ``2026-05-12-track-3-pull-cursor-audit.md`` Risk 2.
+    """
+    import json as _json
+
+    import blake3 as _blake3
+
+    output_card = {"id": "eu-ai-act", "topic": "demo", "idx": idx}
+    output_card_hash = _blake3.blake3(
+        _json.dumps(output_card, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    signed = {
+        "id": f"00000000-0000-4000-8000-{idx:012d}",
+        "agent_id": f"11111111-1111-4111-8111-{idx:012d}",
+        "agent_display_name": f"Agent {idx}",
+        "card_id": "eu-ai-act",
+        "output_card": output_card,
+        "output_card_hash": output_card_hash,
+        "weighted_score": 0.5 + 0.001 * idx,
+        "polaris_verified": False,
+        "ran_at": ran_at,
+    }
+    blob = canonical_json_for_signing(signed)
+    sig = base64.b64encode(sk.sign(blob)).decode("ascii")
+    payload = dict(signed)
+    payload["cathedral_signature"] = sig
+    payload["merkle_epoch"] = None
+    return payload
+
+
+def test_pull_loop_drains_250_rows_at_same_ms(pull_loop_module):
+    """v1.1.0 regression: 250 rows with identical ``ran_at`` must all
+    reach the validator exactly once across consecutive pulls.
+
+    This is the case ``2026-05-12-track-3-pull-cursor-audit.md`` Risk 2
+    flagged: under cadence eval the scoring pipeline writes many rows in
+    the same millisecond. The pre-fix code advanced the cursor by
+    ``max(ran_at)`` with ``>=`` comparison and an unordered tiebreak,
+    leaking rows at the page boundary. The tuple cursor fixes it.
+    """
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+
+    ran_at = "2026-05-10T12:00:00.000Z"
+    entries = [_make_signed_eval_output_at(sk, idx=i, ran_at=ran_at) for i in range(250)]
+
+    persisted_ids: list[str] = []
+
+    async def persist(entry):
+        persisted_ids.append(entry["id"])
+
+    # Stateful fake publisher: paginates ``entries`` using the tuple
+    # cursor exactly as the real publisher does. Sorts by (ran_at, id)
+    # ASC and applies WHERE (ran_at, id) > (since_ran_at, since_id).
+    sorted_entries = sorted(entries, key=lambda r: (r["ran_at"], r["id"]))
+    page_size = 100  # smaller than 250 to force pagination
+
+    async def fetch(since_ran_at=None, since_id=None, limit=page_size, **_extra):
+        cursor = (since_ran_at or "", since_id or "")
+        remaining = [r for r in sorted_entries if (r["ran_at"], r["id"]) > cursor]
+        page = remaining[:limit]
+        if page and len(page) == limit:
+            last = page[-1]
+            next_ran_at = last["ran_at"]
+            next_id = last["id"]
+        else:
+            next_ran_at = None
+            next_id = None
+        return {
+            "items": page,
+            "next_since_ran_at": next_ran_at,
+            "next_since_id": next_id,
+            "next_since": next_ran_at,
+            "merkle_epoch_latest": None,
+        }
+
+    pull_loop_module.reset_pull_cursor()
+
+    # Run pull_once until the loop reports it's caught up. The saturation
+    # inner-pull cap means a single pull_once drains up to
+    # _MAX_INNER_PULLS pages; we run pull_once in a small outer loop too
+    # so the test doesn't depend on the exact saturation cap.
+    runner = _find_pull_runner(pull_loop_module)
+    if runner is None:
+        pytest.skip("no pull_once entry point on pull_loop module")
+
+    for _ in range(20):
+        before = len(persisted_ids)
+        result = runner(fetcher=fetch, sink=persist, public_key=pk, limit=page_size)
+        if asyncio.iscoroutine(result):
+            asyncio.get_event_loop().run_until_complete(result)
+        if len(persisted_ids) == before:
+            break
+
+    assert len(persisted_ids) == 250, (
+        f"v1.1.0: all 250 ms-colliding rows must reach the validator; got {len(persisted_ids)}"
+    )
+    assert len(set(persisted_ids)) == 250, (
+        f"v1.1.0: each row must reach the validator exactly once; "
+        f"got {len(persisted_ids)} persists with "
+        f"{len(set(persisted_ids))} unique ids"
+    )
+    assert set(persisted_ids) == {e["id"] for e in entries}, (
+        "v1.1.0: persisted set must equal the published set"
+    )
+
+
+def test_pull_loop_saturation_inner_pull(pull_loop_module):
+    """v1.1.0 — saturation-driven inner pull drains backlog without sleeping.
+
+    See ``2026-05-12-track-3-pull-cursor-audit.md`` Risk 1. When a page
+    returns exactly ``limit`` rows, the loop pulls again immediately
+    inside the same outer tick rather than sleeping. Cap is enforced at
+    ``_MAX_INNER_PULLS``.
+    """
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+
+    # Build 3 saturated pages + 1 short page = 4 fetcher invocations
+    # consumed in a single ``pull_once`` call.
+    page_size = 10
+    total_rows = page_size * 3 + 5
+    base_ran_at = "2026-05-10T12:00:00.000Z"
+    entries = [
+        _make_signed_eval_output_at(sk, idx=i, ran_at=base_ran_at) for i in range(total_rows)
+    ]
+    sorted_entries = sorted(entries, key=lambda r: (r["ran_at"], r["id"]))
+
+    fetch_calls: list[tuple[str | None, str | None]] = []
+
+    async def fetch(since_ran_at=None, since_id=None, limit=page_size, **_extra):
+        fetch_calls.append((since_ran_at, since_id))
+        cursor = (since_ran_at or "", since_id or "")
+        remaining = [r for r in sorted_entries if (r["ran_at"], r["id"]) > cursor]
+        page = remaining[:limit]
+        next_ran_at = page[-1]["ran_at"] if page and len(page) == limit else None
+        next_id = page[-1]["id"] if page and len(page) == limit else None
+        return {
+            "items": page,
+            "next_since_ran_at": next_ran_at,
+            "next_since_id": next_id,
+            "next_since": next_ran_at,
+            "merkle_epoch_latest": None,
+        }
+
+    persisted: list[str] = []
+
+    async def persist(entry):
+        persisted.append(entry["id"])
+
+    pull_loop_module.reset_pull_cursor()
+    runner = _find_pull_runner(pull_loop_module)
+    if runner is None:
+        pytest.skip("no pull_once entry point on pull_loop module")
+
+    result = runner(fetcher=fetch, sink=persist, public_key=pk, limit=page_size)
+    if asyncio.iscoroutine(result):
+        asyncio.get_event_loop().run_until_complete(result)
+
+    # Saturation cap should drain at least up to _MAX_INNER_PULLS pages
+    # in a single pull_once. With 4 pages (3 saturated + 1 short) and the
+    # cap at 4, we expect all 35 rows in one outer call.
+    assert len(persisted) == total_rows, (
+        f"v1.1.0: saturation inner pull must drain backlog within one "
+        f"outer tick (capped at _MAX_INNER_PULLS); got {len(persisted)} "
+        f"persists across {len(fetch_calls)} fetcher calls"
+    )
+    assert len(fetch_calls) >= 4, (
+        f"v1.1.0: saturated pages must trigger inner pulls; got {len(fetch_calls)} fetcher calls"
+    )
+
+
+# --------------------------------------------------------------------------
+# v1.1.0 — versioned signature verifier dispatcher
+# --------------------------------------------------------------------------
+
+
+def test_verify_default_version_still_works(pull_loop_module):
+    """v1.1.0: records without ``eval_output_schema_version`` default to
+    v1 and verify against the v1 key set unchanged. Required so v1.0.x
+    publisher output continues to verify on a v1.1.0 validator during
+    the rollout window before the miner-side agent emits v2.
+    """
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+
+    record = make_signed_eval_output(sk, idx=1)
+    assert "eval_output_schema_version" not in record, (
+        "test premise: legacy records do not carry the version field"
+    )
+    pull_loop_module.verify_eval_output_signature(record, pk)
+
+
+def test_verify_rejects_unknown_schema_version(pull_loop_module):
+    """v1.1.0: an unknown ``eval_output_schema_version`` must raise
+    ``PullVerificationError`` with a clear error — never silently
+    fall back to v1 verification.
+    """
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+
+    record = make_signed_eval_output(sk, idx=1)
+    record["eval_output_schema_version"] = 999
+
+    with pytest.raises(pull_loop_module.PullVerificationError) as exc:
+        pull_loop_module.verify_eval_output_signature(record, pk)
+    assert "unknown_schema_version" in str(exc.value), (
+        f"expected unknown_schema_version error; got {exc.value!r}"
+    )
+
+
+def test_verify_dispatches_to_registered_v2_key_set(pull_loop_module):
+    """v1.1.0: registering a v2 key set in ``_SIGNED_KEYS_BY_VERSION``
+    must route verification to that key set without further code change.
+
+    This proves the dispatcher works ahead of the miner-side agent's
+    wire change. When v2 lands, the publisher signs with the v2 key set
+    and the miner agent registers it; verification works without
+    touching the verifier control flow.
+    """
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+
+    # Hypothetical v2 key set — minimal subset for the test.
+    v2_keys = frozenset({"id", "agent_id", "card_id", "weighted_score", "ran_at"})
+    pull_loop_module._SIGNED_KEYS_BY_VERSION[2] = v2_keys
+    try:
+        # Build a v2-shaped record. Sign with the v2 key set.
+        v2_record_unsigned = {
+            "id": "00000000-0000-4000-8000-000000000002",
+            "agent_id": "11111111-1111-4111-8111-000000000002",
+            "card_id": "eu-ai-act",
+            "weighted_score": 0.42,
+            "ran_at": "2026-05-10T12:00:00.000Z",
+        }
+        blob = canonical_json_for_signing(v2_record_unsigned)
+        sig = base64.b64encode(sk.sign(blob)).decode("ascii")
+        record = dict(v2_record_unsigned)
+        record["cathedral_signature"] = sig
+        record["eval_output_schema_version"] = 2
+        # Decorate with fields that exist in v1 but are NOT in v2's
+        # signed bytes — verify must ignore them.
+        record["agent_display_name"] = "ignored"
+        record["polaris_verified"] = False
+
+        pull_loop_module.verify_eval_output_signature(record, pk)
+    finally:
+        del pull_loop_module._SIGNED_KEYS_BY_VERSION[2]

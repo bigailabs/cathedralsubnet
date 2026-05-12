@@ -201,6 +201,12 @@ CREATE INDEX IF NOT EXISTS idx_eval_epoch ON eval_runs(epoch);
 CREATE INDEX IF NOT EXISTS idx_eval_card_score
     ON eval_runs(submission_id, weighted_score DESC);
 CREATE INDEX IF NOT EXISTS idx_eval_ran_at ON eval_runs(ran_at DESC);
+-- v1.1.0: composite ascending index covering the leaderboard/recent
+-- tuple-cursor scan (WHERE (ran_at, id) > (?, ?) ORDER BY ran_at, id).
+-- See 2026-05-12-track-3-pull-cursor-audit.md and
+-- list_eval_runs_recent() in cathedral.publisher.repository.
+CREATE INDEX IF NOT EXISTS idx_eval_ran_at_id
+    ON eval_runs(ran_at ASC, id ASC);
 
 -- Weekly Merkle anchors of eval results.
 CREATE TABLE IF NOT EXISTS merkle_anchors (
@@ -324,6 +330,16 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
     if "hermes_port" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
+
+    # v1.1.0: composite ascending index for the tuple-cursor leaderboard
+    # scan. SQLite's `CREATE INDEX IF NOT EXISTS` is idempotent, so it's
+    # safe to run on every connect. Existing publisher DBs upgrading from
+    # v1.0.x only have idx_eval_ran_at (DESC); the new ASC composite is
+    # required for efficient row-value comparison scans.
+    # See 2026-05-12-track-3-pull-cursor-audit.md.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_ran_at_id ON eval_runs(ran_at ASC, id ASC)"
+    )
 
     # Tier A drain (cathedralai/cathedral#70). When the publisher boots
     # with CATHEDRAL_ENABLE_POLARIS_DEPLOY unset/false, sweep any

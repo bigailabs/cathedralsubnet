@@ -681,27 +681,43 @@ async def list_eval_runs_recent(
     conn: aiosqlite.Connection,
     *,
     since: datetime,
+    since_id: str = "",
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """Cross-card recent feed used by the validator pull loop AND the
     public `/v1/leaderboard/recent` endpoint.
 
-    Joined against `agent_submissions` and gated on the verified surface
-    so unverified discovery submissions never appear on the leaderboard
-    feed. Discovery rows never produce eval_runs at all, but the join
-    is defense-in-depth in case a future code path inserts one.
+    Cursor is a row-value tuple ``(ran_at, id)`` with strict `>`
+    comparison — see ``2026-05-12-track-3-pull-cursor-audit.md``. Ordering
+    on ``(ran_at ASC, id ASC)`` makes the scan a total order: no row is
+    ever returned twice and no row is ever skipped, even when many rows
+    share the same millisecond ``ran_at`` (the cadence eval case). The
+    composite index ``idx_eval_ran_at_id`` (created in
+    ``_apply_migrations``) covers this access pattern.
+
+    For back-compat with v1.0.7 validators that only pass ``since``,
+    callers MAY pass ``since_id=""`` — the empty string sorts before any
+    UUID, so combined with strict `>` it behaves equivalently to the
+    legacy "ran_at >= since" semantics on the first pull (the first ms
+    boundary is included exactly once; subsequent pulls advance through
+    the composite cursor as normal).
+
+    Joined against ``agent_submissions`` and gated on the verified
+    surface so unverified discovery submissions never appear on the
+    leaderboard feed. Discovery rows never produce eval_runs at all, but
+    the join is defense-in-depth in case a future code path inserts one.
     """
     cur = await conn.execute(
         """
         SELECT er.* FROM eval_runs er
         JOIN agent_submissions sub ON sub.id = er.submission_id
-        WHERE er.ran_at >= ?
+        WHERE (er.ran_at, er.id) > (?, ?)
           AND sub.status != 'discovery'
           AND sub.attestation_mode IN ('polaris','tee')
           AND sub.discovery_only = 0
-        ORDER BY er.ran_at ASC LIMIT ?
+        ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
         """,
-        (since.isoformat(), limit),
+        (since.isoformat(), since_id, limit),
     )
     rows = await cur.fetchall()
     return [_row_to_eval_run(r, cur.description) for r in rows]

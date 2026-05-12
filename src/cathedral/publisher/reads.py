@@ -322,24 +322,84 @@ async def get_leaderboard(
 @router.get("/v1/leaderboard/recent")
 async def get_leaderboard_recent(
     request: Request,
-    since: str = Query(...),
+    since: str | None = Query(default=None),
+    since_ran_at: str | None = Query(default=None),
+    since_id: str | None = Query(default=None),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict[str, Any]:
+    """Cross-card recent eval feed for the validator pull loop.
+
+    v1.1.0 introduces a tuple-shaped cursor ``(since_ran_at, since_id)``
+    with strict `>` comparison, replacing the v1.0.x ``since=<ran_at>``
+    cursor with ``>=`` comparison. The new cursor is a total order on
+    ``(ran_at, id)`` so it cannot drop or duplicate rows at millisecond
+    collisions — the failure mode the cadence eval load surfaced. See
+    ``2026-05-12-track-3-pull-cursor-audit.md`` Risk 2.
+
+    Back-compat: v1.0.7 validators only send ``since``. We accept that
+    and treat it as ``since_ran_at`` with ``since_id=""``. The empty
+    string sorts before any UUID, so the first page returns every row
+    with ``ran_at > since`` plus the boundary row at ``ran_at == since``
+    if its ``id > ""`` (always true for non-empty UUIDs). On subsequent
+    pulls, the validator advances using ``next_since`` (legacy) and the
+    UPSERT on ``pulled_eval_runs`` dedupes any boundary overlap. v1.1.0
+    validators use ``since_ran_at`` + ``since_id`` for the exact cursor.
+
+    Response: dual-emits both legacy ``next_since`` and the v1.1.0 pair
+    ``next_since_ran_at`` + ``next_since_id``. Old validators read the
+    former; new validators read the latter.
+    """
     ctx: PublisherContext = request.app.state.ctx
-    since_dt = _parse_since(since)
+
+    # Resolve cursor source: prefer v1.1.0 tuple if present, else legacy.
+    if since_ran_at is not None:
+        cursor_ran_at = since_ran_at
+    elif since is not None:
+        cursor_ran_at = since
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="missing cursor: pass since_ran_at (v1.1.0) or since (v1.0.x)",
+        )
+
+    since_dt = _parse_since(cursor_ran_at)
     if since_dt is None:
-        raise HTTPException(status_code=400, detail="since parameter must be ISO-8601")
-    runs = await repository.list_eval_runs_recent(ctx.db, since=since_dt, limit=limit)
+        raise HTTPException(
+            status_code=400,
+            detail="since / since_ran_at must be ISO-8601",
+        )
+    cursor_id = since_id or ""
+
+    runs = await repository.list_eval_runs_recent(
+        ctx.db, since=since_dt, since_id=cursor_id, limit=limit
+    )
     items: list[dict[str, Any]] = []
     for r in runs:
         sub = await repository.get_agent_submission(ctx.db, r["submission_id"])
         if sub:
             items.append(_eval_run_to_output(r, sub))
-    next_since = items[-1]["ran_at"] if len(items) == limit else None
+
+    # Emit both cursor shapes when the page is full so the cursor is
+    # safe to thread; when the page is short, the cursor is None on
+    # both shapes (means "you're caught up").
+    if len(items) == limit and runs:
+        last_row = runs[-1]
+        next_since_ran_at = items[-1]["ran_at"]
+        next_since_id = str(last_row.get("id") or "")
+        next_since_legacy: str | None = items[-1]["ran_at"]
+    else:
+        next_since_ran_at = None
+        next_since_id = None
+        next_since_legacy = None
+
     latest_epoch = await repository.latest_merkle_epoch(ctx.db)
     return {
         "items": items,
-        "next_since": next_since,
+        # Legacy cursor for v1.0.x validators.
+        "next_since": next_since_legacy,
+        # v1.1.0 tuple cursor for the audited pull loop.
+        "next_since_ran_at": next_since_ran_at,
+        "next_since_id": next_since_id,
         "merkle_epoch_latest": latest_epoch,
     }
 
