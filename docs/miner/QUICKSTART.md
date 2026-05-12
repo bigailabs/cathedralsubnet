@@ -79,6 +79,31 @@ Any Linux host with:
 
 The provisioner uses Docker; the box should NOT have anything else listening on `hermes_port` (default 8088).
 
+#### Reachability checklist (this is where most setups fail)
+
+PM2 reporting `online` on your box does **not** mean Cathedral can reach you. The probe must be reachable from the public internet on the port you submit. Verify each layer before submitting:
+
+| Check | Command | What "good" looks like |
+|---|---|---|
+| Probe binds to all interfaces | `sudo ss -tlnp \| grep 8088` | Shows `0.0.0.0:8088`, not `127.0.0.1:8088` |
+| SSH is reachable from outside | from a different network: `ssh -p 22 cathedral-probe@<your-public-ip>` | Auth succeeds (or fails with a key error, not a timeout) |
+| Hermes port is reachable from outside | from a different network: `curl --max-time 5 http://<your-public-ip>:8088/probe/health` | Returns within 5s, even if body is empty |
+| Host firewall allows the port | `sudo ufw status` (Ubuntu) or `sudo firewall-cmd --list-all` (RHEL/Fedora) | `8088/tcp` allowed; `22/tcp` allowed |
+| Cloud-provider firewall allows the port | AWS Security Group / GCP firewall / Hetzner Cloud firewall / etc. | Inbound rule for `22/tcp` and `8088/tcp` from `0.0.0.0/0` |
+| Home router forwards the port | router admin panel → port forwarding | `TCP 8088 → <box LAN IP>:8088` and `TCP 22 → <box LAN IP>:22` |
+| DNS resolves (if you submitted a hostname) | `dig +short <your-hostname>` | Returns the IP your box actually has |
+
+If any one of these fails, your submission will fail with a Tier B visit error (see "Failure modes" below) and the eval will not score.
+
+**Quick end-to-end verify** — run this from a phone tethered hotspot or a friend's laptop, NOT from the box itself:
+
+```bash
+curl --max-time 5 -i http://<your-public-ip-or-hostname>:8088/probe/health
+ssh -p 22 -o ConnectTimeout=5 cathedral-probe@<your-public-ip-or-hostname> 'echo ok'
+```
+
+Both must succeed before you submit.
+
 ### 2. Install Cathedral's SSH key
 
 Cathedral SSHs in using one universal public key. Install it:
@@ -152,7 +177,22 @@ ssh_user=cathedral-probe
 hermes_port=8088
 ```
 
-Cathedral SSHs in, hits your local `/chat`, captures the response, leaves. Failure modes are explicit per-visit codes (`connect_refused`, `auth_failed`, `hermes_not_found`, `hermes_unhealthy`, `prompt_timeout`, `prompt_error`, `file_missing`, etc.) — read them in your submission's eval log if a visit fails.
+Cathedral SSHs in, hits your local `/chat`, captures the response, leaves. Every visit returns a structured outcome — if anything fails, the eval log carries one of these codes:
+
+| Code | What happened | How to fix |
+|---|---|---|
+| `connect_refused` | TCP connect to `ssh_host:ssh_port` failed (port closed, box down, firewall blocking) | Check host/cloud firewall on port 22, confirm box is up, confirm SSH listens on `0.0.0.0` |
+| `auth_failed` | SSH key auth rejected | Re-install `cathedral-probe`'s `authorized_keys` from `https://api.cathedral.computer/.well-known/cathedral-ssh-key.pub`, verify file mode `600` and dir mode `700` |
+| `hermes_not_found` | SSH succeeded but nothing listening on `hermes_port` | Confirm probe container is running (`pm2 status`), confirm it binds to `0.0.0.0:<port>` not localhost |
+| `hermes_unhealthy` | Probe responded but `/probe/health` returned non-200 or timed out | Tail probe logs (`pm2 logs cathedral-probe`); container is up but failing internally |
+| `file_missing` | `soul.md` or `AGENTS.md` not at the expected path under `~/.hermes/` | Place `soul.md` + `AGENTS.md` in the probe user's `~/.hermes/` and ensure `cathedral-probe` user can read them |
+| `prompt_timeout` | Hermes accepted `/chat` but didn't respond inside the budget (default 60s) | LLM provider slow or rate-limited; check your inference key + provider status |
+| `prompt_error` | Hermes returned an error response | Tail probe logs; usually a bad LLM key, depleted balance, or model that doesn't exist |
+| `package_failed` | Probe couldn't build the encrypted bundle Cathedral needs to verify the run | Re-run the provisioner; usually a stale runtime image — pin to the latest `CATHEDRAL_RUNTIME_TAG` |
+| `transfer_failed` | SCP back of the trace bundle failed mid-stream | Disk full or `/tmp` not writable for the probe user; free space and retry |
+| `disconnect_dirty` | SSH session terminated before Cathedral finished reading the response | Network flake on the miner side; check upstream link, then retry |
+
+Read the failure code in your submission's eval log and fix the obvious one — the next visit will succeed. Don't change SSH coordinates between visits in the same submission; that's treated as a new submission and the previous one's retry budget is forfeit.
 
 ---
 
