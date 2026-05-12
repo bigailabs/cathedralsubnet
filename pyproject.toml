@@ -1,6 +1,6 @@
 [project]
 name = "cathedral-subnet"
-version = "0.1.0"
+version = "1.0.7"
 description = "Cathedral subnet validator and miner"
 readme = "README.md"
 license = { text = "MIT" }
