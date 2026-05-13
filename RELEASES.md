@@ -10,6 +10,47 @@ need to know about.
 
 ---
 
+## v1.1.4 — Miner-onboard UX: resubmits + public failed-evals
+
+**Date:** 2026-05-12
+
+**Headline:** Two production UX fixes from tonight's first-miner
+onboarding pass. Miners can resubmit under their own hotkey after a
+failed eval without inventing new display_names, and the public API
+now exposes failed eval attempts so the leaderboard's empty-state can
+surface real network activity even before any agent scores above zero.
+
+### Fixed
+
+- **Same-hotkey resubmits are no longer blocked by the 7-day fuzzy
+  display_name dedupe.** The check was intended to stop OTHER miners
+  from squatting an existing display_name; a miner resubmitting under
+  their own hotkey (e.g. after a failed eval) should not have to mint
+  `McDEE-v2` / `McDEE-v3` / etc to bypass their own prior rows. The
+  fuzzy candidate set now excludes the submitter's own hotkey. The
+  cross-hotkey squat path is unchanged: a different miner submitting
+  the same or fuzzy-close display_name within 7 days is still
+  rejected (`status=rejected` with `rejection_reason` set).
+
+### New
+
+- **`GET /api/cathedral/v1/cards/{card_id}/attempts?limit=20`** — public
+  endpoint returning recent `eval_runs` for a card INCLUDING failed
+  ones (`_ssh_hermes_failed=true` and/or `weighted_score=0`). Same
+  per-row shape as `/feed` plus a `miner_hotkey` field for
+  attribution. Ordered `ran_at DESC`, default 20 rows, max 200. Lets
+  the public leaderboard surface real network activity even before
+  any submission scores above zero (cathedralai/cathedral PR #119
+  empty-state design).
+
+### For miners
+
+If your eval failed and you want to resubmit under the same display_name,
+just do it — same hotkey, same name, different bundle is now the normal
+recovery path. No need to suffix v2 / v3 / etc.
+
+---
+
 ## v1.0.7 — Polaris-native v2 runtime, two-tier mining
 
 **Date:** 2026-05-12
