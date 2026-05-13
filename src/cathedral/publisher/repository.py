@@ -559,6 +559,11 @@ async def insert_eval_run(
     polaris_attestation: dict[str, Any] | None = None,
     trace_json: dict[str, Any] | None = None,
     polaris_manifest: dict[str, Any] | None = None,
+    eval_card_excerpt: dict[str, Any] | None = None,
+    eval_artifact_manifest_hash: str | None = None,
+    eval_artifact_bundle_url: str | None = None,
+    eval_artifact_manifest_url: str | None = None,
+    eval_output_schema_version: int = 1,
 ) -> None:
     """Insert an eval_runs row.
 
@@ -586,6 +591,25 @@ async def insert_eval_run(
     `polaris_manifest` is the verified manifest pulled from
     `/api/cathedral/v1/agents/{id}/manifest` after the v2 deploy. Stored
     so future audits can re-verify the Ed25519 signature.
+
+    v1.1.0 eval-output schema split (cathedralai/cathedral#75 PR 4):
+
+    - ``eval_card_excerpt`` — the small Card subset rendered by the site
+      and covered by the v2 signed payload. Populated during the 48h
+      dual-publish window alongside ``output_card_json``.
+    - ``eval_artifact_manifest_hash`` — blake3 hex of the canonical-JSON
+      manifest produced by ``EvalArtifactPublisher.publish()`` (PR 3).
+      Signed under v2; covers the Hermes forensic trail by hash.
+    - ``eval_artifact_bundle_url`` / ``eval_artifact_manifest_url`` —
+      Hippius s3:// URIs for the encrypted bundle and signed manifest.
+      Live in the UNSIGNED response envelope (per Q4 contract — URLs
+      rotate as Hippius CIDs garbage-collect; we anchor integrity on
+      the manifest hash, not the URL identity).
+    - ``eval_output_schema_version`` — routing hint the validator's
+      ``_SIGNED_KEYS_BY_VERSION`` dispatcher reads to pick the right
+      key set. Defaults to 1 so historical rows verify under the v1
+      keyset; v1.1.0 publisher writes 2 when
+      ``CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true``.
     """
     await conn.execute(
         """
@@ -594,8 +618,14 @@ async def insert_eval_run(
             polaris_run_id, task_json, output_card_json, output_card_hash,
             score_parts, weighted_score, ran_at, duration_ms, errors,
             cathedral_signature, polaris_verified, polaris_attestation,
-            trace_json, polaris_manifest
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            trace_json, polaris_manifest,
+            eval_card_excerpt, eval_artifact_manifest_hash,
+            eval_artifact_bundle_url, eval_artifact_manifest_url,
+            eval_output_schema_version
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?
+        )
         """,
         (
             id,
@@ -617,6 +647,11 @@ async def insert_eval_run(
             json.dumps(polaris_attestation) if polaris_attestation is not None else None,
             json.dumps(trace_json) if trace_json is not None else None,
             json.dumps(polaris_manifest) if polaris_manifest is not None else None,
+            json.dumps(eval_card_excerpt) if eval_card_excerpt is not None else None,
+            eval_artifact_manifest_hash,
+            eval_artifact_bundle_url,
+            eval_artifact_manifest_url,
+            int(eval_output_schema_version),
         ),
     )
     await conn.commit()

@@ -6,6 +6,7 @@ Errors always render as `{"detail": "<string>"}` (Section 9 lock #3).
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -554,7 +555,43 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
     cathedral signature against the same byte-exact projection (CRIT-7).
     `merkle_epoch` is post-anchor metadata; it is NOT covered by the
     cathedral signature (see `cathedral.v1_types.canonical_json`).
+
+    v1.1.0 schema split (cathedralai/cathedral#75 PR 4): when the row
+    carries `eval_output_schema_version=2`, the wire-shape is the v2
+    projection — drops `output_card` + `output_card_hash` +
+    `polaris_verified` (these are still in the DB row for legacy
+    reads during the dual-publish window but NOT on the wire for v2
+    records). Adds `eval_card_excerpt` and `eval_artifact_manifest_hash`
+    (signed). `eval_artifact_bundle_url` + `eval_artifact_manifest_url`
+    live in the UNSIGNED envelope — they're addressable hints, not
+    part of the signed bytes.
     """
+    schema_version = int(run.get("eval_output_schema_version") or 1)
+    if schema_version == 2:
+        excerpt_raw = run.get("eval_card_excerpt")
+        if isinstance(excerpt_raw, str):
+            try:
+                eval_card_excerpt = json.loads(excerpt_raw)
+            except (json.JSONDecodeError, TypeError):
+                eval_card_excerpt = None
+        else:
+            eval_card_excerpt = excerpt_raw
+        return {
+            "id": run["id"],
+            "agent_id": sub["id"],
+            "agent_display_name": sub["display_name"],
+            "card_id": sub["card_id"],
+            "eval_card_excerpt": eval_card_excerpt,
+            "eval_artifact_manifest_hash": run.get("eval_artifact_manifest_hash"),
+            "weighted_score": run["weighted_score"],
+            "ran_at": run["ran_at"],
+            "eval_output_schema_version": 2,
+            "cathedral_signature": run["cathedral_signature"],
+            # Unsigned envelope — URLs are hints, not trust anchors.
+            "eval_artifact_bundle_url": run.get("eval_artifact_bundle_url"),
+            "eval_artifact_manifest_url": run.get("eval_artifact_manifest_url"),
+            "merkle_epoch": run.get("merkle_epoch"),
+        }
     return {
         "id": run["id"],
         "agent_id": sub["id"],

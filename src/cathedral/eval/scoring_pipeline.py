@@ -56,6 +56,12 @@ _FIRST_MOVER_PENALTY_MULTIPLIER = FIRST_MOVER_PENALTY_MULTIPLIER
 _TIER_A_MULTIPLIER = 1.10
 
 
+# Re-export from v2_payload (no-publisher-cycle module) so existing
+# imports work; the keyset is canonical there. Cross-branch contract
+# with validator-compat's _SIGNED_KEYS_BY_VERSION (validator/pull_loop.py).
+from cathedral.eval.v2_payload import _SIGNED_KEYS_BY_VERSION  # noqa: F401
+
+
 @dataclass(frozen=True)
 class ScoredEval:
     """Result the orchestrator persists into `eval_runs`."""
@@ -98,6 +104,13 @@ class EvalSigner:
         return base64.b64encode(self._sk.sign(payload)).decode("ascii")
 
 
+# Back-compat alias — _card_excerpt was inline here in PR 4 v1; moved
+# to v2_payload.card_excerpt in v2 so cross-branch tests can import
+# without the publisher cycle. Keep the alias for any existing internal
+# callers; new code should import from cathedral.eval.v2_payload.
+from cathedral.eval.v2_payload import card_excerpt as _card_excerpt  # noqa: F401
+
+
 def card_hash(card: Card | dict[str, Any]) -> str:
     """`blake3(canonical_json(card))` — used as the leaf input.
 
@@ -133,11 +146,24 @@ async def score_and_sign(
     polaris_attestation: dict[str, Any] | None = None,
     trace_json: dict[str, Any] | None = None,
     polaris_manifest: dict[str, Any] | None = None,
+    published_artifact: Any | None = None,
 ) -> ScoredEval:
     """Run preflight + scorer, apply first-mover delta, build + sign EvalRun.
 
     Inserts the row into `eval_runs` and updates `agent_submissions`
     rolling score + rank. Returns the persisted record for caller use.
+
+    v1.1.0 (cathedralai/cathedral#75 PR 4): when
+    ``published_artifact`` is supplied (an
+    ``EvalArtifactPublisher.PublishedArtifact``) AND
+    ``CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true``, the signed payload
+    follows the v2 schema (``eval_card_excerpt`` +
+    ``eval_artifact_manifest_hash`` instead of ``output_card`` +
+    ``output_card_hash``) and the eval_run carries
+    ``eval_output_schema_version=2``. Otherwise the v1 wire shape is
+    emitted unchanged. The DB row always populates BOTH column
+    families when the artifact is available so the env flag can be
+    flipped at any time without re-running evals.
     """
     errors = list(polaris_errors)
     miner_hotkey = submission["miner_hotkey"]
@@ -273,17 +299,67 @@ async def score_and_sign(
     # alongside this bump. Keep version=1 emission during the dual-write
     # cutover window so v1.1.0 validators continue verifying.
     display_name = submission.get("display_name", "")
-    public_payload = {
-        "id": eval_run_id,
-        "agent_id": str(submission_id),
-        "agent_display_name": display_name,
-        "card_id": card_id,
-        "output_card": output_card_json,
-        "output_card_hash": output_card_hash,
-        "weighted_score": weighted_final,
-        "polaris_verified": polaris_verified,
-        "ran_at": ran_at_iso,
-    }
+
+    # v1.1.0 PR 4: eval-output schema version dispatch.
+    # CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true tells the publisher to
+    # emit the new shape. Validators dispatch per-record via the
+    # `eval_output_schema_version` field on the wire (see
+    # validator/pull_loop.py _SIGNED_KEYS_BY_VERSION).
+    import os as _os
+
+    emit_v2 = (
+        _os.environ.get("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD", "").lower() == "true"
+        and published_artifact is not None
+    )
+    schema_version = 2 if emit_v2 else 1
+
+    # Build the v2 excerpt by default whenever the artifact bundle was
+    # produced — the DB column lights up in BOTH schemas so the env
+    # flag can be flipped without re-running evals. The excerpt is the
+    # subset of fields the site renders. Cheap to compute; we already
+    # have the dict.
+    eval_card_excerpt: dict[str, Any] | None = None
+    if published_artifact is not None:
+        # Project the scored card down to the display surface. The
+        # full card stays in output_card_json for legacy v1 reads
+        # during the dual-publish window.
+        eval_card_excerpt = _card_excerpt(output_card_json)
+
+    if emit_v2:
+        # v2 keyset (cathedralai/cathedral#75 my answer to Q2 on the
+        # issue thread): drops output_card, output_card_hash,
+        # polaris_verified. Adds eval_card_excerpt and
+        # eval_artifact_manifest_hash. The schema_version field is
+        # itself NOT in the signed bytes — it's a routing hint
+        # validators use to pick the right keyset. Tampering with it
+        # routes verification to a non-matching keyset and the sig
+        # fails by mismatch on the underlying bytes (per the
+        # validator's _SIGNED_KEYS_BY_VERSION docstring).
+        public_payload: dict[str, Any] = {
+            "id": eval_run_id,
+            "agent_id": str(submission_id),
+            "agent_display_name": display_name,
+            "card_id": card_id,
+            "eval_card_excerpt": eval_card_excerpt,
+            "eval_artifact_manifest_hash": published_artifact.manifest_hash,
+            "weighted_score": weighted_final,
+            "ran_at": ran_at_iso,
+        }
+    else:
+        # v1 keyset — unchanged from the legacy shape. CONTRACTS.md
+        # §1.10 + §4.2 + L8. The signature covers the projection;
+        # `merkle_epoch` is appended post-anchor and excluded.
+        public_payload = {
+            "id": eval_run_id,
+            "agent_id": str(submission_id),
+            "agent_display_name": display_name,
+            "card_id": card_id,
+            "output_card": output_card_json,
+            "output_card_hash": output_card_hash,
+            "weighted_score": weighted_final,
+            "polaris_verified": polaris_verified,
+            "ran_at": ran_at_iso,
+        }
     signature = signer.sign(public_payload)
 
     await repository.insert_eval_run(
@@ -308,6 +384,21 @@ async def score_and_sign(
         polaris_attestation=polaris_attestation,
         trace_json=trace_json,
         polaris_manifest=polaris_manifest,
+        # Dual-publish: write the v2 column family on every eval where
+        # the artifact was produced, regardless of which payload was
+        # signed. Flipping CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD swaps the
+        # wire emission without requiring a re-run.
+        eval_card_excerpt=eval_card_excerpt,
+        eval_artifact_manifest_hash=(
+            published_artifact.manifest_hash if published_artifact is not None else None
+        ),
+        eval_artifact_bundle_url=(
+            published_artifact.bundle_url if published_artifact is not None else None
+        ),
+        eval_artifact_manifest_url=(
+            published_artifact.manifest_url if published_artifact is not None else None
+        ),
+        eval_output_schema_version=schema_version,
     )
 
     # Update rolling 30-day average + rank

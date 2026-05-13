@@ -197,7 +197,18 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     errors              TEXT,
     cathedral_signature TEXT NOT NULL,
     polaris_verified    INTEGER NOT NULL DEFAULT 0,
-    polaris_attestation TEXT
+    polaris_attestation TEXT,
+    -- v1.1.0 eval-output schema split (cathedralai/cathedral#75 PR 4).
+    -- Populated alongside output_card_json during the 48h dual-publish
+    -- window. After cutover (CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true)
+    -- new rows still set output_card_json + output_card_hash for
+    -- back-compat reads on a hypothetical v1.0.x validator pulling
+    -- mid-cutover. v1.2.0 will drop the legacy columns.
+    eval_card_excerpt           TEXT,
+    eval_artifact_manifest_hash TEXT,
+    eval_artifact_bundle_url    TEXT,
+    eval_artifact_manifest_url  TEXT,
+    eval_output_schema_version  INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_eval_submission_time
     ON eval_runs(submission_id, ran_at DESC);
@@ -279,6 +290,34 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     # alongside the trace. Nullable; only populated for v2 runs.
     if "polaris_manifest" not in cols:
         await conn.execute("ALTER TABLE eval_runs ADD COLUMN polaris_manifest TEXT")
+
+    # v1.1.0 eval-output schema split (cathedralai/cathedral#75 PR 4).
+    # Splits the legacy `output_card_json` blob into three addressable
+    # fields so the validator pull layer can reference the (small)
+    # excerpt, the (signed) manifest hash, and the (unsigned) bundle
+    # URL independently.
+    #
+    # The split is additive: legacy rows keep their `output_card_json`,
+    # `output_card_hash` columns; new rows populate both legacy AND new
+    # fields during the 48h dual-publish window so a CATHEDRAL_EMIT_V2
+    # flip is reversible without re-running evals.
+    #
+    # `eval_output_schema_version` is the routing hint the validator's
+    # `_SIGNED_KEYS_BY_VERSION` dispatcher (validator-compat branch)
+    # reads to pick the right key set. Defaults to 1 so historical rows
+    # verify under the v1 keyset.
+    if "eval_card_excerpt" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_card_excerpt TEXT")
+    if "eval_artifact_manifest_hash" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_artifact_manifest_hash TEXT")
+    if "eval_artifact_bundle_url" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_artifact_bundle_url TEXT")
+    if "eval_artifact_manifest_url" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_artifact_manifest_url TEXT")
+    if "eval_output_schema_version" not in cols:
+        await conn.execute(
+            "ALTER TABLE eval_runs ADD COLUMN eval_output_schema_version INTEGER NOT NULL DEFAULT 1"
+        )
 
     # agent_submissions: attestation_mode branching (polaris/tee/unverified).
     # Existing rows default to 'polaris' so back-compat with pre-attestation
