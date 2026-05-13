@@ -86,6 +86,22 @@ optimization (its loop reads `next_since` as before) but it does not
 break. There is no operator action required for the cross-version
 window.
 
+## Deploy sequencing
+
+v1.1.0 introduces a tuple cursor `(ran_at, id)` on `/v1/leaderboard/recent`. v1.0.7 validators send only a single-string `since` cursor and cannot express a sub-millisecond offset. Under burst writes (>page-size rows sharing a millisecond), v1.0.7 validators will silently drop the rows past the first page boundary.
+
+Resolved at the binary level — v1.1.0 validators always send the tuple cursor and drain bursts correctly. The constraint is only present during the rollover window when the publisher is v1.1.0 but some validators are still v1.0.7.
+
+**Required deploy order:**
+
+1. Deploy v1.1.0 publisher to production (Railway auto-deploys on push to main).
+2. Wait 2-4 hours for the fleet to auto-cycle. PM2-driven validators pull main, restart, pick up v1.1.0. You can confirm by querying taostats: `GET https://api.taostats.io/api/validator/weights/latest/v1?netuid=39` — count rows with `version_key=1001000`.
+3. Once a clear majority of validators report `version_key=1001000`, enable cadence orchestrator (env flag `CATHEDRAL_CADENCE_ENABLED=true` on the publisher).
+
+**Why this ordering matters:** Cadence orchestrator writes batches of rows that can share millisecond timestamps. Until validators are on v1.1.0, they will silently lose rows in those bursts. If cadence is enabled before fleet rollover, miners will see successful submissions that never appear on the leaderboard.
+
+**Rollback procedure if cadence is enabled too early:** Set `CATHEDRAL_CADENCE_ENABLED=false`. Publisher reverts to one-eval-per-submission. Validators catch up via UPSERT dedupe on subsequent polls.
+
 ## Rollback procedure
 
 If a v1.1.0 validator misbehaves and you need to roll back, pin the
@@ -135,3 +151,5 @@ validators already carry the version-aware verifier dispatcher, so
 when v1.2.0 lands the validator only needs the new key set registered
 in `_SIGNED_KEYS_BY_VERSION` — no validator action expected at the
 operator level.
+
+Cadence orchestrator (from the miner-side rewrite) must be gated until the validator fleet completes the v1.1.0 rollover — see Deploy sequencing above.
