@@ -664,7 +664,7 @@ class SshHermesRunner:
         if self.config.pinned_model:
             envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
-        cmd = " ".join(envs) + f" hermes chat -q -Q {shlex.quote(prompt)}"
+        cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(prompt)}"
 
         stdout, stderr, exit_status = await self._run_remote(
             conn,
