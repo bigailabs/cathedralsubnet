@@ -22,7 +22,7 @@ Per-eval lifecycle (``docs/HERMES.md`` § L.1):
    ``hermes_cli/profiles.py:540-617`` ``--clone-all`` is the
    canonical way to fork a profile and is faster than the zip
    roundtrip.
-4. Issue ``HERMES_HOME=<eval_profile> hermes chat -q "<task>"``.
+4. Issue ``HERMES_HOME=<eval_profile> hermes chat -q -Q "<task>"``.
    ``hermes chat -q`` runs the full agentic loop (tool calls, skill
    execution, multiple model turns, memory reads) and writes the
    full forensic trail (session JSON, request dumps, SQLite rows) to
@@ -664,7 +664,7 @@ class SshHermesRunner:
         if self.config.pinned_model:
             envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
-        cmd = " ".join(envs) + f" hermes chat -q {shlex.quote(prompt)}"
+        cmd = " ".join(envs) + f" hermes chat -q -Q {shlex.quote(prompt)}"
 
         stdout, stderr, exit_status = await self._run_remote(
             conn,
