@@ -59,12 +59,37 @@ async def run_weight_loop(
             # V1: blend pulled scores from publisher (canonical going forward).
             # Pulled scores override legacy claim-derived scores per hotkey.
             try:
-                pulled = await latest_pulled_score_per_hotkey(conn, since_days=30)
+                # 7-day window matches the cadence of card refresh + miner
+                # iteration. A 30-day mean penalises a miner who fixed a
+                # schema bug yesterday by averaging in last week's zero
+                # scores; in practice that anti-recency bias is what's
+                # been pinning legitimate masons near zero weight. 7d
+                # lets a debugged miner climb within a day of shipping
+                # a real card, while still smoothing out single-eval
+                # noise. Full time-decayed mean is the next iteration.
+                pulled = await latest_pulled_score_per_hotkey(conn, since_days=7)
                 scores.update(pulled)
             except Exception as ex:
                 logger.debug("pulled_scores_unavailable", error=str(ex))
             uid_by_hotkey = metagraph.hotkey_to_uid()
+            # Observability: surface which hotkeys we know vs. which the
+            # metagraph drops. Without this you only see `count=N` in the
+            # weights_set line and have no idea why N is smaller than the
+            # number of masons producing scored cards. Drops are usually
+            # test hotkeys that never registered on chain.
+            unmapped = [hk for hk in scores if hk not in uid_by_hotkey]
             raw = [(uid_by_hotkey[hk], s) for hk, s in scores.items() if hk in uid_by_hotkey]
+            positive = [(uid, s) for uid, s in raw if s > 0]
+            logger.info(
+                "weights_pre_burn",
+                total_hotkeys=len(scores),
+                mapped_hotkeys=len(raw),
+                positive_hotkeys=len(positive),
+                unmapped_count=len(unmapped),
+                # 8-char prefixes keep logs scannable without leaking too much
+                unmapped_sample=[hk[:8] for hk in unmapped[:5]],
+                positive_sample=[(uid, round(s, 3)) for uid, s in positive[:5]],
+            )
             burned = apply_burn(
                 raw,
                 burn_uid=burn_uid,
@@ -79,6 +104,9 @@ async def run_weight_loop(
                 "weights_set",
                 count=len(normalized),
                 status=status.value,
+                # Surface which uids actually shipped so operators can sanity-
+                # check against the on-chain weight set without diffing logs.
+                uids=[uid for uid, _ in normalized][:20],
             )
         except Exception as e:
             logger.warning("weight_loop_error", error=str(e))
