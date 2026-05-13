@@ -808,11 +808,12 @@ async def test_absolute_hermes_home_still_shlex_quoted(
 
 
 @pytest.mark.asyncio
-async def test_hermes_z_passes_max_turns_1_by_default(runner_config, eval_task, submission):
-    """``hermes -z`` is invoked with ``--max-turns 1`` by default to keep
-    the Card workload single-turn — multi-turn loops let models (DeepSeek
-    V3.1 in particular) drift into conversational research replies
-    instead of structured JSON output.
+async def test_hermes_z_invocation_omits_max_turns(runner_config, eval_task, submission):
+    """``hermes -z`` is invoked WITHOUT ``--max-turns`` because Hermes
+    0.13.0 does not expose that flag. The v1.1.3 attempt to pass it
+    caused every invocation to exit with code 2 and Hermes's usage
+    banner. Single-turn output is controlled via soul.md content +
+    Hermes's natural ``-z`` one-shot semantics, not a CLI flag.
     """
     captured_cmds: list[str] = []
     card_json = {"id": "eu-ai-act", "no_legal_advice": True}
@@ -852,18 +853,21 @@ async def test_hermes_z_passes_max_turns_1_by_default(runner_config, eval_task, 
     invoke_cmds = [c for c in captured_cmds if "hermes -z" in c]
     assert invoke_cmds, f"no hermes -z invocation captured; saw: {captured_cmds!r}"
     invoke_cmd = invoke_cmds[0]
-    assert "--max-turns 1" in invoke_cmd, (
-        "hermes -z must default to --max-turns 1 for deterministic Card "
-        f"JSON output; got: {invoke_cmd!r}"
+    assert "--max-turns" not in invoke_cmd, (
+        "hermes -z must NOT pass --max-turns (Hermes 0.13.0 rejects it "
+        f"with exit 2); got: {invoke_cmd!r}"
     )
 
 
 @pytest.mark.asyncio
-async def test_hermes_z_max_turns_can_be_disabled_via_config(
+async def test_hermes_z_max_turns_config_is_inert_on_0_13_0(
     ssh_key_path, bundle_output_dir, eval_task, submission
 ):
-    """``eval_max_turns=None`` omits the flag entirely — operator escape
-    hatch for the rare workload that legitimately needs the agentic loop.
+    """``eval_max_turns`` config field is retained for forward compat
+    (later Hermes versions may add ``--max-turns``) but is ignored on
+    Hermes 0.13.0. Setting it should NOT cause the flag to appear in
+    the invocation. v1.1.5 removed the flag entirely after Hermes
+    0.13.0 rejected it with exit 2.
     """
     cfg = SshHermesRunnerConfig(
         ssh_private_key_path=ssh_key_path,
