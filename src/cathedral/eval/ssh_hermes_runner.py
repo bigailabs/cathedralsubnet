@@ -656,14 +656,15 @@ class SshHermesRunner:
         # is our isolation; --source doesn't add anything we don't already
         # have. Omit it.
         #
-        # ``--max-turns N`` caps the agentic loop. The Card workload is a
-        # single-turn JSON emit; allowing multi-turn loops lets the model
-        # drift into conversational research replies instead of structured
-        # output (DeepSeek-V3.1 in particular). Default config caps at 1.
-        flags = ""
-        if self.config.eval_max_turns is not None:
-            flags = f" --max-turns {int(self.config.eval_max_turns)}"
-        cmd = " ".join(envs) + f" hermes -z{flags} {shlex.quote(prompt)}"
+        # Note: Hermes 0.13.0 does NOT expose a ``--max-turns`` CLI flag
+        # (confirmed via the binary's own usage banner returned on
+        # iota1's RTX 4090 box on 2026-05-13 when v1.1.3 attempted to
+        # pass it). Single-turn JSON output is forced via soul.md
+        # content + Hermes's natural ``-z`` one-shot semantics, not a
+        # CLI flag. ``eval_max_turns`` config is retained for forward
+        # compat (later Hermes versions may add the flag) but is
+        # ignored on 0.13.0.
+        cmd = " ".join(envs) + f" hermes -z {shlex.quote(prompt)}"
 
         stdout, stderr, exit_status = await self._run_remote(
             conn,
