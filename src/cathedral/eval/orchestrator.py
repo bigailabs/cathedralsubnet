@@ -142,6 +142,52 @@ class EvalOrchestrator:
         assert self._fixed_polaris is not None
         return self._fixed_polaris
 
+    async def _maybe_publish_bundle(
+        self,
+        trace_bundle: Any,
+        log: Any,
+    ) -> Any | None:
+        """If the runner produced a TraceBundle on disk AND the v2 emit
+        flag is set, upload it to Hippius + sign the manifest. Returns
+        the PublishedArtifact for score_and_sign to consume, or None.
+
+        Failures here MUST NOT crash the eval — we log + return None so
+        the eval still scores under v1 wire shape. The whole point of
+        the dual-publish window is that v2 publishing is best-effort
+        during the transition; the canonical record is still the v1
+        signed payload until cutover.
+        """
+        if trace_bundle is None:
+            return None
+        import os as _os
+
+        if _os.environ.get("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD", "").lower() != "true":
+            # Flag's off — skip the Hippius round-trip entirely.
+            # Storage cost matters here: every eval would otherwise
+            # upload an encrypted tar.gz on every cadence tick even
+            # though we're not emitting v2 on the wire.
+            return None
+        try:
+            from cathedral.eval.bundle_publisher import EvalArtifactPublisher
+
+            publisher = EvalArtifactPublisher(hippius=self.hippius, signer=self.signer)
+            artifact = await publisher.publish(trace_bundle)
+            log.info(
+                "eval_artifact_published",
+                eval_id=artifact.eval_id,
+                manifest_hash=artifact.manifest_hash,
+            )
+            return artifact
+        except Exception as exc:
+            # Best-effort. v1 emission continues; the eval scores under
+            # the legacy wire shape and the trace bundle stays on local
+            # disk for retry on the next cadence tick.
+            log.warning(
+                "eval_artifact_publish_failed",
+                error=str(exc),
+            )
+            return None
+
     async def evaluate_one(self, submission: dict[str, Any]) -> None:
         log = logger.bind(submission_id=submission["id"], card_id=submission["card_id"])
 
@@ -274,6 +320,18 @@ class EvalOrchestrator:
                 if polaris_result.attestation is not None
                 else None
             )
+
+            # v1.1.0 PR 5: when the runner produced a TraceBundle on disk
+            # (currently only SshHermesRunner does this), upload it to
+            # Hippius and sign the manifest. score_and_sign uses the
+            # returned PublishedArtifact to emit a v2 signed payload
+            # when CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true; until that flag
+            # flips, the artifact is published but the v1 wire shape is
+            # still emitted (dual-publish window).
+            published_artifact = await self._maybe_publish_bundle(
+                polaris_result.trace_bundle, log
+            )
+
             await score_and_sign(
                 self.db,
                 submission=submission,
@@ -292,6 +350,7 @@ class EvalOrchestrator:
                 # PolarisDeployRunner, which always populates them.
                 trace_json=polaris_result.trace,
                 polaris_manifest=polaris_result.manifest,
+                published_artifact=published_artifact,
             )
             log.info("eval_run_complete", epoch=epoch, round_index=round_index)
         finally:
@@ -367,6 +426,11 @@ async def run_eval_loop(
     sem = asyncio.Semaphore(max_concurrent)
 
     while not stop.is_set():
+        # v1.1.0 PR 5 — cadence scheduler. Two queue sources:
+        #   1. status='queued' rows (first eval after submit)
+        #   2. status='ranked' rows whose card cadence window expired
+        # Merged into one batch per tick, capped at max_concurrent.
+        # First-eval rows prioritized (they're new miners waiting).
         try:
             queued = await repository.queued_submissions(db, limit=max_concurrent)
         except aiosqlite.Error as e:
@@ -374,9 +438,31 @@ async def run_eval_loop(
             await _sleep_or_stop(stop, poll_interval_secs)
             continue
 
-        if not queued:
+        remaining = max_concurrent - len(queued)
+        due: list[dict[str, Any]] = []
+        if remaining > 0:
+            try:
+                due = await repository.submissions_due_for_cadence(
+                    db,
+                    now=datetime.now(UTC),
+                    limit=remaining,
+                )
+            except aiosqlite.Error as e:
+                logger.warning("eval_loop_cadence_query_failed", error=str(e))
+                # Cadence query failure should not block queued processing
+                due = []
+
+        batch = list(queued) + list(due)
+
+        if not batch:
             await _sleep_or_stop(stop, poll_interval_secs)
             continue
+
+        logger.info(
+            "eval_loop_batch",
+            queued_count=len(queued),
+            cadence_count=len(due),
+        )
 
         async def _process(s: dict[str, Any]) -> None:
             async with sem:
@@ -385,7 +471,7 @@ async def run_eval_loop(
                 except Exception as e:
                     logger.exception("eval_one_crashed", submission_id=s["id"], error=str(e))
 
-        await asyncio.gather(*[_process(s) for s in queued])
+        await asyncio.gather(*[_process(s) for s in batch])
 
 
 async def _sleep_or_stop(stop: asyncio.Event, secs: float) -> None:

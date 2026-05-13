@@ -891,6 +891,55 @@ async def queued_submissions(conn: aiosqlite.Connection, limit: int = 4) -> list
     return [_row_to_submission(r, cur.description) for r in rows]
 
 
+async def submissions_due_for_cadence(
+    conn: aiosqlite.Connection,
+    *,
+    now: datetime,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    """Pick `ranked` submissions whose cadence window has expired.
+
+    cathedralai/cathedral#75 PR 5: each card has a
+    `refresh_cadence_hours` (defaults 24). A `ranked` submission is
+    due for a fresh eval when `now - max(eval_runs.ran_at) >=
+    card.refresh_cadence_hours`. Each cadence tick produces a new
+    eval_runs row tied to the same submission_id — 1:N over time.
+
+    The query joins agent_submissions → card_definitions for the
+    cadence, then LEFT JOINs eval_runs for the latest ran_at per
+    submission. Sorted by "most overdue first" so a backlog drains
+    in priority order.
+
+    `discovery` rows are excluded (they never run evals). `rejected`
+    rows are excluded (the cadence loop doesn't resurrect them; a
+    miner resubmits to re-enter). Only `ranked` is in scope here;
+    `queued` is handled by ``queued_submissions`` (first-eval path).
+    """
+    now_iso = now.isoformat()
+    cur = await conn.execute(
+        """
+        SELECT sub.*,
+               COALESCE(MAX(er.ran_at), sub.submitted_at) AS _last_eval_ran_at,
+               cd.refresh_cadence_hours AS _refresh_cadence_hours
+        FROM agent_submissions sub
+        JOIN card_definitions cd ON cd.id = sub.card_id
+        LEFT JOIN eval_runs er ON er.submission_id = sub.id
+        WHERE sub.status = 'ranked'
+          AND sub.attestation_mode IN ('polaris', 'polaris-deploy', 'ssh-probe', 'tee', 'bundle')
+          AND sub.discovery_only = 0
+        GROUP BY sub.id
+        HAVING (
+            julianday(?) - julianday(COALESCE(MAX(er.ran_at), sub.submitted_at))
+        ) * 24.0 >= cd.refresh_cadence_hours
+        ORDER BY _last_eval_ran_at ASC
+        LIMIT ?
+        """,
+        (now_iso, limit),
+    )
+    rows = await cur.fetchall()
+    return [_row_to_submission(r, cur.description) for r in rows]
+
+
 def _row_to_eval_run(
     row: aiosqlite.Row | tuple[Any, ...],
     description: list[tuple[Any, ...]] | Any,

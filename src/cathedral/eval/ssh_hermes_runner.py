@@ -386,6 +386,7 @@ class SshHermesRunner:
                 probe_attestation=None,  # no signed envelope on this path
                 trace=trace.to_dict(),
                 manifest=None,  # PR 3 sets the signed Hippius manifest URL
+                trace_bundle=bundle,  # PR 5: orchestrator picks this up
             )
 
         except SshHermesError as exc:
