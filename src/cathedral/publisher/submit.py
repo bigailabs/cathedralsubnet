@@ -195,7 +195,8 @@ async def submit_agent(
 
     # ----- ssh-probe coordinates (v2 free tier) --------------------------
     # When attestation_mode='ssh-probe', the miner runs Hermes themselves
-    # and Cathedral SSHs in to invoke `hermes -z "<task>"` as a subprocess.
+    # and Cathedral SSHs in to invoke `hermes chat -q "<task>"` (v1.1.7;
+    # was `hermes -z` pre-v1.1.7) as a subprocess.
     # ssh_host + ssh_user are required; ssh_port defaults to 22. For
     # every other mode, ssh_* fields are silently ignored — we don't
     # want a typo in a free-tier field to block a Tier A submission.

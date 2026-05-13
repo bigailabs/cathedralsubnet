@@ -129,7 +129,7 @@ v1 mines on **BYO compute**. You run Hermes on your own box; Cathedral observes 
 
 ### `attestation_mode=ssh-probe` (recommended, BYO infrastructure)
 
-Bring your own infrastructure — install [Hermes Agent](https://hermes-agent.nousresearch.com/) on any box (laptop, home server, VPS, dedicated) and configure it with your LLM provider key. Authorize Cathedral by adding our public SSH key to `~/.ssh/authorized_keys` for the user Cathedral logs in as. For each eval, Cathedral SSHs in, snapshots your Hermes profile into an isolated `cathedral-eval-<round>` profile, runs `hermes -z "<task>"` against that profile, captures the full forensic trail (state.db slice, session log, request dumps, skills, memory), tears down the eval profile, and signs the bundle.
+Bring your own infrastructure — install [Hermes Agent](https://hermes-agent.nousresearch.com/) on any box (laptop, home server, VPS, dedicated) and configure it with your LLM provider key. Authorize Cathedral by adding our public SSH key to `~/.ssh/authorized_keys` for the user Cathedral logs in as. For each eval, Cathedral SSHs in, snapshots your Hermes profile into an isolated `cathedral-eval-<round>` profile, runs `hermes chat -q "<task>"` (full agentic loop with tool calls and skill execution) against that profile, captures the full forensic trail (state.db slice, session log, request dumps, skills, memory), tears down the eval profile, and signs the bundle.
 
 Submit with:
 

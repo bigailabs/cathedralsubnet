@@ -546,9 +546,9 @@ def test_submit_ssh_probe_without_hermes_port_succeeds(publisher_client, alice_k
     """In v1.1.0, ssh-probe requires only ssh_host + ssh_user.
 
     The legacy hermes_port field is deprecated (issue #75 — Hermes is
-    CLI-shaped, not HTTP-shaped; Cathedral invokes ``hermes -z`` over
-    SSH rather than curling an HTTP endpoint). A submission with no
-    hermes_port now returns 202; the row persists hermes_port=NULL.
+    CLI-shaped, not HTTP-shaped; Cathedral invokes ``hermes chat -q``
+    over SSH rather than curling an HTTP endpoint). A submission with
+    no hermes_port now returns 202; the row persists hermes_port=NULL.
     """
     bundle = make_valid_bundle(soul_md="# ssh-probe no port\n")
     resp = _submit_ssh_probe(

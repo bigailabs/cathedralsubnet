@@ -22,10 +22,12 @@ Per-eval lifecycle (``docs/HERMES.md`` § L.1):
    ``hermes_cli/profiles.py:540-617`` ``--clone-all`` is the
    canonical way to fork a profile and is faster than the zip
    roundtrip.
-4. Issue ``HERMES_HOME=<eval_profile> hermes -z "<task>" --source
-   cathedral-eval-<round>``. ``hermes -z`` writes the full forensic
-   trail (session JSON, request dumps, SQLite rows) to the eval
-   profile (``docs/HERMES.md`` § A.1).
+4. Issue ``HERMES_HOME=<eval_profile> hermes chat -q "<task>"``.
+   ``hermes chat -q`` runs the full agentic loop (tool calls, skill
+   execution, multiple model turns, memory reads) and writes the
+   full forensic trail (session JSON, request dumps, SQLite rows) to
+   the eval profile (``docs/HERMES.md`` § A.1). v1.1.7 switched from
+   ``hermes -z`` (one-shot, no agentic loop) — see PR for context.
 5. Snapshot the eval profile's ``state.db`` via SQLite's backup() API
    over SSH (matches ``hermes_cli/backup.py:_safe_copy_db`` — consistent
    WAL snapshot without explicit ``PRAGMA wal_checkpoint(TRUNCATE)``).
@@ -42,7 +44,7 @@ Per-eval lifecycle (``docs/HERMES.md`` § L.1):
    Primary profile untouched throughout.
 
 The runner returns a ``PolarisRunResult`` whose ``output_card_json``
-is the parsed Card from ``hermes -z`` stdout. **The trace bundle is
+is the parsed Card from ``hermes chat -q`` stdout. **The trace bundle is
 written to local disk** (``self.config.bundle_output_dir``) and the
 runner does NOT upload it — PR 3 (Hippius adapter) handles upload.
 The bundle path is returned via the ``trace`` field for the
@@ -89,7 +91,7 @@ logger = structlog.get_logger(__name__)
 # the CLI invocation path. Old codes that no longer happen (``hermes_unhealthy``,
 # ``package_failed``) are intentionally absent. New codes:
 #   * ``hermes_install_invalid``: `~/.hermes/` missing / unreadable
-#   * ``hermes_invocation_failed``: `hermes -z` exited non-zero
+#   * ``hermes_invocation_failed``: `hermes chat -q` exited non-zero
 #   * ``hermes_output_malformed``: stdout didn't parse as a Card JSON
 #   * ``profile_clone_failed``: `hermes profile create --clone-all` failed
 #   * ``bundle_assembly_failed``: client-side tar.gz / hash step failed
@@ -140,7 +142,11 @@ class SshHermesRunnerConfig:
     ssh_private_key_path: str
     bundle_output_dir: str
     connect_timeout_secs: float = 10.0
-    eval_timeout_secs: float = 600.0
+    # Bumped 120s -> 300s in v1.1.7 to give the ``hermes chat -q`` agentic
+    # loop room. One-shot ``hermes -z`` was fast (model.generate once);
+    # the full loop has to think, call tools (URL fetch, BLAKE3 hash,
+    # etc.), wait for tool results, and think again, so 120s was tight.
+    eval_timeout_secs: float = 300.0
     transfer_timeout_secs: float = 120.0
     connect_retries: int = 3
     connect_retry_initial_secs: float = 1.0
@@ -157,11 +163,6 @@ class SshHermesRunnerConfig:
     # same model — neutralizes one source of cross-miner variance.
     pinned_model: str | None = None
     pinned_provider: str | None = None
-    # Cap on agentic-loop turns for ``hermes -z``. The baseline Card
-    # workload is a single-turn JSON emit; multi-turn loops let models
-    # like DeepSeek-V3.1 drift into conversational research replies
-    # instead of structured output. ``None`` omits the flag entirely.
-    eval_max_turns: int | None = 1
 
 
 # --------------------------------------------------------------------------
@@ -274,7 +275,7 @@ class HermesVisitTrace:
 
 
 class SshHermesRunner:
-    """v1.1.0 prober. CLI-shaped, ``hermes -z`` over SSH.
+    """v1.1.0 prober. CLI-shaped, ``hermes chat -q`` over SSH (v1.1.7).
 
     The miner registers ``ssh_host``, ``ssh_port``, ``ssh_user`` with
     their submission (``hermes_port`` is deprecated in v1.1.0 per
@@ -360,8 +361,10 @@ class SshHermesRunner:
             await self._clone_profile(conn, eval_profile)
             trace.eval_profile_name = eval_profile
 
-            # 4. Run `hermes -z`. Captures stdout (= Card JSON) and the
-            #    eval profile's full forensic trail to disk on miner box.
+            # 4. Run `hermes chat -q`. Captures stdout (= Card JSON) and
+            #    the eval profile's full forensic trail (including the
+            #    agentic loop's tool calls + skill executions) to disk
+            #    on miner box.
             t_invoke = time.monotonic()
             card_json, hermes_stdout = await self._invoke_hermes(
                 conn,
@@ -639,10 +642,20 @@ class SshHermesRunner:
         eval_round: str,
         resolved_home: str,
     ) -> tuple[dict[str, Any], str]:
-        """Run `hermes -z "<prompt>"` against the eval profile. Returns
-        (parsed_card_json, raw_stdout). ``hermes -z`` writes plain text
-        to stdout — no JSON envelope — so we instruct the agent in the
-        prompt to emit a fenced JSON block, then parse it.
+        """Run `hermes chat -q "<prompt>"` against the eval profile.
+        Returns (parsed_card_json, raw_stdout).
+
+        v1.1.7: switched from ``hermes -z`` (one-shot
+        ``model.generate(prompt)`` with no tool calls, no skill
+        execution, no agentic loop) to ``hermes chat -q`` (full agentic
+        loop: tool calls, skill execution, multiple model turns,
+        memory reads). Cathedral's value prop is verifying the agent
+        actually did work (fetching source URLs, calling tools,
+        reasoning across turns) — ``-z`` stripped exactly that out.
+
+        ``hermes chat -q`` writes plain text to stdout — no JSON
+        envelope — so we still instruct the agent in the prompt to
+        emit a fenced JSON block, then parse it.
         """
         hermes_home = self._profile_path(eval_profile, resolved_home)
         envs = [f"HERMES_HOME={shlex.quote(hermes_home)}"]
@@ -651,20 +664,7 @@ class SshHermesRunner:
         if self.config.pinned_model:
             envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
-        # `--source` is on the `chat` subparser but `-z` always stamps
-        # source=cli (docs/HERMES.md open question 5). HERMES_HOME-per-eval
-        # is our isolation; --source doesn't add anything we don't already
-        # have. Omit it.
-        #
-        # Note: Hermes 0.13.0 does NOT expose a ``--max-turns`` CLI flag
-        # (confirmed via the binary's own usage banner returned on
-        # iota1's RTX 4090 box on 2026-05-13 when v1.1.3 attempted to
-        # pass it). Single-turn JSON output is forced via soul.md
-        # content + Hermes's natural ``-z`` one-shot semantics, not a
-        # CLI flag. ``eval_max_turns`` config is retained for forward
-        # compat (later Hermes versions may add the flag) but is
-        # ignored on 0.13.0.
-        cmd = " ".join(envs) + f" hermes -z {shlex.quote(prompt)}"
+        cmd = " ".join(envs) + f" hermes chat -q {shlex.quote(prompt)}"
 
         stdout, stderr, exit_status = await self._run_remote(
             conn,
@@ -675,14 +675,20 @@ class SshHermesRunner:
         if exit_status != 0:
             raise SshHermesError(
                 "hermes_invocation_failed",
-                f"hermes -z exited {exit_status} for eval_round={eval_round}: {stderr[:300]}",
+                (
+                    f"hermes chat -q exited {exit_status} for "
+                    f"eval_round={eval_round}: {stderr[:300]}"
+                ),
             )
 
         card_json = _extract_card_json(stdout)
         if card_json is None:
             raise SshHermesError(
                 "hermes_output_malformed",
-                f"hermes -z stdout had no parseable Card JSON; first 200 chars: {stdout[:200]!r}",
+                (
+                    "hermes chat -q stdout had no parseable Card JSON; "
+                    f"first 200 chars: {stdout[:200]!r}"
+                ),
             )
         return card_json, stdout
 
@@ -864,7 +870,7 @@ class SshHermesRunner:
             except Exception:  # noqa: S110 — best-effort cleanup
                 pass
 
-            # Also preserve the raw `hermes -z` stdout for audit
+            # Also preserve the raw `hermes chat -q` stdout for audit
             (local_root / "hermes_stdout.txt").write_text(hermes_stdout, encoding="utf-8")
 
             # Compute proof-of-loop from what we collected
@@ -967,7 +973,7 @@ def _content_type_for(rel_path: str) -> str:
 def _extract_card_json(stdout: str) -> dict[str, Any] | None:
     """Pull a Card JSON out of the agent's stdout.
 
-    `hermes -z` returns plain text. We instruct the agent (via the
+    `hermes chat -q` returns plain text. We instruct the agent (via the
     prompt) to emit the Card as a fenced ```json block. Strategy:
     look for the LAST balanced JSON object in stdout. If the agent
     emits the card in a fenced block, the parser finds it; if it

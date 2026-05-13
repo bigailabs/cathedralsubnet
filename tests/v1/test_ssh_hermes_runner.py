@@ -312,8 +312,8 @@ async def test_happy_path_returns_card_and_bundle(runner_config, eval_task, subm
         # state.db snapshot via python3 -c
         if "python3 -c" in cmd:
             return _mk_run_result()
-        # `hermes -z`
-        if "hermes -z" in cmd:
+        # `hermes chat -q`
+        if "hermes chat -q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         # rm -f cleanup
         if cmd.startswith("rm -f"):
@@ -557,7 +557,7 @@ async def test_profile_clone_failed_when_clone_returns_nonzero(
 
 
 # --------------------------------------------------------------------------
-# Hermes -z output is malformed (no parseable Card JSON)
+# Hermes chat -q output is malformed (no parseable Card JSON)
 # --------------------------------------------------------------------------
 
 
@@ -576,7 +576,7 @@ async def test_hermes_output_malformed_when_no_json_in_stdout(runner_config, eva
             return _mk_run_result()
         if "hermes profile create" in cmd:
             return _mk_run_result()
-        if "hermes -z" in cmd:
+        if "hermes chat -q" in cmd:
             return _mk_run_result(stdout="I cannot produce a card today, sorry.")
         if "hermes profile delete" in cmd:
             return _mk_run_result()
@@ -629,7 +629,7 @@ async def test_manifest_shape_matches_spec(runner_config, eval_task, submission)
             return _mk_run_result()
         if "python3 -c" in cmd:
             return _mk_run_result()
-        if "hermes -z" in cmd:
+        if "hermes chat -q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -706,7 +706,7 @@ async def test_verify_command_resolves_tilde_to_absolute_path(runner_config, eva
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes -z" in cmd:
+        if "hermes chat -q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -773,7 +773,7 @@ async def test_absolute_hermes_home_still_shlex_quoted(
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes -z" in cmd:
+        if "hermes chat -q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -808,12 +808,12 @@ async def test_absolute_hermes_home_still_shlex_quoted(
 
 
 @pytest.mark.asyncio
-async def test_hermes_z_invocation_omits_max_turns(runner_config, eval_task, submission):
-    """``hermes -z`` is invoked WITHOUT ``--max-turns`` because Hermes
-    0.13.0 does not expose that flag. The v1.1.3 attempt to pass it
-    caused every invocation to exit with code 2 and Hermes's usage
-    banner. Single-turn output is controlled via soul.md content +
-    Hermes's natural ``-z`` one-shot semantics, not a CLI flag.
+async def test_hermes_chat_q_invocation_no_legacy_flags(runner_config, eval_task, submission):
+    """v1.1.7: the eval invocation uses ``hermes chat -q`` (full agentic
+    loop with tool calls + skills) and does NOT carry any of the old
+    ``-z``-era flags. Specifically: no bare ``-z`` token and no
+    ``--max-turns`` (Hermes ``chat -q`` has no such flag; the old
+    ``eval_max_turns`` config field was dropped in v1.1.7).
     """
     captured_cmds: list[str] = []
     card_json = {"id": "eu-ai-act", "no_legal_advice": True}
@@ -827,7 +827,7 @@ async def test_hermes_z_invocation_omits_max_turns(runner_config, eval_task, sub
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes -z" in cmd:
+        if "hermes chat -q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -850,31 +850,27 @@ async def test_hermes_z_invocation_omits_max_turns(runner_config, eval_task, sub
             submission=submission,
         )
 
-    invoke_cmds = [c for c in captured_cmds if "hermes -z" in c]
-    assert invoke_cmds, f"no hermes -z invocation captured; saw: {captured_cmds!r}"
+    invoke_cmds = [c for c in captured_cmds if "hermes chat -q" in c]
+    assert invoke_cmds, f"no hermes chat -q invocation captured; saw: {captured_cmds!r}"
     invoke_cmd = invoke_cmds[0]
     assert "--max-turns" not in invoke_cmd, (
-        "hermes -z must NOT pass --max-turns (Hermes 0.13.0 rejects it "
-        f"with exit 2); got: {invoke_cmd!r}"
+        f"hermes chat -q must NOT pass --max-turns; got: {invoke_cmd!r}"
+    )
+    # Sanity: should not contain the legacy ``-z`` token as a flag.
+    # (``-q`` is fine — that's the new one — and ``-z`` should be gone.)
+    assert " -z " not in invoke_cmd and not invoke_cmd.endswith(" -z"), (
+        f"hermes chat -q invocation must not carry the legacy -z flag; got: {invoke_cmd!r}"
     )
 
 
 @pytest.mark.asyncio
-async def test_hermes_z_max_turns_config_is_inert_on_0_13_0(
-    ssh_key_path, bundle_output_dir, eval_task, submission
-):
-    """``eval_max_turns`` config field is retained for forward compat
-    (later Hermes versions may add ``--max-turns``) but is ignored on
-    Hermes 0.13.0. Setting it should NOT cause the flag to appear in
-    the invocation. v1.1.5 removed the flag entirely after Hermes
-    0.13.0 rejected it with exit 2.
+async def test_hermes_invocation_uses_chat_q_not_z(runner_config, eval_task, submission):
+    """v1.1.7 regression guard: the eval invocation is ``hermes chat -q``
+    (full agentic loop with tool calls + skills), NOT ``hermes -z``
+    (one-shot ``model.generate(prompt)`` with no agent loop, no tool
+    calls, no skill execution). ``-z`` stripped exactly the
+    verifiable-work signal Cathedral exists to score.
     """
-    cfg = SshHermesRunnerConfig(
-        ssh_private_key_path=ssh_key_path,
-        bundle_output_dir=bundle_output_dir,
-        eval_max_turns=None,
-    )
-
     captured_cmds: list[str] = []
     card_json = {"id": "eu-ai-act", "no_legal_advice": True}
     conn = MagicMock()
@@ -887,7 +883,7 @@ async def test_hermes_z_max_turns_config_is_inert_on_0_13_0(
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes -z" in cmd:
+        if "hermes chat -q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -900,7 +896,7 @@ async def test_hermes_z_max_turns_config_is_inert_on_0_13_0(
     fake_asyncssh.Error = Exception
     fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
 
-    runner = SshHermesRunner(cfg)
+    runner = SshHermesRunner(runner_config)
     with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
         await runner.run(
             bundle_bytes=b"",
@@ -910,9 +906,17 @@ async def test_hermes_z_max_turns_config_is_inert_on_0_13_0(
             submission=submission,
         )
 
-    invoke_cmds = [c for c in captured_cmds if "hermes -z" in c]
-    assert invoke_cmds
-    assert "--max-turns" not in invoke_cmds[0]
+    # Must have a `hermes chat -q` invocation
+    chat_q_cmds = [c for c in captured_cmds if "hermes chat -q" in c]
+    assert chat_q_cmds, f"expected a hermes chat -q invocation; captured: {captured_cmds!r}"
+
+    # Must NOT have a bare ``hermes -z`` (one-shot) invocation anywhere
+    bare_z_cmds = [
+        c
+        for c in captured_cmds
+        if " hermes -z " in c or c.startswith("hermes -z ") or c.endswith(" hermes -z")
+    ]
+    assert not bare_z_cmds, f"v1.1.7 must not invoke hermes -z anywhere; saw: {bare_z_cmds!r}"
 
 
 # --------------------------------------------------------------------------
