@@ -664,7 +664,22 @@ class SshHermesRunner:
         if self.config.pinned_model:
             envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
-        cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(prompt)}"
+        # Cathedral always wraps the card_definition's task_template with a
+        # JSON-only output contract. Without this, models with tool access
+        # branch into research-mode (writing files, narrating progress) instead
+        # of emitting the inline Card JSON. The agent's soul.md describes the
+        # schema; this prefix is the imperative reminder bound to THIS call.
+        wrapped_prompt = (
+            "Output EXACTLY one JSON object matching the Cathedral Card schema "
+            "from your soul.md. No prose, no file writes, no narration. The "
+            "first character of your response MUST be '{' and the last MUST be "
+            "'}'. Do not write files, do not list directories, do not say "
+            "'I've compiled' or 'see the full report' — just emit the JSON.\n\n"
+            "Task:\n"
+            f"{prompt}"
+        )
+
+        cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(wrapped_prompt)}"
 
         stdout, stderr, exit_status = await self._run_remote(
             conn,
