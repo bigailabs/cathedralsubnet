@@ -67,7 +67,13 @@ deploy mode):
 
 ## What needs operator attention
 
-Nothing required. Two optional considerations:
+**Deploy sequencing is required during the rollover window** — see
+"Deploy sequencing" below. The cross-version window is otherwise
+binary-compatible (v1.0.7 validators continue functioning against a
+v1.1.0 publisher), but cadence orchestration MUST stay gated until the
+fleet has rolled forward.
+
+Two optional considerations beyond that:
 
 - **Observability.** After upgrading, you can confirm a validator is
   on v1.1.0 by querying
@@ -81,10 +87,12 @@ Nothing required. Two optional considerations:
   tick keeps catch-up bursts bounded at ~8 MB / 30s in the worst case.
 
 A v1.0.7 validator that has not yet upgraded continues to function
-against a v1.1.0 publisher. It does NOT get the saturation-pull
-optimization (its loop reads `next_since` as before) but it does not
-break. There is no operator action required for the cross-version
-window.
+against a v1.1.0 publisher AS LONG AS cadence orchestration stays
+disabled. It does NOT get the saturation-pull optimization (its loop
+reads `next_since` as before), and under a cadence burst that writes
+>page-size rows sharing one millisecond it silently drops the rows
+past the first page boundary — which is why the Deploy sequencing
+below requires the fleet to roll forward before cadence is enabled.
 
 ## Deploy sequencing
 
@@ -142,14 +150,26 @@ show `pull_loop_tick` with an `inner_pulls` field. v1.0.7 emitted only
 `fetched` and `persisted`; the new field surfaces when the saturation
 inner-pull kicks in.
 
-## v1.2.0 preview
+## v2 signed payload — gated, not active at merge
 
-A future release will introduce `eval_output_schema_version` in signed
-payloads to support the new eval data model from the miner-side rewrite
-(card excerpt / artifact manifest / encrypted bundle URL). v1.1.0
-validators already carry the version-aware verifier dispatcher, so
-when v1.2.0 lands the validator only needs the new key set registered
-in `_SIGNED_KEYS_BY_VERSION` — no validator action expected at the
-operator level.
+v1.1.0 ships the v2 signed payload shape and the new eval data model
+(card excerpt / artifact manifest / encrypted bundle URL) in code, but
+gated behind two publisher env flags so the wire shape on merge day is
+identical to v1.0.7:
 
-Cadence orchestrator (from the miner-side rewrite) must be gated until the validator fleet completes the v1.1.0 rollover — see Deploy sequencing above.
+- `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD` — when `true`, `score_and_sign`
+  produces v2 records (drops `output_card` + `output_card_hash` +
+  `polaris_verified`, adds `eval_card_excerpt` +
+  `eval_artifact_manifest_hash`). Default `false`.
+- `CATHEDRAL_CADENCE_ENABLED` — when `true`, the eval orchestrator
+  honors `card_definitions.refresh_cadence_hours` and re-evaluates
+  submissions periodically. Default `false`.
+
+A v1.1.0 validator already carries the version-aware verifier
+dispatcher (`_SIGNED_KEYS_BY_VERSION[2]` registered with the locked v2
+field set), so when the publisher flips `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD`,
+verification routes correctly with no validator action.
+
+See "Deploy sequencing" above for the order in which these flags
+should be enabled — flipping cadence before the validator fleet has
+rolled forward causes silent row loss on the v1.0.7 stragglers.
