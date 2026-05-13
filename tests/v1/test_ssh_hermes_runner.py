@@ -300,6 +300,9 @@ async def test_happy_path_returns_card_and_bundle(runner_config, eval_task, subm
         # `hermes --version`
         if "hermes --version" in cmd:
             return _mk_run_result(stdout="hermes 0.13.0\n")
+        # `printf "%s" "$HOME"` (tilde-expansion bootstrap)
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
         # install check
         if "test -d" in cmd and "test -r" in cmd:
             return _mk_run_result()
@@ -479,6 +482,8 @@ async def test_hermes_install_invalid_when_home_missing(runner_config, eval_task
     def _route(cmd, **kwargs):
         if "hermes --version" in cmd:
             return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
         if "test -d" in cmd:
             return _mk_run_result(stderr="missing", exit_status=1)
         return _mk_run_result()
@@ -520,6 +525,8 @@ async def test_profile_clone_failed_when_clone_returns_nonzero(
     def _route(cmd, **kwargs):
         if "hermes --version" in cmd:
             return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
         if "test -d" in cmd and "test -r" in cmd:
             return _mk_run_result()
         if "hermes profile create" in cmd:
@@ -563,6 +570,8 @@ async def test_hermes_output_malformed_when_no_json_in_stdout(runner_config, eva
     def _route(cmd, **kwargs):
         if "hermes --version" in cmd:
             return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
         if "test -d" in cmd and "test -r" in cmd:
             return _mk_run_result()
         if "hermes profile create" in cmd:
@@ -612,6 +621,8 @@ async def test_manifest_shape_matches_spec(runner_config, eval_task, submission)
     def _route(cmd, **kwargs):
         if "hermes --version" in cmd:
             return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
         if "test -d" in cmd and "test -r" in cmd:
             return _mk_run_result()
         if "hermes profile create" in cmd:
@@ -663,6 +674,241 @@ async def test_manifest_shape_matches_spec(runner_config, eval_task, submission)
     # Bundle hash format: hex
     assert len(result.trace["bundle_blake3"]) == 64
     assert all(c in "0123456789abcdef" for c in result.trace["bundle_blake3"])
+
+
+# --------------------------------------------------------------------------
+# Tilde-expansion regression (v1.1.3): the prober verify command MUST
+# NOT pass `'~/.hermes'` to bash — single quotes suppress tilde expansion
+# and every miner with default hermes_home then fails install validation.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_command_resolves_tilde_to_absolute_path(runner_config, eval_task, submission):
+    """Default ``hermes_home='~/.hermes'`` must be resolved to an absolute
+    path via remote ``$HOME`` before being shlex-quoted into ``test -d``.
+
+    The bug this guards against: ``shlex.quote('~/.hermes')`` yields
+    ``'~/.hermes'`` and bash does not expand ``~`` inside single quotes,
+    so ``test -d`` returns 1 with empty stderr and every miner on the
+    default install hits ``hermes_install_invalid`` on the first visit.
+    """
+    captured_cmds: list[str] = []
+
+    card_json = {"id": "eu-ai-act", "no_legal_advice": True}
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+
+    def _route(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        if "hermes --version" in cmd:
+            return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
+        if "hermes -z" in cmd:
+            return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
+        return _mk_run_result()
+
+    conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    sftp = _mk_sftp()
+    conn.start_sftp_client = MagicMock(return_value=sftp)
+
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.connect = AsyncMock(return_value=conn)
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+    runner = SshHermesRunner(runner_config)
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        await runner.run(
+            bundle_bytes=b"",
+            bundle_hash="x" * 64,
+            task=eval_task,
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+        )
+
+    # Find the install-verify command (`test -d ... && test -r ...`).
+    verify_cmds = [c for c in captured_cmds if "test -d" in c and "test -r" in c and "tar" not in c]
+    assert verify_cmds, f"no verify command captured; saw: {captured_cmds!r}"
+    verify_cmd = verify_cmds[0]
+
+    # Regression: must NOT contain the literal single-quoted tilde path.
+    assert "'~/.hermes'" not in verify_cmd, (
+        f"verify command still contains single-quoted tilde, bash won't expand: {verify_cmd!r}"
+    )
+    assert "'~'" not in verify_cmd
+
+    # Must contain the absolute path resolved from remote $HOME.
+    assert "/home/cathedral-probe/.hermes" in verify_cmd, (
+        f"verify command should reference the absolute resolved hermes_home: {verify_cmd!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_absolute_hermes_home_still_shlex_quoted(
+    ssh_key_path, bundle_output_dir, eval_task, submission
+):
+    """No-shell-injection regression: when ``hermes_home`` is already an
+    absolute path (no leading ``~/``), we still pass it through
+    ``shlex.quote`` so unusual characters can't break out of ``test -d``.
+    """
+    cfg = SshHermesRunnerConfig(
+        ssh_private_key_path=ssh_key_path,
+        bundle_output_dir=bundle_output_dir,
+        # Absolute path with a space — shlex.quote should single-quote it.
+        hermes_home="/opt/weird path/hermes",
+    )
+
+    captured_cmds: list[str] = []
+    card_json = {"id": "eu-ai-act", "no_legal_advice": True}
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+
+    def _route(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        if "hermes --version" in cmd:
+            return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
+        if "hermes -z" in cmd:
+            return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
+        return _mk_run_result()
+
+    conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    sftp = _mk_sftp()
+    conn.start_sftp_client = MagicMock(return_value=sftp)
+
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.connect = AsyncMock(return_value=conn)
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+    runner = SshHermesRunner(cfg)
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        await runner.run(
+            bundle_bytes=b"",
+            bundle_hash="x" * 64,
+            task=eval_task,
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+        )
+
+    verify_cmds = [c for c in captured_cmds if "test -d" in c and "test -r" in c and "tar" not in c]
+    assert verify_cmds, f"no verify command captured; saw: {captured_cmds!r}"
+    verify_cmd = verify_cmds[0]
+
+    # shlex.quote wraps the path-with-space in single quotes — the
+    # whole point of the no-regression check.
+    assert "'/opt/weird path/hermes'" in verify_cmd, (
+        f"absolute path should be shlex-quoted to defend against unusual chars: {verify_cmd!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hermes_z_passes_max_turns_1_by_default(runner_config, eval_task, submission):
+    """``hermes -z`` is invoked with ``--max-turns 1`` by default to keep
+    the Card workload single-turn — multi-turn loops let models (DeepSeek
+    V3.1 in particular) drift into conversational research replies
+    instead of structured JSON output.
+    """
+    captured_cmds: list[str] = []
+    card_json = {"id": "eu-ai-act", "no_legal_advice": True}
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+
+    def _route(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        if "hermes --version" in cmd:
+            return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
+        if "hermes -z" in cmd:
+            return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
+        return _mk_run_result()
+
+    conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    sftp = _mk_sftp()
+    conn.start_sftp_client = MagicMock(return_value=sftp)
+
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.connect = AsyncMock(return_value=conn)
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+    runner = SshHermesRunner(runner_config)
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        await runner.run(
+            bundle_bytes=b"",
+            bundle_hash="x" * 64,
+            task=eval_task,
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+        )
+
+    invoke_cmds = [c for c in captured_cmds if "hermes -z" in c]
+    assert invoke_cmds, f"no hermes -z invocation captured; saw: {captured_cmds!r}"
+    invoke_cmd = invoke_cmds[0]
+    assert "--max-turns 1" in invoke_cmd, (
+        "hermes -z must default to --max-turns 1 for deterministic Card "
+        f"JSON output; got: {invoke_cmd!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hermes_z_max_turns_can_be_disabled_via_config(
+    ssh_key_path, bundle_output_dir, eval_task, submission
+):
+    """``eval_max_turns=None`` omits the flag entirely — operator escape
+    hatch for the rare workload that legitimately needs the agentic loop.
+    """
+    cfg = SshHermesRunnerConfig(
+        ssh_private_key_path=ssh_key_path,
+        bundle_output_dir=bundle_output_dir,
+        eval_max_turns=None,
+    )
+
+    captured_cmds: list[str] = []
+    card_json = {"id": "eu-ai-act", "no_legal_advice": True}
+    conn = MagicMock()
+    conn.close = MagicMock()
+    conn.wait_closed = AsyncMock(return_value=None)
+
+    def _route(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        if "hermes --version" in cmd:
+            return _mk_run_result(stdout="hermes 0.13.0\n")
+        if "$HOME" in cmd:
+            return _mk_run_result(stdout="/home/cathedral-probe")
+        if "hermes -z" in cmd:
+            return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
+        return _mk_run_result()
+
+    conn.run = AsyncMock(side_effect=lambda cmd, **kw: _route(cmd, **kw))
+    sftp = _mk_sftp()
+    conn.start_sftp_client = MagicMock(return_value=sftp)
+
+    fake_asyncssh = MagicMock()
+    fake_asyncssh.connect = AsyncMock(return_value=conn)
+    fake_asyncssh.Error = Exception
+    fake_asyncssh.PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+    runner = SshHermesRunner(cfg)
+    with patch.dict(sys.modules, {"asyncssh": fake_asyncssh}):
+        await runner.run(
+            bundle_bytes=b"",
+            bundle_hash="x" * 64,
+            task=eval_task,
+            miner_hotkey="5Test" + "x" * 43,
+            submission=submission,
+        )
+
+    invoke_cmds = [c for c in captured_cmds if "hermes -z" in c]
+    assert invoke_cmds
+    assert "--max-turns" not in invoke_cmds[0]
 
 
 # --------------------------------------------------------------------------

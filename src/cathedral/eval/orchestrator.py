@@ -328,9 +328,7 @@ class EvalOrchestrator:
             # when CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true; until that flag
             # flips, the artifact is published but the v1 wire shape is
             # still emitted (dual-publish window).
-            published_artifact = await self._maybe_publish_bundle(
-                polaris_result.trace_bundle, log
-            )
+            published_artifact = await self._maybe_publish_bundle(polaris_result.trace_bundle, log)
 
             await score_and_sign(
                 self.db,
@@ -596,6 +594,16 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
             bundle_dir = (
                 os.environ.get("CATHEDRAL_BUNDLE_OUTPUT_DIR") or "/var/lib/cathedral/eval-bundles"
             )
+            # ``CATHEDRAL_HERMES_MAX_TURNS`` controls the agentic loop cap
+            # for ``hermes -z``. Default is 1 (single-turn JSON emit). Set
+            # to ``0`` or empty string to omit the flag entirely.
+            _max_turns_raw = os.environ.get("CATHEDRAL_HERMES_MAX_TURNS", "1").strip()
+            _max_turns: int | None
+            if not _max_turns_raw or _max_turns_raw == "0":
+                _max_turns = None
+            else:
+                _max_turns = int(_max_turns_raw)
+
             return SshHermesRunner(
                 SshHermesRunnerConfig(
                     ssh_private_key_path=ssh_key_path,
@@ -609,6 +617,7 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
                     ),
                     pinned_model=os.environ.get("CATHEDRAL_HERMES_PINNED_MODEL"),
                     pinned_provider=os.environ.get("CATHEDRAL_HERMES_PINNED_PROVIDER"),
+                    eval_max_turns=_max_turns,
                 )
             )
 
