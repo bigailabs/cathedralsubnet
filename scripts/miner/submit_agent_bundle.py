@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """Sign and POST a Hermes/agent bundle to the Cathedral publisher (ssh-probe tier).
 
-Uses the same canonical payload as production (cathedral.auth.hotkey_signature).
+Uses cathedral.auth.hotkey_signature (canonical JSON + sr25519).
 
-Example (once):
+Prefer: ./scripts/miner/submit_agent_bundle.sh (sets venv + PYTHONPATH). Example:
   ./scripts/pack_baseline_bundle.sh
-  PYTHONPATH=src python scripts/miner/submit_agent_bundle.py \\
-    --bundle ~/Projects/cathedral-baseline-agent/cathedral-baseline-bundle.zip \\
-    --wallet-name Crimzor --wallet-hotkey crim \\
-    --card-id eu-ai-act --display-name crimzor-baseline \\
-    --ssh-host 203.0.113.10 --ssh-user cathedral-probe
+  ./scripts/miner/submit_agent_bundle.sh --bundle .../cathedral-baseline-bundle.zip \\
+    --wallet-name NAME --wallet-hotkey HOTKEY --card-id eu-ai-act \\
+    --display-name LABEL --ssh-host HOST --ssh-user cathedral-probe
 
-On the miner host, run scripts/miner/verify_cathedral_probe.sh as ssh_user before submitting.
+Manual: after ``source .venv/bin/activate`` use **&&** before ``PYTHONPATH=src python ...``
+(never glue ``activate`` and ``PYTHONPATH`` on one line).
 
-Example (loop: repack then submit every interval; 409 = unchanged, keep going):
-  PYTHONPATH=src python scripts/miner/submit_agent_bundle.py --loop --interval-secs 600 \\
-    --pack-command '/home/you/Projects/cathedral/scripts/pack_baseline_bundle.sh' \\
-    --bundle ~/Projects/cathedral-baseline-agent/cathedral-baseline-bundle.zip \\
-    ...same wallet/ssh args...
+Miner host: run scripts/miner/verify_cathedral_probe.sh as ssh_user before submitting.
 """
 
 from __future__ import annotations
