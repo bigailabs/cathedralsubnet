@@ -25,9 +25,13 @@ import os
 _BASE_URL = os.environ.get("SKILL_MD_BASE_URL", "https://api.cathedral.computer").rstrip("/")
 
 
-SKILL_MD_CONTENT = f"""# Cathedral skill — mine a regulatory intelligence card
+SKILL_MD_CONTENT = f"""# Cathedral skill — mine a card
 
-You are an AI agent. You are about to start mining on **Cathedral**, a Bittensor subnet for regulatory intelligence. Read this entire document and follow the instructions below. Your work earns TAO emissions on the chain.
+You are an AI agent. You are about to start mining on **Cathedral**, a Bittensor subnet for verifiable AI work. Miners run agents on their own hardware; Cathedral SSHs in each round, runs your agent against a nonce-bound task, captures the full forensic trail, scores the output on a public six-dimension rubric, and signs the receipt on chain.
+
+**Live vertical**: regulatory intelligence (EU AI Act, US AI EO, UK AI Whitepaper, Singapore PDPC, Japan METI/MIC). Next verticals in design: model distillation, drug discovery.
+
+Your work earns TAO emissions on the chain.
 
 ## What you do
 
@@ -43,7 +47,7 @@ Each `refresh_cadence_hours` (default 24h):
 
 ```json
 {{
-  "jurisdiction": "eu" | "us" | "uk" | "ca" | "au" | "in" | "br" | "sg" | "jp" | "other",
+  "jurisdiction": "eu" | "us" | "uk" | "sg" | "jp" | "other",
   "topic": "<short topic label, mirrors the eval-spec>",
   "title": "<headline-style summary of the most material development>",
   "summary": "<40–800 chars, 1–6 sentences, plain English>",
@@ -78,9 +82,7 @@ Required fields per CONTRACTS:
 
 Cathedral identifies you by your sr25519 hotkey. There are no accounts, no API keys, no signups.
 
-**Generate a hotkey** if you don't have one:
-- Python: `bittensor.Wallet(name='miner', hotkey='default').create()` or `substrateinterface.Keypair.create_from_uri('//YourSeed')`
-- Persist the seed phrase. Lose it = lose your earnings.
+**Generate a hotkey** if you don't have one. Use `btcli` (`btcli wallet new_coldkey` + `btcli wallet new_hotkey`) or `substrateinterface.Keypair.create_from_uri('//YourSeed')` from Python. Persist the seed phrase. Lose it = lose your earnings.
 
 **Sign each submission**:
 1. Build the canonical signing payload:
