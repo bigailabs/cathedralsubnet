@@ -128,6 +128,12 @@ A small CPU-only box. No GPU.
 - **Python 3.11 or 3.12.** Newer Python versions are not yet tested.
 - SQLite (default) or PostgreSQL for the local store. SQLite is fine for v1.
 
+### Networking
+
+- **Inbound: nothing public required.** The validator binds an HTTP admin/health server on `0.0.0.0:9333` by default (configurable via `http.listen_host` / `http.listen_port`). Bind it to `127.0.0.1` if you only want local access, or leave on `0.0.0.0` and firewall it. You do not need this port reachable from the public internet — Cathedral never connects to you. The bearer-protected admin endpoints are for your own ops tooling.
+- **Outbound: HTTPS 443 only.** The validator initiates outbound connections to `api.cathedral.computer` (publisher) and your configured subtensor endpoint. No other outbound dependencies.
+- **No NAT / port-forwarding required.** Unlike miner-style subnets, Cathedral validators don't receive inbound traffic from miners or other validators. Pull-only.
+
 ### What you do NOT need
 
 - A GPU. The validator does no model inference.
@@ -194,6 +200,56 @@ cathedral-validator serve   --config config/testnet.toml
 ```
 
 Operational follow-on (systemd unit, log filtering, weight-status table, recovery): [validator/RUNBOOK.md](validator/RUNBOOK.md).
+
+## FAQ
+
+### Do I need any port open to the public internet?
+
+No. Cathedral never connects back to your validator. The validator binds an HTTP admin/health server on `0.0.0.0:9333` by default (configurable via `http.listen_host` / `http.listen_port`) but that's for your own local ops tooling. Bind it to `127.0.0.1` or firewall it from the public internet. Outbound HTTPS 443 to `api.cathedral.computer` and your subtensor endpoint is the only network requirement.
+
+### Do I need a GPU?
+
+No. The validator does no model inference. A small CPU-only box is the recommended deployment.
+
+### Where do I get `CATHEDRAL_BEARER`? Who do I send it to?
+
+You generate it yourself, locally:
+
+```bash
+export CATHEDRAL_BEARER=$(openssl rand -hex 32)
+```
+
+You don't send it to anyone. The publisher doesn't enforce authentication on `/v1/leaderboard/recent` today — the validator binary just needs the env var set to a non-empty string so the `Authorization` header builds without crashing. Server-side enforcement and per-validator tokens are a later release; tokens will be re-issued then.
+
+### Where do I get the Cathedral and Polaris public keys?
+
+From the JWKS endpoint, served by the publisher:
+
+```bash
+curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json
+```
+
+Use `kid: cathedral-eval-signing` for `CATHEDRAL_PUBLIC_KEY_HEX`. The Polaris key is published in the same document as `kid: polaris-runtime-attestation`. Both are 64-character lowercase hex strings — exactly 64 chars, no leading-zero padding, no whitespace, no quotes. If your copy is a different length, recopy from the URL above; Ed25519 pubkeys cannot be padded.
+
+### What if my pubkey is the wrong length?
+
+You miscopied. Ed25519 pubkeys are 32 random bytes encoded as 64 lowercase hex characters. They cannot be padded with zeros to reach 64 chars — left-padding produces a different point on the curve and every signature verification will silently fail. Re-fetch from the JWKS endpoint above.
+
+### What does the validator actually do?
+
+Polls `https://api.cathedral.computer/v1/leaderboard/recent` every 12s, fetches signed `EvalRun` projections produced by the publisher, verifies the Ed25519 Cathedral signature locally, persists scored evals to a local SQLite store, and sets weights on chain. That's it. No miner connections, no model inference, no decrypting bundles.
+
+### Why doesn't the validator need to verify Polaris attestations directly?
+
+The publisher verifies the Polaris attestation before it signs the `EvalRun` projection. The Cathedral signature you verify locally is the publisher's attestation that *it* verified Polaris. You verify one signature per eval, the publisher's, against the key you pinned in step 2 of the Quickstart.
+
+### How much disk will I grow into?
+
+Scored evals are compact rows (a few KB each). At current throughput (~20 evals/day across all cards), expect a few hundred MB over the first six months. The 50 GB SSD recommendation is mostly headroom for systemd journal, OS, and Bittensor wallet — the validator's own state is small.
+
+### Can I run multiple validators from the same host?
+
+Yes — different `[network]` sections in separate config files, different `listen_port`, different `database_path`. Bittensor validator-binding is per-hotkey, not per-host, so each instance needs its own hotkey registered on the relevant subnet.
 
 ## Future enhancements
 
