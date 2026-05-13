@@ -17,9 +17,11 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import stat
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -61,6 +63,60 @@ class PublisherContext:
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
 
+_DEFAULT_SSH_PROBE_KEY_PATH = "/tmp/cathedral_probe_ed25519"  # noqa: S108
+
+
+def _materialize_ssh_probe_key() -> None:
+    """Write the platform-wide SSH private key from env to disk at startup.
+
+    The Railway publisher container has no SSH private key baked in — it
+    only ships with the *public* key as ``CATHEDRAL_PROBE_SSH_PUBLIC_KEY``.
+    The ``attestation_mode=ssh-probe`` runners (``SshHermesRunner`` and
+    ``SshProbeRunner``) refuse to construct if their
+    ``ssh_private_key_path`` doesn't point at a real file, so without this
+    helper every ssh-probe submission hangs in ``evaluating`` forever.
+
+    Behaviour:
+    - ``CATHEDRAL_PROBE_SSH_PRIVATE_KEY`` unset and no file at
+      ``CATHEDRAL_SSH_KEY_PATH``: log a warning and return. Other
+      attestation modes still work; only ssh-probe is degraded.
+    - Env var set: write to ``CATHEDRAL_SSH_KEY_PATH`` (default
+      ``/tmp/cathedral_probe_ed25519``) with ``0600`` perms.
+    - File already exists with identical content: short-circuit, no
+      rewrite — idempotent across restarts.
+    - File exists with different content: overwrite (operator rotated
+      the key — respect the new value).
+    """
+    target_str = os.environ.get("CATHEDRAL_SSH_KEY_PATH", _DEFAULT_SSH_PROBE_KEY_PATH)
+    target = Path(target_str).expanduser()
+
+    raw = os.environ.get("CATHEDRAL_PROBE_SSH_PRIVATE_KEY")
+    if not raw:
+        if not target.is_file():
+            logger.warning("ssh_probe_key_missing", path=str(target))
+        return
+
+    # Some env-var transports strip trailing newlines; OpenSSH refuses
+    # keys without one.
+    if not raw.endswith("\n"):
+        raw += "\n"
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.is_file():
+        try:
+            existing = target.read_text()
+        except OSError:
+            existing = None
+        if existing == raw:
+            logger.info("ssh_probe_key_already_current", path=str(target))
+            return
+
+    target.write_text(raw)
+    target.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    logger.info("ssh_probe_key_materialized", path=str(target))
+
+
 def build_publisher_app(
     ctx_factory: Any, *, start_eval_loop: bool = True
 ) -> FastAPI:
@@ -74,6 +130,11 @@ def build_publisher_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Must run BEFORE the orchestrator constructs SshHermesRunner /
+        # SshProbeRunner — those raise on a missing private key file at
+        # __init__, which would block every ssh-probe submission. Cheap,
+        # idempotent, safe in test mode (no-op when env is unset).
+        _materialize_ssh_probe_key()
         ctx: PublisherContext = await ctx_factory()
         app.state.ctx = ctx
         # Make ctx visible to the orchestrator's env-resolver. Production
