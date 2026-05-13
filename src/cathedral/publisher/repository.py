@@ -276,7 +276,7 @@ async def list_submissions_for_card(
     """List submissions for a card.
 
     `verified_only=True` (default) restricts to the leaderboard surface:
-    attestation_mode IN ('polaris','tee'), status NOT 'discovery',
+    attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle'), status NOT 'discovery',
     discovery_only=0. The public read endpoints all rely on this filter
     so unverified submissions never appear on the leaderboard, card
     overview, or recent-eval feeds.
@@ -296,7 +296,7 @@ async def list_submissions_for_card(
         cur = await conn.execute(
             f"SELECT * FROM agent_submissions WHERE card_id = ? "
             f"AND status IN ('queued','evaluating','ranked') "
-            f"AND attestation_mode IN ('polaris','tee') "
+            f"AND attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle') "
             f"AND discovery_only = 0 "
             f"ORDER BY {order} LIMIT ? OFFSET ?",
             (card_id, limit, offset),
@@ -337,7 +337,7 @@ async def list_submissions_all(
     if verified_only:
         where = (
             "WHERE status IN ('queued','evaluating','ranked') "
-            "AND attestation_mode IN ('polaris','tee') "
+            "AND attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle') "
             "AND discovery_only = 0"
         )
     else:
@@ -417,7 +417,7 @@ async def count_verified_agents_for_card(conn: aiosqlite.Connection, card_id: st
     cur = await conn.execute(
         "SELECT COUNT(*) FROM agent_submissions WHERE card_id = ? "
         "AND status IN ('queued','evaluating','ranked') "
-        "AND attestation_mode IN ('polaris','tee') "
+        "AND attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle') "
         "AND discovery_only = 0",
         (card_id,),
     )
@@ -760,7 +760,7 @@ async def list_eval_runs_for_card(
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE sub.card_id = ? AND er.ran_at >= ?
               AND sub.status != 'discovery'
-              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
               AND sub.discovery_only = 0
             ORDER BY er.ran_at DESC LIMIT ?
             """,
@@ -773,7 +773,7 @@ async def list_eval_runs_for_card(
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE sub.card_id = ?
               AND sub.status != 'discovery'
-              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
               AND sub.discovery_only = 0
             ORDER BY er.ran_at DESC LIMIT ?
             """,
@@ -839,7 +839,7 @@ async def list_eval_runs_recent(
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE er.ran_at > ?
               AND sub.status != 'discovery'
-              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
               AND sub.discovery_only = 0
             ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
             """,
@@ -853,7 +853,7 @@ async def list_eval_runs_recent(
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE (er.ran_at, er.id) > (?, ?)
               AND sub.status != 'discovery'
-              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
               AND sub.discovery_only = 0
             ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
             """,
@@ -921,7 +921,7 @@ async def best_eval_run_for_card(conn: aiosqlite.Connection, card_id: str) -> di
         JOIN agent_submissions sub ON sub.id = er.submission_id
         WHERE sub.card_id = ?
           AND sub.status != 'discovery'
-          AND sub.attestation_mode IN ('polaris','tee')
+          AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
           AND sub.discovery_only = 0
         ORDER BY er.weighted_score DESC, er.ran_at DESC LIMIT 1
         """,
