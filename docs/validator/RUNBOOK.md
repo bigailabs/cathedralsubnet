@@ -107,24 +107,28 @@ The `cathedral-updater` PM2 app runs `/opt/cathedral/bin/updater.sh` on a 600-se
 
 1. Fetches tags from origin
 2. Compares current HEAD tag to latest `v*` tag (sorted by version)
-3. If different, verifies the tag is GPG-signed by a maintainer key in the local keyring
+3. If different, verifies the tag's SSH signature against `/opt/cathedral/allowed_signers`
 4. Checks out the tag, runs `pip install -e .` in the venv, and `pm2 reload cathedral-validator`
-5. Refuses to update on unsigned or untrusted tags (logs `bad signature` and waits)
+5. Refuses to update on unsigned or untrusted tags (logs `bad signature` + git's stderr, waits)
 
-Operator setup:
+Tags are SSH-signed (`gpg.format=ssh`) by the maintainer's `~/.ssh/id_ed25519`. Verification uses `git -c gpg.ssh.allowedSignersFile=/opt/cathedral/allowed_signers tag -v <tag>` and checks the exit code, not output substrings — SSH and GPG produce different "good signature" phrasing and the older substring-grep implementation never matched SSH tags.
+
+Operator setup is handled by `scripts/provision_validator.sh` (step 7b): it copies `etc/cathedral/allowed_signers` from the repo to `/opt/cathedral/allowed_signers` with `chown cathedral:cathedral` and `chmod 0644`. To refresh it manually:
 
 ```bash
-# import the cathedral maintainer pubkey on each validator host (one time)
-sudo -u cathedral gpg --import /path/to/cathedral-maintainer-pubkey.asc
-sudo -u cathedral gpg --lsign-key cathedral-maintainer@cathedral.computer
+sudo install -o cathedral -g cathedral -m 0644 \
+  /opt/cathedral/source/etc/cathedral/allowed_signers \
+  /opt/cathedral/allowed_signers
 ```
+
+Adding a new maintainer key: append a line to `etc/cathedral/allowed_signers` in the repo (`<principal> <ssh-key-type> <key>`), tag a release, and validators pick it up on the next auto-update.
 
 Release flow (maintainer side):
 
 ```bash
 git tag -s v1.0.8 -m "validator: ..."
 git push origin v1.0.8
-# all validators with the maintainer key pull, install, restart within 10 min
+# all validators with the allowed_signers file installed pull, install, restart within 10 min
 ```
 
 To pin a host to a specific tag (e.g. during incident triage), stop the updater:
@@ -208,7 +212,7 @@ Everything an incoming operator needs:
 4. A new bearer token (rotate on every handoff)
 5. The Polaris public key (same across operators)
 6. The Cathedral signing pubkey (same across operators; from `/.well-known/cathedral-jwks.json`)
-7. The maintainer GPG pubkey for tag verification (same across operators)
+7. The maintainer SSH pubkey for tag verification (shipped in repo at `etc/cathedral/allowed_signers`; installed to `/opt/cathedral/allowed_signers`)
 
 There is no private context beyond credentials. If you find yourself explaining tribal knowledge, file an issue against this runbook.
 

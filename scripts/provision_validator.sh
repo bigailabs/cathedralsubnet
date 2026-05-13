@@ -135,6 +135,17 @@ fi
 sudo -u cathedral "$VENV_DIR/bin/pip" install --upgrade --quiet pip
 sudo -u cathedral "$VENV_DIR/bin/pip" install --quiet -e "$SRC_DIR"
 
+# --- Step 7b: install allowed_signers for updater tag verification ---------
+
+echo "==> step 7b: install /opt/cathedral/allowed_signers"
+ALLOWED_SIGNERS_SRC="$SRC_DIR/etc/cathedral/allowed_signers"
+ALLOWED_SIGNERS_DST="/opt/cathedral/allowed_signers"
+if [[ ! -f "$ALLOWED_SIGNERS_SRC" ]]; then
+  echo "ERROR: allowed_signers not found at $ALLOWED_SIGNERS_SRC" >&2
+  exit 1
+fi
+sudo install -o cathedral -g cathedral -m 0644 "$ALLOWED_SIGNERS_SRC" "$ALLOWED_SIGNERS_DST"
+
 # --- Step 8: render testnet.toml -------------------------------------------
 
 echo "==> step 8: render ${ETC_DIR}/testnet.toml"
