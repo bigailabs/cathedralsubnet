@@ -300,6 +300,240 @@ def test_get_card_feed_reverse_chrono_order(publisher_client):
 
 
 # --------------------------------------------------------------------------
+# GET /v1/cards/{card_id}/attempts  (v1.1.4 — failed-evals surface)
+# --------------------------------------------------------------------------
+
+
+def _seed_card_attempts(
+    db_path: str,
+    *,
+    card_id: str,
+    failed_count: int,
+    successful_count: int,
+    miner_hotkey: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Seed a mix of failed and successful eval_runs for ``card_id``.
+
+    Returns ``(failed_eval_ids, successful_eval_ids)``. Failed evals
+    carry ``_ssh_hermes_failed=true`` and ``weighted_score=0``;
+    successful ones carry ``weighted_score=0.7``.
+
+    Bypasses the submit + scoring pipeline. Real ed25519 signed
+    insertion happens through the publisher in higher-level smoke
+    tests; for shape-pinning purposes we open a sibling connection
+    to the publisher's WAL DB (same pattern as the leaderboard
+    ms-collision tests above).
+    """
+    import asyncio
+    import secrets
+    from datetime import UTC, datetime, timedelta
+
+    from cathedral.publisher import repository
+    from cathedral.validator.db import connect as connect_db
+
+    submission_id = secrets.token_hex(16)
+    hotkey = miner_hotkey or ("5SeededAttempts" + "0" * 33)
+    base = datetime(2026, 5, 12, 22, 0, 0, tzinfo=UTC)
+
+    failed_ids: list[str] = []
+    successful_ids: list[str] = []
+
+    async def _do() -> None:
+        conn = await connect_db(db_path)
+        try:
+            await repository.insert_agent_submission(
+                conn,
+                id=submission_id,
+                miner_hotkey=hotkey,
+                card_id=card_id,
+                bundle_blob_key=f"bundles/{submission_id}.bin",
+                bundle_hash="0" * 64,
+                bundle_size_bytes=1024,
+                encryption_key_id="kek-test",
+                bundle_signature="b64:stub",
+                display_name="Attempts Probe",
+                bio=None,
+                logo_url=None,
+                soul_md_preview=None,
+                metadata_fingerprint=secrets.token_hex(8),
+                similarity_check_passed=True,
+                rejection_reason=None,
+                status="ranked",
+                submitted_at=base,
+                submitted_at_iso="2026-05-12T22:00:00.000Z",
+                first_mover_at=None,
+                attestation_mode="ssh-probe",
+                attestation_verified_at=None,
+                discovery_only=False,
+            )
+            # Failed evals — oldest first so DESC ordering tests are
+            # deterministic (failed ids end up at the back of the DESC list).
+            for i in range(failed_count):
+                rid = f"22222222-2222-4222-8222-{i:012d}"
+                failed_ids.append(rid)
+                ran_at = base + timedelta(seconds=i)
+                ran_at_iso = (
+                    ran_at.strftime("%Y-%m-%dT%H:%M:%S.")
+                    + f"{ran_at.microsecond // 1000:03d}"
+                    + "Z"
+                )
+                await repository.insert_eval_run(
+                    conn,
+                    id=rid,
+                    submission_id=submission_id,
+                    epoch=0,
+                    round_index=0,
+                    polaris_agent_id=f"ssh-hermes:{hotkey[:12]}",
+                    polaris_run_id=f"run-{i}",
+                    task_json={"prompt": "demo"},
+                    output_card_json={
+                        "id": card_id,
+                        "_ssh_hermes_failed": True,
+                        "failure_code": "hermes_install_invalid",
+                        "failure_detail": "publisher returned 502",
+                    },
+                    output_card_hash="f" * 64,
+                    score_parts={},
+                    weighted_score=0.0,
+                    ran_at=ran_at,
+                    ran_at_iso=ran_at_iso,
+                    duration_ms=42,
+                    errors=["hermes_install_invalid: 502"],
+                    cathedral_signature="stub-sig-failed",
+                )
+
+            # Successful evals — written AFTER the failed ones so they
+            # appear FIRST under ORDER BY ran_at DESC.
+            for i in range(successful_count):
+                rid = f"33333333-3333-4333-8333-{i:012d}"
+                successful_ids.append(rid)
+                ran_at = base + timedelta(seconds=failed_count + i)
+                ran_at_iso = (
+                    ran_at.strftime("%Y-%m-%dT%H:%M:%S.")
+                    + f"{ran_at.microsecond // 1000:03d}"
+                    + "Z"
+                )
+                await repository.insert_eval_run(
+                    conn,
+                    id=rid,
+                    submission_id=submission_id,
+                    epoch=0,
+                    round_index=0,
+                    polaris_agent_id="polaris-agent",
+                    polaris_run_id=f"ok-{i}",
+                    task_json={"prompt": "demo"},
+                    output_card_json={"id": card_id},
+                    output_card_hash="a" * 64,
+                    score_parts={"source_quality": 0.7},
+                    weighted_score=0.7,
+                    ran_at=ran_at,
+                    ran_at_iso=ran_at_iso,
+                    duration_ms=100,
+                    errors=None,
+                    cathedral_signature="stub-sig-success",
+                )
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    asyncio.run(_do())
+    return failed_ids, successful_ids
+
+
+def test_get_card_attempts_returns_failed_evals(publisher_app, tmp_path):
+    """v1.1.4: `/attempts` includes rows where `_ssh_hermes_failed=true`
+    and `weighted_score=0`. These are real signed attempts that the
+    leaderboard's empty-state design wants to render (PR #119).
+    """
+    from fastapi.testclient import TestClient
+
+    db_path = str(tmp_path / "publisher.db")
+    with TestClient(publisher_app) as client:
+        failed_ids, _ = _seed_card_attempts(
+            db_path, card_id="eu-ai-act", failed_count=3, successful_count=0
+        )
+        resp = client.get("/v1/cards/eu-ai-act/attempts")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        returned_ids = [item["id"] for item in body["items"]]
+        assert set(failed_ids).issubset(set(returned_ids)), (
+            f"/attempts must include failed evals; got {returned_ids}"
+        )
+        # Verify the failed-eval shape — output_card.failure_code carried.
+        for item in body["items"]:
+            if item["id"] in failed_ids:
+                assert item["weighted_score"] == 0.0
+                assert item["output_card"].get("_ssh_hermes_failed") is True
+                assert item["output_card"].get("failure_code") == "hermes_install_invalid"
+                assert "miner_hotkey" in item
+
+
+def test_get_card_attempts_returns_successful_evals(publisher_app, tmp_path):
+    """v1.1.4: `/attempts` also includes successful evals (score > 0).
+    The endpoint is a superset of `/feed`, not failure-only.
+    """
+    from fastapi.testclient import TestClient
+
+    db_path = str(tmp_path / "publisher.db")
+    with TestClient(publisher_app) as client:
+        _, successful_ids = _seed_card_attempts(
+            db_path, card_id="eu-ai-act", failed_count=0, successful_count=2
+        )
+        resp = client.get("/v1/cards/eu-ai-act/attempts")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        returned_ids = [item["id"] for item in body["items"]]
+        assert set(successful_ids).issubset(set(returned_ids)), (
+            f"/attempts must include successful evals; got {returned_ids}"
+        )
+        # Verify the successful row carries a positive score.
+        for item in body["items"]:
+            if item["id"] in successful_ids:
+                assert item["weighted_score"] > 0
+
+
+def test_get_card_attempts_respects_limit_and_default_20(publisher_app, tmp_path):
+    """v1.1.4: `?limit=N` caps the page; default is 20."""
+    from fastapi.testclient import TestClient
+
+    db_path = str(tmp_path / "publisher.db")
+    with TestClient(publisher_app) as client:
+        _seed_card_attempts(db_path, card_id="eu-ai-act", failed_count=25, successful_count=0)
+
+        # Default — 20.
+        resp_default = client.get("/v1/cards/eu-ai-act/attempts")
+        assert resp_default.status_code == 200, resp_default.text
+        body_default = resp_default.json()
+        assert len(body_default["items"]) == 20, (
+            f"default limit must be 20; got {len(body_default['items'])}"
+        )
+        assert body_default["limit"] == 20
+
+        # Explicit limit=5.
+        resp_5 = client.get("/v1/cards/eu-ai-act/attempts?limit=5")
+        assert resp_5.status_code == 200
+        body_5 = resp_5.json()
+        assert len(body_5["items"]) == 5
+        assert body_5["limit"] == 5
+
+
+def test_get_card_attempts_orders_by_ran_at_desc(publisher_app, tmp_path):
+    """v1.1.4: most recent attempt first (`ORDER BY ran_at DESC`)."""
+    from fastapi.testclient import TestClient
+
+    db_path = str(tmp_path / "publisher.db")
+    with TestClient(publisher_app) as client:
+        _seed_card_attempts(db_path, card_id="eu-ai-act", failed_count=3, successful_count=3)
+        resp = client.get("/v1/cards/eu-ai-act/attempts?limit=10")
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        timestamps = [i["ran_at"] for i in items]
+        assert timestamps == sorted(timestamps, reverse=True), (
+            f"/attempts must be reverse chronological by ran_at; got {timestamps}"
+        )
+
+
+# --------------------------------------------------------------------------
 # GET /v1/leaderboard
 # --------------------------------------------------------------------------
 

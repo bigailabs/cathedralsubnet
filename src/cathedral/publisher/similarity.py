@@ -100,9 +100,7 @@ async def run_similarity_check(
     insert and the submit handler maps to 409.
     """
     # Check 7.1.1 — exact bundle hash collision across hotkeys.
-    existing_bundle = await repository.find_existing_bundle_hash(
-        conn, card_id, bundle_hash
-    )
+    existing_bundle = await repository.find_existing_bundle_hash(conn, card_id, bundle_hash)
     if existing_bundle is not None:
         # Distinguish same-hotkey (covered by UNIQUE index) from
         # cross-hotkey duplicate so the operator dashboard can tell.
@@ -111,9 +109,19 @@ async def run_similarity_check(
         raise SimilarityRejection("exact bundle duplicate")
 
     # Check 7.1.3 — fuzzy display-name collision in the last 7 days.
+    #
+    # We EXCLUDE the submitter's own hotkey from the candidate set. The
+    # rule is meant to stop OTHER miners from squatting the same/similar
+    # display_name; an honest resubmit from the same hotkey (e.g. after
+    # a failed eval) must not have to invent McDEE-v2 / McDEE-v3 / etc
+    # to bypass its own prior rows. Same-hotkey + same-bundle is already
+    # caught by the UNIQUE index, and same-hotkey + different bundle is
+    # exactly what a resubmit looks like.
     norm = normalize_display_name(display_name)
     since = datetime.now(UTC) - timedelta(days=_DISPLAY_NAME_FUZZY_WINDOW_DAYS)
-    recent = await repository.list_recent_display_names(conn, card_id, since)
+    recent = await repository.list_recent_display_names_excluding_hotkey(
+        conn, card_id, since, miner_hotkey
+    )
     for _, other_name in recent:
         other_norm = normalize_display_name(other_name)
         if other_norm == norm:

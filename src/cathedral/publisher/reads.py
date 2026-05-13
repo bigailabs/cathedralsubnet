@@ -291,6 +291,47 @@ async def get_card_feed(
 
 
 # --------------------------------------------------------------------------
+# v1.1.4 GET /v1/cards/{card_id}/attempts — public failed-evals feed
+# --------------------------------------------------------------------------
+
+
+@router.get("/v1/cards/{card_id}/attempts")
+async def get_card_attempts(
+    card_id: str,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=200),
+) -> dict[str, Any]:
+    """Recent eval_runs for a card INCLUDING failed attempts.
+
+    Counterpart to ``GET /v1/cards/{card_id}/feed`` which is the
+    score-leaderboard surface. ``/attempts`` returns the same rows
+    PLUS failed ones (``_ssh_hermes_failed=true`` or
+    ``weighted_score=0``) so the site's empty-state design (PR #119)
+    can show real network activity even before any card scores above
+    zero. Ordered ``ran_at DESC``, default 20 rows.
+
+    Per-row shape matches the existing EvalOutput projection used by
+    ``/feed`` so site renderers stay aligned. The ``miner_hotkey``
+    field is added on top so the site can attribute failed attempts.
+    """
+    ctx: PublisherContext = request.app.state.ctx
+    if (await repository.get_card_definition(ctx.db, card_id)) is None:
+        raise HTTPException(status_code=404, detail="card not found")
+    runs = await repository.list_attempts_for_card(ctx.db, card_id, limit=limit)
+    items: list[dict[str, Any]] = []
+    for r in runs:
+        sub = await repository.get_agent_submission(ctx.db, r["submission_id"])
+        if sub:
+            item = _eval_run_to_output(r, sub)
+            # /attempts adds miner_hotkey so the site can attribute
+            # failed attempts. Existing /feed renderers ignore unknown
+            # fields, so adding it here is forward-compat.
+            item["miner_hotkey"] = sub["miner_hotkey"]
+            items.append(item)
+    return {"items": items, "limit": limit}
+
+
+# --------------------------------------------------------------------------
 # 2.8 GET /v1/leaderboard
 # --------------------------------------------------------------------------
 

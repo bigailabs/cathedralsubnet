@@ -502,6 +502,32 @@ async def list_recent_display_names(
     return [(str(r[0]), str(r[1])) for r in rows]
 
 
+async def list_recent_display_names_excluding_hotkey(
+    conn: aiosqlite.Connection,
+    card_id: str,
+    since: datetime,
+    exclude_hotkey: str,
+) -> list[tuple[str, str]]:
+    """Returns `(submission_id, display_name)` for the fuzzy collision check,
+    skipping rows that belong to ``exclude_hotkey``.
+
+    The fuzzy display_name dedupe is meant to stop OTHER miners from
+    squatting an existing display_name within the 7-day window. A miner
+    resubmitting under their own hotkey should not be blocked by their
+    own prior submissions — the same-hotkey + same-bundle dedupe is
+    already enforced by the UNIQUE index on (miner_hotkey, bundle_hash).
+    """
+    cur = await conn.execute(
+        "SELECT id, display_name FROM agent_submissions "
+        "WHERE card_id = ? AND submitted_at >= ? "
+        "AND miner_hotkey != ? "
+        "AND status IN ('queued','evaluating','ranked')",
+        (card_id, since.isoformat(), exclude_hotkey),
+    )
+    rows = await cur.fetchall()
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
 async def first_mover_for_fingerprint(
     conn: aiosqlite.Connection, card_id: str, metadata_fingerprint: str
 ) -> dict[str, Any] | None:
@@ -663,6 +689,51 @@ async def list_eval_runs_for_submission(
     cur = await conn.execute(
         "SELECT * FROM eval_runs WHERE submission_id = ? ORDER BY ran_at DESC LIMIT ?",
         (submission_id, limit),
+    )
+    rows = await cur.fetchall()
+    return [_row_to_eval_run(r, cur.description) for r in rows]
+
+
+async def list_attempts_for_card(
+    conn: aiosqlite.Connection,
+    card_id: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Recent eval_runs for a card INCLUDING failed ones.
+
+    Counterpart to ``list_eval_runs_for_card`` which is gated to the
+    verified leaderboard surface (`polaris`/`tee`, score > 0 is not
+    enforced but discovery is). The miner-onboard UX needs a public
+    surface for failed attempts so the leaderboard empty-state can
+    surface real network activity even before any agent scores above
+    zero (cathedralai/cathedral PR #119).
+
+    Returns rows where:
+
+    - submission is non-discovery (status != 'discovery',
+      discovery_only=0) — discovery rows never enter the eval queue,
+      so they never have eval_runs, but defense-in-depth keeps the
+      join consistent with every other public read;
+    - attestation_mode is any of the live tiers (`polaris`, `tee`,
+      `polaris-deploy`, `ssh-probe`, `bundle`) — the same set
+      ``submissions_due_for_cadence`` admits;
+    - ANY ``weighted_score`` (including 0 from
+      ``_ssh_hermes_failed=true`` rows);
+
+    Ordered ``ran_at DESC`` so the most recent attempt is first.
+    """
+    cur = await conn.execute(
+        """
+        SELECT er.* FROM eval_runs er
+        JOIN agent_submissions sub ON sub.id = er.submission_id
+        WHERE sub.card_id = ?
+          AND sub.status != 'discovery'
+          AND sub.attestation_mode IN ('polaris', 'polaris-deploy', 'ssh-probe', 'tee', 'bundle')
+          AND sub.discovery_only = 0
+        ORDER BY er.ran_at DESC LIMIT ?
+        """,
+        (card_id, limit),
     )
     rows = await cur.fetchall()
     return [_row_to_eval_run(r, cur.description) for r in rows]
