@@ -38,11 +38,19 @@ echo "HOME=$HOME"
 
 echo ""
 echo "== 1) hermes on PATH (plain shell, like asyncssh non-login) =="
-if command -v hermes >/dev/null 2>&1; then
-  ok "hermes -> $(command -v hermes)"
+# Many distros give non-interactive SSH a tiny PATH (e.g. /usr/bin:/bin). Debian/Ubuntu often
+# include /usr/local/bin — Kali may not. Test minimal first, then current $PATH.
+_min_path="/usr/local/bin:/usr/bin:/bin"
+if PATH="$_min_path" command -v hermes >/dev/null 2>&1; then
+  ok "hermes on minimal PATH -> $(PATH="$_min_path" command -v hermes)"
+  PATH="$_min_path" hermes --version
+elif command -v hermes >/dev/null 2>&1; then
+  ok "hermes -> $(command -v hermes) (not on minimal PATH — Cathedral may still fail; symlink to /usr/local/bin and ensure sshd PATH includes it)"
   hermes --version
+elif [[ -x /usr/local/bin/hermes ]]; then
+  fail "hermes is at /usr/local/bin/hermes but /usr/local/bin is not on minimal PATH. Re-run install_cathedral_probe_host.sh (symlinks + .profile), or: sudo ln -sf \"\$HOME/.local/bin/hermes\" /usr/local/bin/hermes"
 else
-  fail "hermes not on PATH. Install Hermes and add it to PATH for non-interactive sessions (e.g. ~/.profile, /etc/environment, or symlink into /usr/local/bin)."
+  fail "hermes not found. Install Hermes, then run install_cathedral_probe_host.sh or: sudo ln -sf \"\$HOME/.local/bin/hermes\" /usr/local/bin/hermes"
 fi
 
 echo ""

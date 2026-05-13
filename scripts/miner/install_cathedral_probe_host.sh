@@ -44,17 +44,38 @@ chmod 700 "$PROBE_HOME/.ssh"
 echo "==> installing Hermes (non-interactive, wizard skipped) as $PROBE_USER"
 sudo -u "$PROBE_USER" -H bash -lc "curl -fsSL '$HERMES_INSTALL_URL' | bash -s -- --skip-setup"
 
-PROFILE_LINE='export PATH="$HOME/.local/bin:$PATH"'
+PROFILE_LINE='export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"'
 PROFILE_FILE="$PROBE_HOME/.profile"
-if [[ -f "$PROFILE_FILE" ]] && grep -qF '.local/bin' "$PROFILE_FILE" 2>/dev/null; then
-  echo "==> PATH already mentions .local/bin in .profile"
+if [[ -f "$PROFILE_FILE" ]] && grep -qF '/usr/local/bin' "$PROFILE_FILE" 2>/dev/null; then
+  echo "==> PATH already mentions /usr/local/bin in .profile"
 else
-  echo "==> appending PATH for ~/.local/bin to .profile"
+  echo "==> appending PATH (/usr/local/bin + ~/.local/bin) to .profile"
   printf '\n# Cathedral probe: Hermes CLI\n%s\n' "$PROFILE_LINE" >>"$PROFILE_FILE"
   chown "$PROBE_USER:$PROBE_USER" "$PROFILE_FILE"
 fi
 
-echo "==> smoke: hermes --version as $PROBE_USER"
+echo "==> symlink hermes -> /usr/local/bin (Cathedral SSH uses a minimal PATH; .profile is often not loaded)"
+PROBE_HERMES=""
+for c in "$PROBE_HOME/.local/bin/hermes" "$PROBE_HOME/.hermes/hermes-agent/.venv/bin/hermes"; do
+  if [[ -x "$c" ]]; then
+    PROBE_HERMES="$c"
+    break
+  fi
+done
+if [[ -n "$PROBE_HERMES" ]]; then
+  ln -sf "$PROBE_HERMES" /usr/local/bin/hermes
+  echo "    linked /usr/local/bin/hermes -> $PROBE_HERMES"
+else
+  echo "    WARN: could not find hermes under $PROBE_HOME; install Hermes, then re-run this script"
+fi
+
+echo "==> smoke: hermes with minimal PATH (like non-interactive SSH)"
+sudo -u "$PROBE_USER" -H env -i \
+  HOME="$PROBE_HOME" USER="$PROBE_USER" LOGNAME="$PROBE_USER" \
+  PATH=/usr/local/bin:/usr/bin:/bin TERM=xterm \
+  hermes --version
+
+echo "==> smoke: hermes --version as $PROBE_USER (login shell)"
 sudo -u "$PROBE_USER" -H bash -lc 'export PATH="$HOME/.local/bin:$PATH"; command -v hermes; hermes --version'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
