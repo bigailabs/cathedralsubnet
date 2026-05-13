@@ -532,40 +532,71 @@ def test_verify_rejects_unknown_schema_version(pull_loop_module):
     )
 
 
-def test_verify_dispatches_to_registered_v2_key_set(pull_loop_module):
-    """v1.1.0: registering a v2 key set in ``_SIGNED_KEYS_BY_VERSION``
-    must route verification to that key set without further code change.
+def test_verify_dispatches_to_locked_v2_key_set(pull_loop_module):
+    """v1.1.0: the locked v2 key set from cathedralai/cathedral#75 PR 4
+    must verify a record signed with the canonical v2 fields.
 
-    This proves the dispatcher works ahead of the miner-side agent's
-    wire change. When v2 lands, the publisher signs with the v2 key set
-    and the miner agent registers it; verification works without
-    touching the verifier control flow.
+    Cross-branch contract: this key set is mirrored byte-for-byte in
+    src/cathedral/eval/v2_payload.py on the miner-side branch. If they
+    drift, signatures fail at runtime.
+
+    The locked v2 set drops output_card, output_card_hash, and
+    polaris_verified; adds eval_card_excerpt and
+    eval_artifact_manifest_hash.
     """
     sk = Ed25519PrivateKey.generate()
     pk = sk.public_key()
 
-    # Hypothetical v2 key set — minimal subset for the test.
-    v2_keys = frozenset({"id", "agent_id", "card_id", "weighted_score", "ran_at"})
-    pull_loop_module._SIGNED_KEYS_BY_VERSION[2] = v2_keys
-    try:
-        # Build a v2-shaped record. Sign with the v2 key set.
-        v2_record_unsigned = {
-            "id": "00000000-0000-4000-8000-000000000002",
-            "agent_id": "11111111-1111-4111-8111-000000000002",
-            "card_id": "eu-ai-act",
-            "weighted_score": 0.42,
-            "ran_at": "2026-05-10T12:00:00.000Z",
-        }
-        blob = canonical_json_for_signing(v2_record_unsigned)
-        sig = base64.b64encode(sk.sign(blob)).decode("ascii")
-        record = dict(v2_record_unsigned)
-        record["cathedral_signature"] = sig
-        record["eval_output_schema_version"] = 2
-        # Decorate with fields that exist in v1 but are NOT in v2's
-        # signed bytes — verify must ignore them.
-        record["agent_display_name"] = "ignored"
-        record["polaris_verified"] = False
+    # The exact v2 fields per cathedralai/cathedral#75 PR 4.
+    v2_record_unsigned = {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "agent_id": "11111111-1111-4111-8111-000000000002",
+        "agent_display_name": "Test agent",
+        "card_id": "eu-ai-act",
+        "eval_card_excerpt": {
+            "id": "eu-ai-act",
+            "title": "Test card",
+            "summary": "Test summary",
+            "confidence": 0.84,
+        },
+        "eval_artifact_manifest_hash": "0" * 64,  # blake3 hex
+        "weighted_score": 0.84,
+        "ran_at": "2026-05-10T12:00:00.000Z",
+    }
+    blob = canonical_json_for_signing(v2_record_unsigned)
+    sig = base64.b64encode(sk.sign(blob)).decode("ascii")
+    record = dict(v2_record_unsigned)
+    record["cathedral_signature"] = sig
+    record["eval_output_schema_version"] = 2
+    # Decorate with unsigned wire-envelope fields that must be ignored
+    # during verification (drops in the v2 wire shape per PR 4).
+    record["eval_artifact_bundle_url"] = "s3://hippius/test"
+    record["eval_artifact_manifest_url"] = "s3://hippius/test/manifest"
+    record["merkle_epoch"] = None
 
-        pull_loop_module.verify_eval_output_signature(record, pk)
-    finally:
-        del pull_loop_module._SIGNED_KEYS_BY_VERSION[2]
+    pull_loop_module.verify_eval_output_signature(record, pk)
+
+
+def test_v2_key_set_matches_cross_branch_contract(pull_loop_module):
+    """Cross-branch contract guard: the v2 key set in pull_loop must
+    match the canonical set documented in cathedralai/cathedral#75 PR 4
+    comment-4436018189 byte-for-byte. If this test fails, the miner-side
+    branch and validator-side branch have drifted on the wire contract
+    and runtime signature verification will silently fail.
+    """
+    expected_v2 = frozenset(
+        {
+            "id",
+            "agent_id",
+            "agent_display_name",
+            "card_id",
+            "eval_card_excerpt",
+            "eval_artifact_manifest_hash",
+            "weighted_score",
+            "ran_at",
+        }
+    )
+    assert pull_loop_module._SIGNED_KEYS_BY_VERSION[2] == expected_v2, (
+        "v2 key set drifted from cross-branch contract — "
+        "see cathedralai/cathedral#75 PR 4"
+    )

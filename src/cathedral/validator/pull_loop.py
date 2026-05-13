@@ -423,13 +423,32 @@ _SIGNED_EVAL_OUTPUT_KEYS_V1 = frozenset(
     }
 )
 
+# v2 — cathedralai/cathedral#75 PR 4. Drops output_card, output_card_hash,
+# polaris_verified. Adds eval_card_excerpt + eval_artifact_manifest_hash.
+# `eval_output_schema_version` is NOT in this set: it's a routing hint
+# validators read to pick the dispatcher entry, not part of the signed
+# bytes. Must stay byte-for-byte identical to
+# src/cathedral/eval/v2_payload.py:_SIGNED_KEYS_BY_VERSION on the
+# miner-side branch — cross-branch contract.
+_SIGNED_EVAL_OUTPUT_KEYS_V2 = frozenset(
+    {
+        "id",
+        "agent_id",
+        "agent_display_name",
+        "card_id",
+        "eval_card_excerpt",
+        "eval_artifact_manifest_hash",
+        "weighted_score",
+        "ran_at",
+    }
+)
+
 # Version-keyed dispatcher. A record's signed payload schema is selected
 # by ``eval_output_schema_version`` (defaulting to 1 when the field is
-# absent — the v1.0.x wire shape). The miner-side rewrite adds v2 in a
-# follow-up release; this dispatcher lets us drop the new key set in
-# without touching the verifier control flow.
+# absent — the v1.0.x wire shape).
 _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
     1: _SIGNED_EVAL_OUTPUT_KEYS_V1,
+    2: _SIGNED_EVAL_OUTPUT_KEYS_V2,
 }
 
 # Back-compat alias — the prior constant name. Tests and downstream code
