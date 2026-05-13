@@ -26,6 +26,15 @@ class ReceiptSigner:
     def public_hex(self) -> str:
         return bytes(self._vk).hex()
 
+    def sign_bytes(self, payload: bytes) -> str:
+        """Sign arbitrary bytes and return the hex signature.
+
+        Used by the dataset exporter for manifest signatures. Trajectory
+        receipts go through .sign() which builds the canonical Receipt
+        payload internally.
+        """
+        return self._sk.sign(payload).signature.hex()
+
     def sign(self, traj: Trajectory) -> Receipt:
         if not traj.bundle_hash:
             traj.bundle_hash = traj.compute_bundle_hash()

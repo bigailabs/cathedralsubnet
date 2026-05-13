@@ -12,7 +12,7 @@ class EchoAgent:
     def __init__(self, hotkey: str = "echo_agent") -> None:
         self.hotkey = hotkey
 
-    async def run(self, job: JobSpec, tools: ToolBus) -> AgentResult:  # noqa: ARG002
+    async def run(self, job: JobSpec, tools: ToolBus) -> AgentResult:
         return AgentResult(
             final_output=job.prompt,
             structured={"strategy": "echo"},

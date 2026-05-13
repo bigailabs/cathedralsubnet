@@ -27,13 +27,11 @@ from cathedral.v2.miner.llm import LLMAgent
 from cathedral.v2.receipt import ReceiptSigner, load_or_create_signing_key
 from cathedral.v2.scoring import WeightLoop, score_trajectory
 from cathedral.v2.types import JobSpec, TaskType, Trajectory, Weights
-from cathedral.v2.validator import Validator
+from cathedral.v2.validator.observer import Validator
 
 
 def default_home() -> Path:
-    return Path(
-        os.environ.get("CATHEDRAL_V2_HOME") or (Path.home() / ".cathedral" / "v2")
-    )
+    return Path(os.environ.get("CATHEDRAL_V2_HOME") or (Path.home() / ".cathedral" / "v2"))
 
 
 def build_default_miners() -> list[MinerAgent]:

@@ -19,7 +19,6 @@ from typing import Any
 
 from cathedral.v2.types import ToolCall
 
-
 ToolHandler = Callable[[dict[str, Any]], Any | Awaitable[Any]]
 
 

@@ -19,7 +19,6 @@ from cathedral.v2.types import (
     Trajectory,
 )
 
-
 _GOLD_THRESHOLD = float(os.environ.get("CATHEDRAL_V2_GOLD_THRESHOLD", "0.85"))
 _NEGATIVE_THRESHOLD = 0.25
 
@@ -97,8 +96,10 @@ def _score_research(traj: Trajectory) -> ScoreParts:
 
     citations_present = 1.0 if cited else 0.0
     citation_precision = (
-        (len(required & cited) / len(cited)) if cited else 0.0
-    ) if required else (1.0 if cited else 0.0)
+        ((len(required & cited) / len(cited)) if cited else 0.0)
+        if required
+        else (1.0 if cited else 0.0)
+    )
 
     fc = FailureClass.NONE
     if not cited:
@@ -161,7 +162,12 @@ def _score_code_patch(traj: Trajectory) -> ScoreParts:
         "submitted_anything": 1.0 if diff_submitted else 0.0,
         "read_before_patch": 1.0 if read_first else 0.0,
     }
-    weighted = 0.7 * dims["tests_pass"] + 0.2 * dims["patch_applies"] + 0.05 * dims["submitted_anything"] + 0.05 * dims["read_before_patch"]
+    weighted = (
+        0.7 * dims["tests_pass"]
+        + 0.2 * dims["patch_applies"]
+        + 0.05 * dims["submitted_anything"]
+        + 0.05 * dims["read_before_patch"]
+    )
     fc = FailureClass.NONE
     if not diff_submitted:
         fc = FailureClass.NO_OUTPUT
@@ -193,9 +199,9 @@ def _score_tool_route(traj: Trajectory) -> ScoreParts:
     if expected_args:
         # accept any args whose values overlap substantially with expected
         hits = sum(
-            1 for k, v in expected_args.items()
-            if k in actual_args
-            and str(actual_args[k]).lower().strip() == str(v).lower().strip()
+            1
+            for k, v in expected_args.items()
+            if k in actual_args and str(actual_args[k]).lower().strip() == str(v).lower().strip()
         )
         args_correct = hits / len(expected_args)
     else:

@@ -15,7 +15,6 @@ from datetime import UTC, datetime
 from cathedral.v2.archive import TrajectoryArchive
 from cathedral.v2.types import Weights
 
-
 _DEFAULT_HALF_LIFE = int(os.environ.get("CATHEDRAL_V2_EMA_HALF_LIFE", "50"))
 
 
@@ -78,11 +77,11 @@ class WeightLoop:
         wallet_name = os.environ.get("CATHEDRAL_V2_WALLET", "default")
         netuid = int(os.environ.get("CATHEDRAL_V2_NETUID", "39"))
         network = os.environ.get("CATHEDRAL_V2_NETWORK", "finney")
-        sub = bittensor.subtensor(network=network)
+        sub = bittensor.Subtensor(network=network)
         meta = sub.metagraph(netuid=netuid)
-        wallet = bittensor.wallet(name=wallet_name)
-        uids = []
-        vals = []
+        wallet = bittensor.Wallet(name=wallet_name)
+        uids: list[int] = []
+        vals: list[float] = []
         for hk, weight in w.per_miner.items():
             if hk in meta.hotkeys:
                 uids.append(meta.hotkeys.index(hk))

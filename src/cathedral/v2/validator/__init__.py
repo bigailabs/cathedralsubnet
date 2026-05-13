@@ -2,12 +2,14 @@
 
 from cathedral.v2.validator.toolbus import ToolBus, ToolError, ToolHandler
 
+
 # Observer imports MinerAgent which imports ToolBus — keep observer
 # importable from this package but as a deferred attribute to avoid
 # the miner <-> validator cycle.
 def __getattr__(name):
     if name == "Validator":
         from cathedral.v2.validator.observer import Validator
+
         return Validator
     raise AttributeError(name)
 

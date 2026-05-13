@@ -10,8 +10,6 @@ Runs a full tick across every task type and miner, verifies:
 
 from __future__ import annotations
 
-import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -24,7 +22,7 @@ from cathedral.v2.miner.llm import LLMAgent
 from cathedral.v2.receipt import verify_receipt
 from cathedral.v2.replay import replay
 from cathedral.v2.runtime import Runtime
-from cathedral.v2.scoring import compute_weights, score_trajectory
+from cathedral.v2.scoring import compute_weights
 from cathedral.v2.types import TaskType
 
 
@@ -38,7 +36,7 @@ async def test_one_tick_end_to_end(tmp_home: Path) -> None:
     miners = [EchoAgent("hk_echo"), HeuristicAgent("hk_heuristic"), LLMAgent("hk_llm")]
     rt = Runtime(home=tmp_home, miners=miners)
     r = await rt.tick()
-    # 5 task types × 3 miners = 15 trajectories
+    # 5 task types x 3 miners = 15 trajectories
     assert len(r.trajectories) == 15
     # every trajectory has a bundle hash
     for t in r.trajectories:
@@ -49,10 +47,9 @@ async def test_one_tick_end_to_end(tmp_home: Path) -> None:
     assert stats.total == 15
     assert set(stats.by_task) == {tt.value for tt in TaskType}
     # the heuristic miner should win at least once
-    assert any(
-        t.miner_kind == "heuristic" and t.score.weighted >= 0.85
-        for t in r.trajectories
-    ), "heuristic should hit gold somewhere"
+    assert any(t.miner_kind == "heuristic" and t.score.weighted >= 0.85 for t in r.trajectories), (
+        "heuristic should hit gold somewhere"
+    )
 
 
 @pytest.mark.asyncio

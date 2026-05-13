@@ -74,18 +74,18 @@ def export_dpo(
 
     def rows() -> Iterable[dict]:
         for p in pairs:
-            w = archive.get(p.winner_trajectory_id)
-            l = archive.get(p.loser_trajectory_id)
-            if not w or not l:
+            winner = archive.get(p.winner_trajectory_id)
+            loser = archive.get(p.loser_trajectory_id)
+            if not winner or not loser:
                 continue
             yield {
-                "prompt": _prompt_for(w),
-                "chosen": w.result.final_output,
-                "rejected": l.result.final_output,
+                "prompt": _prompt_for(winner),
+                "chosen": winner.result.final_output,
+                "rejected": loser.result.final_output,
                 "score_delta": round(p.score_delta, 4),
-                "task_type": w.job.task_type.value,
-                "winner_trajectory_id": w.trajectory_id,
-                "loser_trajectory_id": l.trajectory_id,
+                "task_type": winner.job.task_type.value,
+                "winner_trajectory_id": winner.trajectory_id,
+                "loser_trajectory_id": loser.trajectory_id,
             }
 
     return _write_jsonl(
@@ -205,18 +205,15 @@ def _write_jsonl(
         "exported_at": datetime.now(UTC).isoformat(),
         "row_hashes_count": len(hashes),
         "row_hashes_sample": hashes[:10],
-        "aggregate_hash": hashlib.blake2b(
-            canonical_json(hashes), digest_size=32
-        ).hexdigest(),
+        "aggregate_hash": hashlib.blake2b(canonical_json(hashes), digest_size=32).hexdigest(),
     }
     if signer is not None:
-        sig = signer._sk.sign(  # noqa: SLF001 (signer exposes a friendlier API for receipts only)
-            canonical_json(manifest)
-        )
         manifest["signature_scheme"] = "ed25519"
         manifest["signer_pubkey_hex"] = signer.public_hex
-        manifest["signature_hex"] = sig.signature.hex()
-    out_path.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        manifest["signature_hex"] = signer.sign_bytes(canonical_json(manifest))
+    out_path.with_suffix(".manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True)
+    )
     return manifest
 
 

@@ -58,8 +58,10 @@ class HeuristicAgent:
     async def _tool_route(self, job: JobSpec, tools: ToolBus) -> AgentResult:
         expected = job.context.get("expected_tool")
         args = job.context.get("expected_args") or {}
+        if not expected:
+            return AgentResult(final_output="", agent_error="no expected_tool in context")
         try:
-            r = await tools.call(expected, args)
+            r = await tools.call(str(expected), args)
         except ToolError as e:
             return AgentResult(final_output="", agent_error=str(e))
         return AgentResult(final_output=f"{expected} called", structured={"called": r})
@@ -100,10 +102,10 @@ class HeuristicAgent:
             "praise": ["great work", "amazing", "love", "smoothest", "thanks"],
             "question": ["how do i", "how can", "what is", "?", "where"],
         }
-        scored = {}
+        scored: dict[str, int] = {}
         for label in labels:
             kws = kw_map.get(label, [label])
             scored[label] = sum(1 for k in kws if k in text)
-        best = max(scored, key=scored.get) if scored else (labels[0] if labels else "")
+        best = max(scored, key=lambda k: scored[k]) if scored else (labels[0] if labels else "")
         await tools.call("label", {"label": best})
         return AgentResult(final_output=best, structured={"strategy": "keyword"})

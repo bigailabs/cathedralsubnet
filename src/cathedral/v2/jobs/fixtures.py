@@ -5,15 +5,23 @@ Real data goes here later. For now: minimal but realistic per task type.
 
 from __future__ import annotations
 
-
 RESEARCH_CORPUS: list[dict] = [
     {
         "corpus_id": "eu-ai-act-2024",
         "question": "Under the EU AI Act, what is the maximum penalty for placing on the market an AI system that violates prohibited-practice rules (Article 5)?",
         "passages": [
-            {"id": "p1", "text": "Article 5 enumerates prohibited AI practices including manipulative subliminal techniques and untargeted scraping of facial images."},
-            {"id": "p2", "text": "Article 99 sets administrative fines. For non-compliance with Article 5 the upper limit is EUR 35,000,000 or 7% of worldwide annual turnover, whichever is higher."},
-            {"id": "p3", "text": "For other infringements the maximum is EUR 15,000,000 or 3% of worldwide annual turnover."},
+            {
+                "id": "p1",
+                "text": "Article 5 enumerates prohibited AI practices including manipulative subliminal techniques and untargeted scraping of facial images.",
+            },
+            {
+                "id": "p2",
+                "text": "Article 99 sets administrative fines. For non-compliance with Article 5 the upper limit is EUR 35,000,000 or 7% of worldwide annual turnover, whichever is higher.",
+            },
+            {
+                "id": "p3",
+                "text": "For other infringements the maximum is EUR 15,000,000 or 3% of worldwide annual turnover.",
+            },
         ],
         "answer": "EUR 35,000,000 or 7% of worldwide annual turnover, whichever is higher.",
         "required_citations": ["p2"],
@@ -22,8 +30,14 @@ RESEARCH_CORPUS: list[dict] = [
         "corpus_id": "us-ai-eo-14110",
         "question": "Which US agency was directed by EO 14110 to establish reporting requirements for dual-use foundation models with potential to enable mass-casualty CBRN harm?",
         "passages": [
-            {"id": "p1", "text": "Executive Order 14110 of October 30, 2023 directs the Secretary of Commerce."},
-            {"id": "p2", "text": "Sec. 4.2 requires the Secretary of Commerce, acting through BIS, to require reporting from developers of dual-use foundation models."},
+            {
+                "id": "p1",
+                "text": "Executive Order 14110 of October 30, 2023 directs the Secretary of Commerce.",
+            },
+            {
+                "id": "p2",
+                "text": "Sec. 4.2 requires the Secretary of Commerce, acting through BIS, to require reporting from developers of dual-use foundation models.",
+            },
             {"id": "p3", "text": "Sec. 4.6 covers open weights and is directed at NTIA."},
         ],
         "answer": "The Department of Commerce, acting through the Bureau of Industry and Security (BIS).",
@@ -33,8 +47,14 @@ RESEARCH_CORPUS: list[dict] = [
         "corpus_id": "uk-ai-whitepaper-2023",
         "question": "What is the central regulatory philosophy of the UK AI Whitepaper?",
         "passages": [
-            {"id": "p1", "text": "The UK AI Whitepaper proposes a pro-innovation approach: principles applied by existing regulators rather than a single AI act."},
-            {"id": "p2", "text": "Five cross-sectoral principles are issued for regulators: safety, transparency, fairness, accountability, contestability."},
+            {
+                "id": "p1",
+                "text": "The UK AI Whitepaper proposes a pro-innovation approach: principles applied by existing regulators rather than a single AI act.",
+            },
+            {
+                "id": "p2",
+                "text": "Five cross-sectoral principles are issued for regulators: safety, transparency, fairness, accountability, contestability.",
+            },
         ],
         "answer": "Pro-innovation: existing sector regulators apply five cross-sectoral principles, no single new AI act.",
         "required_citations": ["p1"],

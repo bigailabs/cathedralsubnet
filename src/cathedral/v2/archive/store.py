@@ -22,7 +22,6 @@ from cathedral.v2.types import (
     Trajectory,
 )
 
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS trajectories (
     trajectory_id   TEXT PRIMARY KEY,
@@ -225,8 +224,7 @@ class TrajectoryArchive:
     ) -> Iterable[Trajectory]:
         with self._conn() as c:
             rows = c.execute(
-                "SELECT body_json FROM trajectories WHERE readiness=? "
-                "ORDER BY score DESC LIMIT ?",
+                "SELECT body_json FROM trajectories WHERE readiness=? ORDER BY score DESC LIMIT ?",
                 (readiness.value, limit),
             ).fetchall()
         for r in rows:

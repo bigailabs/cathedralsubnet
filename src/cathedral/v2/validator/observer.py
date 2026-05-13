@@ -25,13 +25,10 @@ class Validator:
         t0 = time.perf_counter()
         try:
             result = await asyncio.wait_for(miner.run(job, bus), timeout=job.deadline_seconds)
-            agent_error: str | None = result.agent_error
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result = AgentResult(final_output="", agent_error="job_deadline_exceeded")
-            agent_error = "job_deadline_exceeded"
         except Exception as e:
             result = AgentResult(final_output="", agent_error=f"agent_exception: {e}")
-            agent_error = result.agent_error
         ended = datetime.now(UTC)
         wall_ms = (time.perf_counter() - t0) * 1000.0
         if result.wall_time_ms is None:
@@ -50,9 +47,7 @@ class Validator:
         # Tuck the sink values into structured so the scorer can use them
         # without re-running tools. Validator-only handlers are prefixed
         # with __sink_* and never called by miners (unknown to them).
-        sinks = {
-            k.strip("_"): handlers[k]({}) for k in handlers if k.startswith("__sink_")
-        }
+        sinks = {k.strip("_"): handlers[k]({}) for k in handlers if k.startswith("__sink_")}
         if sinks:
             traj.result.structured.setdefault("_sinks", {}).update(sinks)
         return traj

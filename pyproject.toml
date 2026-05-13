@@ -68,6 +68,15 @@ no_implicit_optional = true
 ignore_missing_imports = true
 files = ["src/cathedral"]
 
+# v2 is an experimental branch surface: keep generics + untyped CLI dispatchers
+# relaxed until the rewrite stabilizes. Real type errors still flag.
+[[tool.mypy.overrides]]
+module = "cathedral.v2.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_any_generics = false
+warn_return_any = false
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -99,3 +108,10 @@ ignore = ["S101", "S104", "S105", "UP036", "UP042"]
 # length and en-dash literals are intentional and meaningful for readers;
 # the file's only Python is a constant f-string holding the doc.
 "src/cathedral/publisher/skill_md.py" = ["E501", "RUF001", "S608"]
+# v2 fixtures hold the bundled job corpora. Long string literals are data
+# and word-wrapping them would obscure the content.
+"src/cathedral/v2/jobs/fixtures.py" = ["E501"]
+# v2 uses random.Random in the deterministic job generator. Not crypto.
+"src/cathedral/v2/jobs/generator.py" = ["S311"]
+# CLI print formatting uses long status lines; word-wrapping degrades UX.
+"src/cathedral/v2/cli/main.py" = ["E501"]

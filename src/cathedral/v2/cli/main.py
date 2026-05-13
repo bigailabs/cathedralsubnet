@@ -33,7 +33,7 @@ from cathedral.v2.receipt import (
 )
 from cathedral.v2.replay import replay
 from cathedral.v2.runtime import Runtime, default_home, miner_by_name
-from cathedral.v2.scoring import compute_weights, score_trajectory
+from cathedral.v2.scoring import compute_weights
 from cathedral.v2.types import TaskType
 
 
@@ -134,12 +134,15 @@ def _dispatch(args) -> int:
         r = asyncio.run(rt.tick())
         print(f"tick produced {len(r.trajectories)} trajectories")
         for t in r.trajectories:
-            print(f"  {t.trajectory_id}  {t.miner_kind:>10}  {t.job.task_type.value:>11}  score={t.score.weighted:.3f}  fail={t.score.failure_class.value}")
+            print(
+                f"  {t.trajectory_id}  {t.miner_kind:>10}  {t.job.task_type.value:>11}  score={t.score.weighted:.3f}  fail={t.score.failure_class.value}"
+            )
         return 0
 
     if args.cmd == "submit-job":
         rt = Runtime(home=home, miners=[miner_by_name(args.miner)])
         from cathedral.v2.jobs import generate_job
+
         job = generate_job(TaskType(args.task_type), seed=args.seed)
         t = asyncio.run(rt.run_one(job, rt.miners[0]))
         print(json.dumps(t.model_dump(mode="json"), indent=2, default=str))
@@ -147,11 +150,11 @@ def _dispatch(args) -> int:
 
     if args.cmd == "inspect":
         archive = TrajectoryArchive(home)
-        t = archive.get(args.trajectory_id)
-        if not t:
+        traj = archive.get(args.trajectory_id)
+        if traj is None:
             print(f"not found: {args.trajectory_id}", file=sys.stderr)
             return 1
-        print(json.dumps(t.model_dump(mode="json"), indent=2, default=str))
+        print(json.dumps(traj.model_dump(mode="json"), indent=2, default=str))
         return 0
 
     if args.cmd == "archive":
@@ -163,18 +166,24 @@ def _dispatch(args) -> int:
         if args.acmd == "best":
             rows = archive.best_of(TaskType(args.task_type), k=args.k)
             for t in rows:
-                print(f"{t.trajectory_id}  {t.miner_kind:>10}  score={t.score.weighted:.3f}  "
-                      f"failure={t.score.failure_class.value}  ready={t.score.readiness.value}")
+                print(
+                    f"{t.trajectory_id}  {t.miner_kind:>10}  score={t.score.weighted:.3f}  "
+                    f"failure={t.score.failure_class.value}  ready={t.score.readiness.value}"
+                )
             return 0
         if args.acmd == "fails":
             tt = TaskType(args.task_type) if args.task_type else None
             for c in archive.failure_clusters(task_type=tt):
-                print(f"{c.task_type.value:>12}  {c.failure_class.value:>22}  n={c.count}  "
-                      f"samples={','.join(c.sample_trajectory_ids[:2])}")
+                print(
+                    f"{c.task_type.value:>12}  {c.failure_class.value:>22}  n={c.count}  "
+                    f"samples={','.join(c.sample_trajectory_ids[:2])}"
+                )
             return 0
         if args.acmd == "miner":
             for t in archive.by_miner(args.hotkey, limit=args.limit):
-                print(f"{t.trajectory_id}  {t.job.task_type.value:>11}  score={t.score.weighted:.3f}  ready={t.score.readiness.value}")
+                print(
+                    f"{t.trajectory_id}  {t.job.task_type.value:>11}  score={t.score.weighted:.3f}  ready={t.score.readiness.value}"
+                )
             return 0
         return 2
 
@@ -199,18 +208,20 @@ def _dispatch(args) -> int:
         archive = TrajectoryArchive(home)
         miner = miner_by_name(args.miner)
         div = asyncio.run(replay(archive, args.trajectory_id, miner, persist=args.persist))
-        print(json.dumps(
-            {
-                "original_trajectory_id": div.original.trajectory_id,
-                "replayed_trajectory_id": div.replayed.trajectory_id,
-                "first_divergent_step": div.first_divergent_step,
-                "same_final_output": div.same_final_output,
-                "score_delta": div.score_delta,
-                "original_score": div.original.score.weighted,
-                "replayed_score": div.replayed.score.weighted,
-            },
-            indent=2,
-        ))
+        print(
+            json.dumps(
+                {
+                    "original_trajectory_id": div.original.trajectory_id,
+                    "replayed_trajectory_id": div.replayed.trajectory_id,
+                    "first_divergent_step": div.first_divergent_step,
+                    "same_final_output": div.same_final_output,
+                    "score_delta": div.score_delta,
+                    "original_score": div.original.score.weighted,
+                    "replayed_score": div.replayed.score.weighted,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if args.cmd == "seed-jobs":
@@ -228,12 +239,21 @@ def _dispatch(args) -> int:
 
     if args.cmd == "verify-receipt":
         archive = TrajectoryArchive(home)
-        r = archive.get_receipt(args.trajectory_id)
-        if not r:
+        receipt = archive.get_receipt(args.trajectory_id)
+        if receipt is None:
             print(f"no receipt for: {args.trajectory_id}", file=sys.stderr)
             return 1
-        ok = verify_receipt(r)
-        print(json.dumps({"trajectory_id": args.trajectory_id, "valid": ok, "scheme": r.signature_scheme}, indent=2))
+        ok = verify_receipt(receipt)
+        print(
+            json.dumps(
+                {
+                    "trajectory_id": args.trajectory_id,
+                    "valid": ok,
+                    "scheme": receipt.signature_scheme,
+                },
+                indent=2,
+            )
+        )
         return 0 if ok else 1
 
     return 2

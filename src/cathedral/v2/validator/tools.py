@@ -196,7 +196,7 @@ def _run_python_test(source: str, test: str) -> tuple[bool, str | None]:
 
 
 def _tool_route_tools(job: JobSpec) -> dict[str, Callable]:
-    chosen = {"tool": None, "args": None}
+    chosen: dict[str, Any] = {"tool": None, "args": None}
 
     def make(name: str):
         def _h(args: dict) -> dict:

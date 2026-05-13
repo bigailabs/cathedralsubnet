@@ -14,11 +14,9 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any
 
 from cathedral.v2.types import AgentResult, JobSpec
 from cathedral.v2.validator.toolbus import ToolBus, ToolError
-
 
 _SYSTEM_PROMPT = """You are a Cathedral agent. You solve one job per session.
 
@@ -103,16 +101,16 @@ class LLMAgent:
 
                 tool = action.get("tool")
                 args = action.get("args", {}) or {}
-                try:
-                    result = await tools.call(tool, args)
-                except ToolError as e:
-                    messages.append(
-                        {"role": "user", "content": f"tool error: {e}"}
-                    )
+                if not tool:
+                    messages.append({"role": "user", "content": "tool error: missing tool name"})
                     continue
-                messages.append(
-                    {"role": "user", "content": f"tool result: {json.dumps(result, default=str)[:1200]}"}
-                )
+                try:
+                    result = await tools.call(str(tool), args)
+                except ToolError as e:
+                    messages.append({"role": "user", "content": f"tool error: {e}"})
+                    continue
+                rendered = json.dumps(result, default=str)[:1200]
+                messages.append({"role": "user", "content": f"tool result: {rendered}"})
         return AgentResult(
             final_output="",
             model_id=self.model,

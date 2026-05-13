@@ -8,7 +8,6 @@ test suites can be plugged in later via the same JobSpec.context shape.
 from __future__ import annotations
 
 import random
-from typing import Any
 
 from cathedral.v2.jobs.fixtures import (
     CLASSIFY_FIXTURES,
@@ -154,23 +153,28 @@ def _multi_step(rng: random.Random, seed: int) -> JobSpec:
         },
         tools=[
             ToolDescriptor(
-                name="kv_get", description="Get a key from the KV store.",
+                name="kv_get",
+                description="Get a key from the KV store.",
                 args_schema={"key": "string"},
             ),
             ToolDescriptor(
-                name="kv_set", description="Set a key in the KV store.",
+                name="kv_set",
+                description="Set a key in the KV store.",
                 args_schema={"key": "string", "value": "string"},
             ),
             ToolDescriptor(
-                name="kv_list", description="List keys with a prefix.",
+                name="kv_list",
+                description="List keys with a prefix.",
                 args_schema={"prefix": "string"},
             ),
             ToolDescriptor(
-                name="search", description="Search the fake search index.",
+                name="search",
+                description="Search the fake search index.",
                 args_schema={"query": "string"},
             ),
             ToolDescriptor(
-                name="done", description="Signal completion.",
+                name="done",
+                description="Signal completion.",
                 args_schema={},
             ),
         ],
