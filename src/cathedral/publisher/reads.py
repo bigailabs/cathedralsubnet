@@ -347,12 +347,15 @@ async def get_leaderboard(
         raise HTTPException(status_code=400, detail="card parameter required")
     if (await repository.get_card_definition(ctx.db, card)) is None:
         raise HTTPException(status_code=404, detail="card not found")
+    # Pull more than `limit` because we dedupe by hotkey below — a single
+    # mason can have submitted many bundles, only their best should occupy
+    # a leaderboard slot. Cap at the repository's ceiling (200) so a wide
+    # field of repeat submitters still narrows down to `limit` unique
+    # masons.
     submissions = await repository.list_submissions_for_card(
-        ctx.db, card, sort="score", limit=limit, offset=0
+        ctx.db, card, sort="score", limit=200, offset=0
     )
-    items = [
-        _submission_to_leaderboard_entry(s) for s in submissions if s["current_score"] is not None
-    ]
+    items = _dedupe_leaderboard_by_hotkey(submissions, limit=limit)
     return {"items": items, "computed_at": _now_iso()}
 
 
@@ -647,6 +650,36 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
         "cathedral_signature": run["cathedral_signature"],
         "merkle_epoch": run.get("merkle_epoch"),
     }
+
+
+def _dedupe_leaderboard_by_hotkey(
+    submissions: list[dict[str, Any]], *, limit: int
+) -> list[dict[str, Any]]:
+    """Collapse repeat submissions from the same miner to one entry.
+
+    Each Bittensor hotkey is one mason. A mason who submits the same
+    bundle five times — or five different bundles, one after the other —
+    should occupy one leaderboard slot, representing their best scored
+    card. The wall reads "one stone per mason" in its flow-hint; the
+    leaderboard now matches that.
+
+    Assumes ``submissions`` is already sorted by score descending — the
+    first row seen for each hotkey is that miner's best. Drops rows with
+    ``current_score is None`` (still evaluating).
+    """
+    seen_hotkeys: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for s in submissions:
+        if s["current_score"] is None:
+            continue
+        hk = s["miner_hotkey"]
+        if hk in seen_hotkeys:
+            continue
+        seen_hotkeys.add(hk)
+        items.append(_submission_to_leaderboard_entry(s))
+        if len(items) >= limit:
+            break
+    return items
 
 
 def _submission_to_leaderboard_entry(sub: dict[str, Any]) -> dict[str, Any]:

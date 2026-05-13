@@ -576,6 +576,109 @@ def test_leaderboard_ranked_by_score_desc(publisher_client):
     assert scores == sorted(scores, reverse=True), f"§2.8: scores must be descending; got {scores}"
 
 
+def test_leaderboard_dedupes_by_hotkey_keeping_best_score():
+    """A miner who submits N bundles occupies one leaderboard slot — their
+    best scored card. The wall promises 'one stone per mason'; the
+    leaderboard now backs that promise instead of letting repeat
+    submitters take multiple bricks.
+    """
+    from cathedral.publisher.reads import _dedupe_leaderboard_by_hotkey
+
+    # Score-desc order is the calling contract — `list_submissions_for_card`
+    # is invoked with sort='score' upstream, so the helper trusts that.
+    submissions = [
+        # Mason A — 3 submissions, best is 0.94
+        {
+            "id": "aaa-1",
+            "display_name": "AL-EU",
+            "logo_url": None,
+            "miner_hotkey": "5CFYaq",
+            "card_id": "eu-ai-act",
+            "current_score": 0.94,
+            "current_rank": 1,
+            "submitted_at": "2026-05-13T08:00:00.000Z",
+        },
+        {
+            "id": "aaa-2",
+            "display_name": "AL-EU",
+            "logo_url": None,
+            "miner_hotkey": "5CFYaq",
+            "card_id": "eu-ai-act",
+            "current_score": 0.50,
+            "current_rank": 2,
+            "submitted_at": "2026-05-13T09:00:00.000Z",
+        },
+        # Mason B — 1 submission
+        {
+            "id": "bbb-1",
+            "display_name": "iota1",
+            "logo_url": None,
+            "miner_hotkey": "5DnvAg",
+            "card_id": "eu-ai-act",
+            "current_score": 0.80,
+            "current_rank": 2,
+            "submitted_at": "2026-05-13T07:00:00.000Z",
+        },
+        {
+            "id": "aaa-3",
+            "display_name": "AL-EU",
+            "logo_url": None,
+            "miner_hotkey": "5CFYaq",
+            "card_id": "eu-ai-act",
+            "current_score": 0.0,
+            "current_rank": 3,
+            "submitted_at": "2026-05-13T13:00:00.000Z",
+        },
+        # Still-evaluating row — must be dropped
+        {
+            "id": "ccc-1",
+            "display_name": "pending",
+            "logo_url": None,
+            "miner_hotkey": "5XYZ",
+            "card_id": "eu-ai-act",
+            "current_score": None,
+            "current_rank": None,
+            "submitted_at": "2026-05-13T14:00:00.000Z",
+        },
+    ]
+
+    items = _dedupe_leaderboard_by_hotkey(submissions, limit=50)
+
+    hotkeys = [i["miner_hotkey"] for i in items]
+    assert hotkeys == ["5CFYaq", "5DnvAg"], (
+        f"expected one entry per hotkey in score-desc order, got {hotkeys}"
+    )
+    a_entry = next(i for i in items if i["miner_hotkey"] == "5CFYaq")
+    assert a_entry["current_score"] == 0.94, (
+        f"mason A's best score should be kept (0.94), got {a_entry['current_score']}"
+    )
+    assert a_entry["agent_id"] == "aaa-1", (
+        "mason A's best-scoring agent_id should win; first-seen wins because input is score-desc"
+    )
+
+
+def test_leaderboard_dedupe_respects_limit():
+    """`limit` caps the number of unique masons returned."""
+    from cathedral.publisher.reads import _dedupe_leaderboard_by_hotkey
+
+    submissions = [
+        {
+            "id": f"agent-{i}",
+            "display_name": f"mason-{i}",
+            "logo_url": None,
+            "miner_hotkey": f"hk-{i}",
+            "card_id": "eu-ai-act",
+            "current_score": 1.0 - i * 0.01,
+            "current_rank": i + 1,
+            "submitted_at": "2026-05-13T08:00:00.000Z",
+        }
+        for i in range(20)
+    ]
+    items = _dedupe_leaderboard_by_hotkey(submissions, limit=5)
+    assert len(items) == 5
+    assert [i["miner_hotkey"] for i in items] == [f"hk-{i}" for i in range(5)]
+
+
 # --------------------------------------------------------------------------
 # GET /v1/leaderboard/recent (validator pull endpoint)
 # --------------------------------------------------------------------------
