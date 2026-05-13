@@ -2,7 +2,15 @@
 # Run ON the miner host AS the same user you put in ssh_user (e.g. cathedral-probe).
 # Mirrors what Cathedral's SshHermesRunner does first: PATH, ~/.hermes, hermes profile create --clone-all.
 #
-#   sudo -u cathedral-probe bash /path/to/cathedral/scripts/miner/verify_cathedral_probe.sh
+# Example (replace with your clone path; user must match submit ssh_user):
+#   sudo -u cathedral-probe bash /home/you/Projects/cathedral/scripts/miner/verify_cathedral_probe.sh
+#
+# If: sudo: unknown user cathedral-probe — create the account on THIS host first, then install the
+# Cathedral SSH pubkey and Hermes for that user (docs/miner/QUICKSTART.md §2–§3). Do not use the
+# literal path /path/to/cathedral; use your real repo path.
+#
+# This script must run on the machine whose IP/hostname you put in ssh_host (the miner box), not
+# necessarily your laptop — unless your laptop IS that host and reachable on TCP 22 from the internet.
 #
 # Fix failures before resubmitting a NEW bundle (change zip bytes or Cathedral returns 409 duplicate).
 set -euo pipefail
@@ -10,6 +18,14 @@ set -euo pipefail
 ok() { printf '\033[32mOK\033[0m %s\n' "$*"; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 warn() { printf '\033[33mWARN\033[0m %s\n' "$*" >&2; }
+
+echo "Prerequisites (read if a command above failed):"
+echo "  • Run here: the host that equals ssh_host in your submit (Cathedral dials this:22)."
+echo "  • Run as:  the Linux user that equals ssh_user (often cathedral-probe)."
+echo "  • Missing user:  sudo useradd -m -s /bin/bash cathedral-probe"
+echo "  • Missing Hermes: install on THIS host — https://hermes-agent.nousresearch.com/"
+echo "  • Baseline repo: clone to e.g. ~/Projects/cathedral-baseline-agent (not ~/cathedral-baseline-agent unless you put it there)."
+echo ""
 
 echo "== Cathedral probe self-check =="
 echo "user: $(id -un) uid=$(id -u)"
