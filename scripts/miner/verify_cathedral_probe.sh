@@ -9,8 +9,10 @@
 # Cathedral SSH pubkey and Hermes for that user (docs/miner/QUICKSTART.md §2–§3). Do not use the
 # literal path /path/to/cathedral; use your real repo path.
 #
-# This script must run on the machine whose IP/hostname you put in ssh_host (the miner box), not
-# necessarily your laptop — unless your laptop IS that host and reachable on TCP 22 from the internet.
+# If bash says Permission denied when using sudo -u cathedral-probe bash ~/.../verify_*.sh:
+#   another user cannot traverse your home (mode 750). Copy the script first, then run it:
+#     sudo install -o root -m0755 /home/you/Projects/cathedral/scripts/miner/verify_cathedral_probe.sh /tmp/cathedral-verify-probe.sh
+#     sudo -u cathedral-probe bash /tmp/cathedral-verify-probe.sh
 #
 # Fix failures before resubmitting a NEW bundle (change zip bytes or Cathedral returns 409 duplicate).
 set -euo pipefail
@@ -23,8 +25,11 @@ echo "Prerequisites (read if a command above failed):"
 echo "  • Run here: the host that equals ssh_host in your submit (Cathedral dials this:22)."
 echo "  • Run as:  the Linux user that equals ssh_user (often cathedral-probe)."
 echo "  • Missing user:  sudo useradd -m -s /bin/bash cathedral-probe"
-echo "  • Missing Hermes: install on THIS host — https://hermes-agent.nousresearch.com/"
-echo "  • Baseline repo: clone to e.g. ~/Projects/cathedral-baseline-agent (not ~/cathedral-baseline-agent unless you put it there)."
+echo "  • Missing Hermes: install on THIS host (Hermes agent docs)."
+echo "  • Baseline repo: clone under ~/Projects/cathedral-baseline-agent or similar."
+echo "  • sudo -u cathedral-probe … Permission denied: copy script out of a private home dir:"
+echo "      sudo install -o root -m0755 /path/to/verify_cathedral_probe.sh /tmp/cathedral-verify-probe.sh"
+echo "      sudo -u cathedral-probe bash /tmp/cathedral-verify-probe.sh"
 echo ""
 
 echo "== Cathedral probe self-check =="
