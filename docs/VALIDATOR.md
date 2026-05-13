@@ -112,21 +112,32 @@ The honest gap: a sophisticated miner who buys real GPUs, runs an approved Herme
 
 ## Requirements for running a validator
 
-You need:
+### Hardware
 
-1. A Bittensor sr25519 hotkey registered on SN39 (mainnet) or SN292 (testnet).
-2. A Linux host (any distro, x86_64 or aarch64), Python 3.11 or 3.12, PostgreSQL or sqlite for the local store, outbound internet.
-3. Polaris's attestation public key (currently shipped via the `polaris-attestation-keypair-2026-05-11` operator credential bundle; pin the public half into `POLARIS_ATTESTATION_PUBLIC_KEY`).
-4. The Cathedral publisher's Ed25519 public key (set as `CATHEDRAL_PUBLIC_KEY_HEX`; the publisher operator hands this over out of band until the JWKS endpoint ships).
-5. A bearer token for the validator's mutating endpoints (held in the env var named by `http.bearer_token_env` in the config; `CATHEDRAL_BEARER` by default).
+A small CPU-only box. No GPU.
 
-What you do NOT need for the v1 validator role:
+- **RAM:** 4 GB minimum, 8 GB recommended
+- **Disk:** 50 GB SSD
+- **CPU:** 2 vCPU minimum, 4 vCPU comfortable
+- **Network:** stable outbound HTTPS. The validator polls every 12s and pulls ~10 KB per round.
 
-- Write access to the `cathedral-bundles` bucket. Validators verify signed projections from the publisher; they do not re-decrypt bundles in v1.
+### Prerequisites
+
+- A Bittensor sr25519 hotkey registered on **SN39** (mainnet) or **SN292** (testnet).
+- A Linux host (any distro, x86_64 or aarch64).
+- **Python 3.11 or 3.12.** Newer Python versions are not yet tested.
+- SQLite (default) or PostgreSQL for the local store. SQLite is fine for v1.
+
+### What you do NOT need
+
+- A GPU. The validator does no model inference.
+- Write access to the `cathedral-bundles` bucket. Validators verify signed projections from the publisher; they do not re-decrypt bundles.
 - Polaris API tokens. Those are publisher-side credentials.
 - The KEK (`CATHEDRAL_KEK_HEX`). Validators never see plaintext bundles.
 
-### Install
+## Quickstart
+
+### 1. Install
 
 ```bash
 git clone https://github.com/cathedralai/cathedral
@@ -138,32 +149,51 @@ pip install -e .[dev]
 
 This installs four console scripts: `cathedral`, `cathedral-validator`, `cathedral-miner`, `cathedral-publisher`.
 
-### Configure
+### 2. Fetch the public keys
+
+Cathedral and Polaris pubkeys are published at the publisher's JWKS endpoint. Pin them as env vars on your validator host so all signature verification runs locally:
+
+```bash
+curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json
+```
+
+Today's values (May 2026 — refresh from the URL above before pinning so you catch any rotation):
+
+```bash
+# Cathedral's signing key (verifies every EvalRun projection)
+export CATHEDRAL_PUBLIC_KEY_HEX=10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26
+
+# Polaris attestation pubkey (pinned for context; validators do not
+# verify Polaris signatures themselves — the publisher does that)
+export POLARIS_ATTESTATION_PUBLIC_KEY=50b8a077ab857c91a9b4f2b94295e81f0f01e4ec1fa5b3e9fd4073ea00def24c
+```
+
+### 3. Set the bearer token
+
+Set `CATHEDRAL_BEARER` to any non-empty string. The validator uses it to build the `Authorization` header for publisher reads. The publisher does not enforce authentication on `/v1/leaderboard/recent` yet, so the value does not matter today; it must just be non-empty so the validator boots cleanly. Server-side enforcement will land in a later release and tokens will be re-issued then — there is no token to request from anyone right now.
+
+```bash
+export CATHEDRAL_BEARER=$(openssl rand -hex 32)
+```
+
+### 4. Configure
 
 Copy `config/testnet.toml` or `config/mainnet.toml` and fill in:
 
-- `network.validator_hotkey`: your hotkey ss58.
-- `network.wallet_name`: local bittensor wallet name (default `default`).
-- `polaris.public_key_hex`: Polaris's manifest signing key (legacy `/v1/claim` evidence path).
-- `http.bearer_token_env`: env var name (e.g. `CATHEDRAL_BEARER`).
+- `network.validator_hotkey` — your hotkey ss58.
+- `network.wallet_name` — local Bittensor wallet name (default `default`).
 
-Export the secrets in the shell or systemd unit:
+The bearer env-var name and Polaris key hex are read from env, not config, so no further edits are required.
 
-```bash
-export CATHEDRAL_BEARER=<token>
-export CATHEDRAL_PUBLIC_KEY_HEX=<cathedral publisher Ed25519 public key, 64 hex chars>
-export POLARIS_ATTESTATION_PUBLIC_KEY=<polaris attestation Ed25519 public key, 64 hex chars>
-```
-
-### Bring up
+### 5. Bring up
 
 ```bash
 cathedral-validator migrate --config config/testnet.toml
-cathedral chain-check --config config/testnet.toml   # confirm hotkey + subtensor
+cathedral chain-check       --config config/testnet.toml  # confirm hotkey + subtensor
 cathedral-validator serve   --config config/testnet.toml
 ```
 
-Operational follow-on (logs, recovery, weight-status table): [validator/RUNBOOK.md](validator/RUNBOOK.md).
+Operational follow-on (systemd unit, log filtering, weight-status table, recovery): [validator/RUNBOOK.md](validator/RUNBOOK.md).
 
 ## Future enhancements
 
