@@ -6,6 +6,7 @@ Errors always render as `{"detail": "<string>"}` (Section 9 lock #3).
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -322,24 +323,118 @@ async def get_leaderboard(
 @router.get("/v1/leaderboard/recent")
 async def get_leaderboard_recent(
     request: Request,
-    since: str = Query(...),
+    since: str | None = Query(default=None),
+    since_ran_at: str | None = Query(default=None),
+    since_id: str | None = Query(default=None),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict[str, Any]:
+    """Cross-card recent eval feed for the validator pull loop.
+
+    v1.1.0 introduces a tuple-shaped cursor ``(since_ran_at, since_id)``
+    with strict `>` row-value comparison, replacing the v1.0.x
+    ``since=<ran_at>`` cursor with ``>=`` comparison. The new cursor is
+    a total order on ``(ran_at, id)`` so it cannot drop or duplicate
+    rows at millisecond collisions — the failure mode the cadence eval
+    load surfaced. See ``2026-05-12-track-3-pull-cursor-audit.md``
+    Risk 2.
+
+    Back-compat: v1.0.7 validators only send ``since`` (no
+    ``since_id``). We **distinguish "not sent" from "sent empty"** —
+    FastAPI's ``Query(default=None)`` leaves ``since_id is None`` when
+    the client omitted the param, and ``since_id == ""`` when the
+    client sent it with an empty value. The two cases route to
+    different SQL predicates:
+
+    * ``since_id is None`` (legacy): ``WHERE ran_at > ?`` — strict `>`
+      on the single timestamp, no tuple comparison. Matches what
+      v1.0.7's stateless single-string cursor can actually express.
+      Originally the code coerced ``since_id`` to ``""`` and ran the
+      tuple comparison ``(ran_at, id) > (since, '')``; because every
+      non-empty UUID is ``> ''``, this re-included every row at the
+      boundary millisecond on every pull, and the v1.0.7 cursor
+      (advanced to ``items[-1].ran_at``) never escaped. Strict `>`
+      cleanly advances past the boundary timestamp once it's reached
+      — at the cost of skipping any rows whose ``ran_at`` exactly
+      equals the cursor, which is fine for normal traffic (UPSERT
+      dedupe covered the v1.0.7 case where the boundary row was
+      re-pulled; with strict `>` there's nothing to dedupe) but
+      cannot drain a >limit ms-collision burst from a v1.0.7
+      validator. That residual is unsolvable for a stateless
+      single-string cursor and is the documented operational risk
+      during the deploy-day window before the v1.0.7 fleet
+      PM2-cycles to v1.1.0 — see Test 4 in
+      ``tests/smoke/test_v107_v110_back_compat.py``.
+    * ``since_id`` is a string (v1.1.0 tuple cursor, even ``""``):
+      ``WHERE (ran_at, id) > (?, ?)``. v1.1.0 validators thread the
+      ``next_since_ran_at`` + ``next_since_id`` pair so the boundary
+      millisecond is drained without re-delivery.
+
+    Response: dual-emits both legacy ``next_since`` and the v1.1.0
+    pair ``next_since_ran_at`` + ``next_since_id``. Old validators
+    read the former; new validators read the latter.
+    """
     ctx: PublisherContext = request.app.state.ctx
-    since_dt = _parse_since(since)
+
+    # Resolve cursor source: prefer v1.1.0 tuple if present, else legacy.
+    if since_ran_at is not None:
+        cursor_ran_at = since_ran_at
+    elif since is not None:
+        cursor_ran_at = since
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="missing cursor: pass since_ran_at (v1.1.0) or since (v1.0.x)",
+        )
+
+    since_dt = _parse_since(cursor_ran_at)
     if since_dt is None:
-        raise HTTPException(status_code=400, detail="since parameter must be ISO-8601")
-    runs = await repository.list_eval_runs_recent(ctx.db, since=since_dt, limit=limit)
+        raise HTTPException(
+            status_code=400,
+            detail="since / since_ran_at must be ISO-8601",
+        )
+
+    # Pass ``since_id`` through with its None-vs-string distinction
+    # preserved. The repository branches on this to pick legacy
+    # (``ran_at > ?``) vs tuple (``(ran_at, id) > (?, ?)``) semantics.
+    # NOTE: if the client sent ``since_ran_at`` (v1.1.0 shape) but
+    # omitted ``since_id``, we still default to tuple mode with an
+    # empty-string id — the wire contract is that a v1.1.0 caller
+    # using the new param names opts into the new semantics.
+    if since_ran_at is not None:
+        cursor_id: str | None = since_id or ""
+    else:
+        cursor_id = since_id
+
+    runs = await repository.list_eval_runs_recent(
+        ctx.db, since=since_dt, since_id=cursor_id, limit=limit
+    )
     items: list[dict[str, Any]] = []
     for r in runs:
         sub = await repository.get_agent_submission(ctx.db, r["submission_id"])
         if sub:
             items.append(_eval_run_to_output(r, sub))
-    next_since = items[-1]["ran_at"] if len(items) == limit else None
+
+    # Emit both cursor shapes when the page is full so the cursor is
+    # safe to thread; when the page is short, the cursor is None on
+    # both shapes (means "you're caught up").
+    if len(items) == limit and runs:
+        last_row = runs[-1]
+        next_since_ran_at = items[-1]["ran_at"]
+        next_since_id = str(last_row.get("id") or "")
+        next_since_legacy: str | None = items[-1]["ran_at"]
+    else:
+        next_since_ran_at = None
+        next_since_id = None
+        next_since_legacy = None
+
     latest_epoch = await repository.latest_merkle_epoch(ctx.db)
     return {
         "items": items,
-        "next_since": next_since,
+        # Legacy cursor for v1.0.x validators.
+        "next_since": next_since_legacy,
+        # v1.1.0 tuple cursor for the audited pull loop.
+        "next_since_ran_at": next_since_ran_at,
+        "next_since_id": next_since_id,
         "merkle_epoch_latest": latest_epoch,
     }
 
@@ -460,7 +555,43 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
     cathedral signature against the same byte-exact projection (CRIT-7).
     `merkle_epoch` is post-anchor metadata; it is NOT covered by the
     cathedral signature (see `cathedral.v1_types.canonical_json`).
+
+    v1.1.0 schema split (cathedralai/cathedral#75 PR 4): when the row
+    carries `eval_output_schema_version=2`, the wire-shape is the v2
+    projection — drops `output_card` + `output_card_hash` +
+    `polaris_verified` (these are still in the DB row for legacy
+    reads during the dual-publish window but NOT on the wire for v2
+    records). Adds `eval_card_excerpt` and `eval_artifact_manifest_hash`
+    (signed). `eval_artifact_bundle_url` + `eval_artifact_manifest_url`
+    live in the UNSIGNED envelope — they're addressable hints, not
+    part of the signed bytes.
     """
+    schema_version = int(run.get("eval_output_schema_version") or 1)
+    if schema_version == 2:
+        excerpt_raw = run.get("eval_card_excerpt")
+        if isinstance(excerpt_raw, str):
+            try:
+                eval_card_excerpt = json.loads(excerpt_raw)
+            except (json.JSONDecodeError, TypeError):
+                eval_card_excerpt = None
+        else:
+            eval_card_excerpt = excerpt_raw
+        return {
+            "id": run["id"],
+            "agent_id": sub["id"],
+            "agent_display_name": sub["display_name"],
+            "card_id": sub["card_id"],
+            "eval_card_excerpt": eval_card_excerpt,
+            "eval_artifact_manifest_hash": run.get("eval_artifact_manifest_hash"),
+            "weighted_score": run["weighted_score"],
+            "ran_at": run["ran_at"],
+            "eval_output_schema_version": 2,
+            "cathedral_signature": run["cathedral_signature"],
+            # Unsigned envelope — URLs are hints, not trust anchors.
+            "eval_artifact_bundle_url": run.get("eval_artifact_bundle_url"),
+            "eval_artifact_manifest_url": run.get("eval_artifact_manifest_url"),
+            "merkle_epoch": run.get("merkle_epoch"),
+        }
     return {
         "id": run["id"],
         "agent_id": sub["id"],

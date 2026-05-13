@@ -37,14 +37,23 @@ logger = structlog.get_logger(__name__)
 
 _PULL_INTERVAL_SECS = 30.0
 
+# Default page size on the wire. The publisher endpoint accepts up to
+# 1000; we ship 500 by default to leave headroom and keep per-tick work
+# bounded. See 2026-05-12-track-3-pull-cursor-audit.md Risk 1.
+_DEFAULT_PULL_LIMIT = 500
+
+# Saturation cap: when a page returns exactly `limit` rows, pull again
+# without sleeping (we're behind). Cap inner iterations so a misbehaving
+# publisher can't pin the validator at 100% CPU. 4 * 500 = 2000 rows per
+# outer tick — ~5.7M rows/day ceiling.
+_MAX_INNER_PULLS = 4
+
 
 class PullVerificationError(Exception):
     """An eval-run record from the publisher failed cathedral signature check."""
 
 
-def verify_eval_run_signature(
-    eval_run: dict[str, Any], public_key: Ed25519PublicKey
-) -> None:
+def verify_eval_run_signature(eval_run: dict[str, Any], public_key: Ed25519PublicKey) -> None:
     """Verify cathedral_signature over the canonical EvalOutput projection.
 
     CRIT-7: prior versions verified over a storage-shaped dict that the
@@ -63,9 +72,7 @@ def verify_eval_run_signature(
     """
     projection = _to_eval_output_projection(eval_run)
     if projection is None:
-        raise PullVerificationError(
-            "eval-run dict missing fields needed to reconstruct EvalOutput"
-        )
+        raise PullVerificationError("eval-run dict missing fields needed to reconstruct EvalOutput")
     verify_eval_output_signature(projection, public_key)
 
 
@@ -162,11 +169,28 @@ async def run_pull_loop(
     interval_secs: float = _PULL_INTERVAL_SECS,
     api_token: str | None = None,
     stop: asyncio.Event | None = None,
+    limit: int = _DEFAULT_PULL_LIMIT,
 ) -> None:
-    """Long-running pull loop. Polls publisher every `interval_secs`."""
+    """Long-running pull loop. Polls publisher every ``interval_secs``.
+
+    v1.1.0 cursor: tuple ``(ran_at, id)`` with strict `>` comparison —
+    matches the publisher's ``ORDER BY ran_at ASC, id ASC`` total order
+    and the row-value comparison ``WHERE (ran_at, id) > (?, ?)``. See
+    ``2026-05-12-track-3-pull-cursor-audit.md`` Risk 2 for why the prior
+    ``since = max(ran_at)`` with ``>=`` could leak rows at millisecond
+    collisions under cadence eval load.
+
+    Saturation pull: when a page returns exactly ``limit`` rows, pull
+    again immediately without sleeping. Capped at ``_MAX_INNER_PULLS``
+    inner iterations per outer tick so a misbehaving publisher can't
+    starve the loop.
+    """
     stop = stop or asyncio.Event()
     base = publisher_url.rstrip("/")
-    last_seen = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    # Initial cursor: 1 hour ago, no id constraint (empty string sorts
+    # before any UUID and the strict `>` keeps the boundary inclusive).
+    cursor_ran_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    cursor_id = ""
 
     headers: dict[str, str] = {}
     if api_token:
@@ -174,59 +198,101 @@ async def run_pull_loop(
 
     async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
         while not stop.is_set():
-            try:
-                resp = await client.get(
-                    f"{base}/v1/leaderboard/recent",
-                    params={"since": last_seen, "limit": 200},
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-            except httpx.HTTPError as e:
-                logger.warning("pull_transport_error", error=str(e))
-                await _sleep_or_stop(stop, interval_secs)
-                continue
-
-            items = payload.get("items") or []
-            if not isinstance(items, list):
-                logger.warning("pull_payload_malformed")
-                await _sleep_or_stop(stop, interval_secs)
-                continue
-
-            persisted = 0
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                # CRIT-7: verify the cathedral signature directly against
-                # the public EvalOutput projection — the publisher signs
-                # the projection (see scoring_pipeline.score_and_sign), so
-                # rebuilding a different storage-shaped dict and verifying
-                # that always fails. `merkle_epoch` is excluded from the
-                # signed bytes via canonical_json.
+            inner_pulls = 0
+            total_fetched = 0
+            total_persisted = 0
+            while inner_pulls < _MAX_INNER_PULLS:
+                inner_pulls += 1
                 try:
-                    verify_eval_output_signature(item, cathedral_public_key)
-                except PullVerificationError as e:
-                    logger.warning(
-                        "pull_eval_signature_invalid", id=item.get("id"), error=str(e)
+                    resp = await client.get(
+                        f"{base}/v1/leaderboard/recent",
+                        params={
+                            # v1.1.0 tuple cursor.
+                            "since_ran_at": cursor_ran_at,
+                            "since_id": cursor_id,
+                            # Legacy field for back-compat with v1.0.x
+                            # publishers that ignore the new params. A
+                            # v1.1.0 publisher prefers the tuple; a v1.0.x
+                            # one falls back to `since`.
+                            "since": cursor_ran_at,
+                            "limit": limit,
+                        },
                     )
-                    continue
+                    resp.raise_for_status()
+                    payload = resp.json()
+                except httpx.HTTPError as e:
+                    logger.warning("pull_transport_error", error=str(e))
+                    break
 
-                hotkey = _hotkey_for(item)
-                if not hotkey:
-                    continue
-                await upsert_pulled_eval(conn, eval_run=item, miner_hotkey=hotkey)
-                persisted += 1
+                items = payload.get("items") or []
+                if not isinstance(items, list):
+                    logger.warning("pull_payload_malformed")
+                    break
 
-            if items:
-                # Advance cursor by the last item's ran_at.
-                try:
-                    last_ran = items[-1].get("ran_at")
-                    if isinstance(last_ran, str):
-                        last_seen = last_ran
-                except (IndexError, TypeError):
-                    pass
+                persisted = 0
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    # CRIT-7: verify the cathedral signature directly
+                    # against the public EvalOutput projection — the
+                    # publisher signs the projection (see
+                    # scoring_pipeline.score_and_sign), so rebuilding a
+                    # different storage-shaped dict and verifying that
+                    # always fails. `merkle_epoch` is excluded from the
+                    # signed bytes via canonical_json. The verifier is
+                    # version-aware (see _SIGNED_KEYS_BY_VERSION) so it
+                    # can dispatch to a future v2 key set without code
+                    # changes here.
+                    try:
+                        verify_eval_output_signature(item, cathedral_public_key)
+                    except PullVerificationError as e:
+                        logger.warning(
+                            "pull_eval_signature_invalid",
+                            id=item.get("id"),
+                            error=str(e),
+                        )
+                        continue
+
+                    hotkey = _hotkey_for(item)
+                    if not hotkey:
+                        continue
+                    await upsert_pulled_eval(conn, eval_run=item, miner_hotkey=hotkey)
+                    persisted += 1
+
+                total_fetched += len(items)
+                total_persisted += persisted
+
+                # Advance the cursor. Prefer the publisher's signalled
+                # next_since_ran_at + next_since_id (v1.1.0) so a fully
+                # drained page short-circuits cleanly. Fall back to the
+                # last item's (ran_at, id) tuple.
+                next_ran_at = payload.get("next_since_ran_at")
+                next_id = payload.get("next_since_id")
+                if isinstance(next_ran_at, str) and isinstance(next_id, str):
+                    cursor_ran_at = next_ran_at
+                    cursor_id = next_id
+                elif items:
+                    last = items[-1]
+                    if isinstance(last, dict):
+                        last_ran = last.get("ran_at")
+                        last_id = last.get("id")
+                        if isinstance(last_ran, str):
+                            cursor_ran_at = last_ran
+                        if isinstance(last_id, str):
+                            cursor_id = last_id
+
+                # If the page wasn't saturated we're caught up; break the
+                # inner loop and sleep until the next outer tick.
+                if len(items) < limit:
+                    break
 
             await health.heartbeat("last_evidence_pass_at")
-            logger.info("pull_loop_tick", fetched=len(items), persisted=persisted)
+            logger.info(
+                "pull_loop_tick",
+                fetched=total_fetched,
+                persisted=total_persisted,
+                inner_pulls=inner_pulls,
+            )
 
             await _sleep_or_stop(stop, interval_secs)
 
@@ -328,15 +394,22 @@ __all__ = [
 # entry point. Real production deploys carry their cursor in the validator
 # DB or a config file; this is sufficient for the contract test that only
 # verifies cursor threading across two consecutive `pull_once` invocations.
-_LAST_SINCE: dict[str, str | None] = {"value": None}
+#
+# v1.1.0: cursor is a tuple ``(ran_at, id)`` to match the publisher's
+# total-order ``ORDER BY ran_at ASC, id ASC`` scan. See
+# ``2026-05-12-track-3-pull-cursor-audit.md``.
+_LAST_SINCE: dict[str, str | None] = {"ran_at": None, "id": None}
 
 
 def reset_pull_cursor() -> None:
-    """Reset the module-level `since` cursor — test convenience."""
-    _LAST_SINCE["value"] = None
+    """Reset the module-level cursor — test convenience."""
+    _LAST_SINCE["ran_at"] = None
+    _LAST_SINCE["id"] = None
 
 
-_SIGNED_EVAL_OUTPUT_KEYS = frozenset(
+# v1 signed-payload key set. Matches scoring_pipeline.score_and_sign's
+# public EvalOutput projection (CONTRACTS.md §1.10 + L8).
+_SIGNED_EVAL_OUTPUT_KEYS_V1 = frozenset(
     {
         "id",
         "agent_id",
@@ -350,19 +423,58 @@ _SIGNED_EVAL_OUTPUT_KEYS = frozenset(
     }
 )
 
+# v2 — cathedralai/cathedral#75 PR 4. Drops output_card, output_card_hash,
+# polaris_verified. Adds eval_card_excerpt + eval_artifact_manifest_hash.
+# `eval_output_schema_version` is NOT in this set: it's a routing hint
+# validators read to pick the dispatcher entry, not part of the signed
+# bytes. Must stay byte-for-byte identical to
+# src/cathedral/eval/v2_payload.py:_SIGNED_KEYS_BY_VERSION on the
+# miner-side branch — cross-branch contract.
+_SIGNED_EVAL_OUTPUT_KEYS_V2 = frozenset(
+    {
+        "id",
+        "agent_id",
+        "agent_display_name",
+        "card_id",
+        "eval_card_excerpt",
+        "eval_artifact_manifest_hash",
+        "weighted_score",
+        "ran_at",
+    }
+)
 
-def verify_eval_output_signature(
-    eval_output: dict[str, Any], public_key: Ed25519PublicKey
-) -> None:
+# Version-keyed dispatcher. A record's signed payload schema is selected
+# by ``eval_output_schema_version`` (defaulting to 1 when the field is
+# absent — the v1.0.x wire shape).
+_SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
+    1: _SIGNED_EVAL_OUTPUT_KEYS_V1,
+    2: _SIGNED_EVAL_OUTPUT_KEYS_V2,
+}
+
+# Back-compat alias — the prior constant name. Tests and downstream code
+# may still reference this; it points at the v1 key set.
+_SIGNED_EVAL_OUTPUT_KEYS = _SIGNED_KEYS_BY_VERSION[1]
+
+
+def verify_eval_output_signature(eval_output: dict[str, Any], public_key: Ed25519PublicKey) -> None:
     """Verify the cathedral signature over the publisher's signed payload.
 
-    The publisher's `score_and_sign` signs a fixed-key payload
-    (see scoring_pipeline.py:243): id, agent_id, agent_display_name,
-    card_id, output_card, output_card_hash, weighted_score,
-    polaris_verified, ran_at. The wire response carries extra fields
-    (cathedral_signature, merkle_epoch, polaris_attestation) that are
-    NOT part of the signed bytes; we must strip them before
-    canonicalizing or verify fails.
+    Version-aware dispatcher: reads ``eval_output_schema_version`` from
+    the record (defaulting to 1 when absent — the v1.0.x wire shape),
+    looks up the matching key set in ``_SIGNED_KEYS_BY_VERSION``, and
+    verifies against that subset. Unknown versions raise
+    ``PullVerificationError`` — we never silently treat an unknown
+    version as v1.
+
+    The publisher's ``score_and_sign`` signs a fixed-key payload (see
+    ``scoring_pipeline.py``). The wire response carries extra fields
+    (``cathedral_signature``, ``merkle_epoch``, ``polaris_attestation``,
+    ``eval_output_schema_version``) that are NOT part of the signed
+    bytes; we must strip them before canonicalizing or verify fails.
+
+    The version field itself is not in the signed bytes — it's a routing
+    hint. Tampering with it just routes verification to the wrong key
+    set and fails the signature check anyway.
     """
     sig_b64 = eval_output.get("cathedral_signature")
     if not sig_b64:
@@ -371,9 +483,19 @@ def verify_eval_output_signature(
         sig = base64.b64decode(sig_b64)
     except (ValueError, TypeError) as e:
         raise PullVerificationError(f"signature base64 invalid: {e}") from e
-    payload_dict = {
-        k: v for k, v in eval_output.items() if k in _SIGNED_EVAL_OUTPUT_KEYS
-    }
+
+    version_raw = eval_output.get("eval_output_schema_version", 1)
+    try:
+        version = int(version_raw)
+    except (TypeError, ValueError) as e:
+        raise PullVerificationError(
+            f"eval_output_schema_version not an int: {version_raw!r}"
+        ) from e
+    keys = _SIGNED_KEYS_BY_VERSION.get(version)
+    if keys is None:
+        raise PullVerificationError(f"unknown_schema_version: {version}")
+
+    payload_dict = {k: v for k, v in eval_output.items() if k in keys}
     payload = canonical_json(payload_dict)
     try:
         public_key.verify(sig, payload)
@@ -386,37 +508,101 @@ async def _pull_once_async(
     sink: Any,
     public_key: Ed25519PublicKey,
     *,
-    limit: int = 200,
+    limit: int = _DEFAULT_PULL_LIMIT,
 ) -> int:
-    since = _LAST_SINCE["value"]
-    payload = await fetcher(since=since, limit=limit)
-    if not isinstance(payload, dict):
-        return 0
-    items = payload.get("items") or []
-    persisted = 0
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        try:
-            verify_eval_output_signature(item, public_key)
-        except PullVerificationError as e:
-            logger.warning(
-                "pull_eval_signature_invalid", id=item.get("id"), error=str(e)
-            )
-            continue
-        result = sink(item)
-        if asyncio.iscoroutine(result):
-            await result
-        persisted += 1
+    """One cursor-advancing cycle. Drains saturated pages.
 
-    next_since = payload.get("next_since")
-    if isinstance(next_since, str):
-        _LAST_SINCE["value"] = next_since
-    elif items:
-        last = items[-1].get("ran_at") if isinstance(items[-1], dict) else None
-        if isinstance(last, str):
-            _LAST_SINCE["value"] = last
+    Mirrors :func:`run_pull_loop` so the contract test and production
+    loop share semantics. When a page returns exactly ``limit`` rows,
+    pull again immediately (we're behind). Cap at ``_MAX_INNER_PULLS``
+    iterations per outer call so a stub fetcher that always returns a
+    saturated page cannot loop forever.
+    """
+    persisted = 0
+    inner_pulls = 0
+    while inner_pulls < _MAX_INNER_PULLS:
+        inner_pulls += 1
+        since_ran_at = _LAST_SINCE["ran_at"]
+        since_id = _LAST_SINCE["id"]
+        payload = await _invoke_fetcher(
+            fetcher, since_ran_at=since_ran_at, since_id=since_id, limit=limit
+        )
+        if not isinstance(payload, dict):
+            return persisted
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            return persisted
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                verify_eval_output_signature(item, public_key)
+            except PullVerificationError as e:
+                logger.warning("pull_eval_signature_invalid", id=item.get("id"), error=str(e))
+                continue
+            result = sink(item)
+            if asyncio.iscoroutine(result):
+                await result
+            persisted += 1
+
+        # Advance the cursor — prefer the publisher's tuple cursor;
+        # fall back to legacy next_since (ran_at only); fall back to
+        # last item's (ran_at, id).
+        next_ran_at = payload.get("next_since_ran_at")
+        next_id = payload.get("next_since_id")
+        if isinstance(next_ran_at, str) and isinstance(next_id, str):
+            _LAST_SINCE["ran_at"] = next_ran_at
+            _LAST_SINCE["id"] = next_id
+        elif isinstance(next_ran_at, str):
+            _LAST_SINCE["ran_at"] = next_ran_at
+        else:
+            legacy = payload.get("next_since")
+            if isinstance(legacy, str):
+                # Legacy publisher cursor — only ran_at. Leave id alone
+                # (UPSERT dedupes any boundary overlap).
+                _LAST_SINCE["ran_at"] = legacy
+            elif items:
+                last = items[-1] if isinstance(items[-1], dict) else None
+                if isinstance(last, dict):
+                    last_ran = last.get("ran_at")
+                    last_id = last.get("id")
+                    if isinstance(last_ran, str):
+                        _LAST_SINCE["ran_at"] = last_ran
+                    if isinstance(last_id, str):
+                        _LAST_SINCE["id"] = last_id
+
+        # Caught up — no need for another inner pull.
+        if len(items) < limit:
+            break
+
     return persisted
+
+
+async def _invoke_fetcher(
+    fetcher: Any,
+    *,
+    since_ran_at: str | None,
+    since_id: str | None,
+    limit: int,
+) -> Any:
+    """Call ``fetcher`` with a best-effort signature.
+
+    Production fetchers accept the v1.1.0 tuple ``(since_ran_at,
+    since_id)``. The existing contract tests in
+    ``tests/v1/test_validator_pull_loop.py`` use a stub fetcher with the
+    legacy signature ``fetcher(since=..., limit=...)``. We try the new
+    shape first, fall back to the legacy shape with ``since=since_ran_at``
+    if the call raises ``TypeError`` (unknown kwarg).
+    """
+    try:
+        return await fetcher(
+            since_ran_at=since_ran_at,
+            since_id=since_id,
+            limit=limit,
+        )
+    except TypeError:
+        return await fetcher(since=since_ran_at, limit=limit)
 
 
 def pull_once(
@@ -424,14 +610,21 @@ def pull_once(
     sink: Any,
     public_key: Ed25519PublicKey,
     *,
-    limit: int = 200,
+    limit: int = _DEFAULT_PULL_LIMIT,
 ) -> int:
     """One cursor-advancing pull cycle.
 
-    `fetcher(since, limit) -> {items, next_since, merkle_epoch_latest}`
-    `sink(eval_output) -> None`  (called per verified entry)
+    Fetcher signature (v1.1.0):
+    ``fetcher(since_ran_at, since_id, limit) -> {items, next_since_ran_at,
+    next_since_id, next_since, merkle_epoch_latest}``
 
-    Returns the number of entries handed to `sink`. Synchronous wrapper
+    Legacy fallback (v1.0.x stubs): ``fetcher(since, limit)`` — the loop
+    transparently falls back when ``fetcher`` raises ``TypeError`` on
+    the new kwargs.
+
+    ``sink(eval_output) -> None`` is called per verified entry.
+
+    Returns the number of entries handed to ``sink``. Synchronous wrapper
     so test harnesses can call without managing an event loop.
     """
     coro = _pull_once_async(fetcher, sink, public_key, limit=limit)

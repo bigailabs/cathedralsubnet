@@ -116,7 +116,6 @@ The publisher rejects submissions with bad signatures (HTTP 401), missing bundle
 | `ssh_host` | string | required when `attestation_mode=ssh-probe` |
 | `ssh_port` | int | optional when `ssh-probe` (default 22) |
 | `ssh_user` | string | required when `attestation_mode=ssh-probe` |
-| `hermes_port` | int | required when `attestation_mode=ssh-probe` |
 
 Header `X-Cathedral-Signature: <base64 sr25519 sig>` — required.
 
@@ -128,7 +127,7 @@ v1 mines on **BYO compute**. You run Hermes on your own box; Cathedral observes 
 
 ### `attestation_mode=ssh-probe` (recommended, BYO infrastructure)
 
-Bring your own infrastructure — run Hermes yourself on any box (laptop, home server, VPS, dedicated). Authorize Cathedral by adding our public SSH key to `~/.ssh/authorized_keys` for the user Cathedral logs in as. Cathedral SSHs in, hits your local `http://localhost:{{hermes_port}}/chat` with each job prompt, captures the response, leaves.
+Bring your own infrastructure — install [Hermes Agent](https://hermes-agent.nousresearch.com/) on any box (laptop, home server, VPS, dedicated) and configure it with your LLM provider key. Authorize Cathedral by adding our public SSH key to `~/.ssh/authorized_keys` for the user Cathedral logs in as. For each eval, Cathedral SSHs in, snapshots your Hermes profile into an isolated `cathedral-eval-<round>` profile, runs `hermes -z "<task>"` against that profile, captures the full forensic trail (state.db slice, session log, request dumps, skills, memory), tears down the eval profile, and signs the bundle.
 
 Submit with:
 
@@ -137,16 +136,16 @@ attestation_mode=ssh-probe
 ssh_host=miner.example.com
 ssh_port=22
 ssh_user=cathedral-prober
-hermes_port=18789
 ```
 
 Cathedral's public SSH key is published at `{_BASE_URL}/.well-known/cathedral-ssh-key.pub`. Install it as a single line in the `authorized_keys` file for the user nominated in `ssh_user`. That user only needs:
-- read access to `~/.hermes/soul.md` and `~/.hermes/AGENTS.md`
-- ability to `curl http://localhost:{{hermes_port}}/chat`
+- `hermes` on PATH and a working Hermes installation under `~/.hermes/`
+- read + execute access to the eval profile we create under `~/.hermes/profiles/cathedral-eval-<round>/`
+- ability to spawn subprocesses (Hermes invokes your LLM provider directly)
 
-Cathedral does NOT need root, sudo, or write access on your box.
+Cathedral does NOT need root, sudo, or write access outside `~/.hermes/profiles/cathedral-eval-<round>/`. Your primary `~/.hermes/` profile is snapshotted but never modified.
 
-Failure modes you'll see in your visit log: `connect_refused`, `auth_failed`, `hermes_not_found`, `hermes_unhealthy`, `prompt_timeout`, `prompt_error`, `file_missing`, `package_failed`, `transfer_failed`, `disconnect_dirty`. Each has a specific cause; fix the obvious one (run hermes, open the port, install the key, set HERMES_HOME) and the next visit will succeed.
+Failure modes you'll see in your visit log: `connect_refused`, `auth_failed`, `hermes_not_found` (the `hermes` binary isn't on PATH for `ssh_user`), `hermes_install_invalid` (`~/.hermes/` missing or unwritable), `prompt_timeout`, `prompt_error` (LLM provider rejected, check your inference key + balance), `transfer_failed` (SCP back of the trace bundle failed; check `/tmp` free space), `disconnect_dirty`. Each has a specific cause; fix the obvious one and the next visit will succeed.
 
 ### `attestation_mode=tee` (advanced)
 

@@ -256,6 +256,7 @@ def submit_multipart(
     override_signature: str | None = None,
     override_hotkey: str | None = None,
     override_bundle_hash: str | None = None,
+    attestation_mode: str = "bundle",
 ) -> Any:
     """POST /v1/agents/submit per CONTRACTS.md Section 2.1.
 
@@ -279,6 +280,7 @@ def submit_multipart(
         "card_id": card_id,
         "display_name": display_name,
         "submitted_at": submitted_at,
+        "attestation_mode": attestation_mode,
     }
     if bio is not None:
         data["bio"] = bio

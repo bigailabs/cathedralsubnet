@@ -122,6 +122,13 @@ class PolarisRunResult:
     # or when the agent owner has no registered TAO address. Used by
     # the orchestrator to flag `polaris_verified=True` on the row.
     manifest: dict[str, Any] | None = None
+    # v1.1.0 PR 5: when the runner produced a Hermes trace bundle on
+    # local disk (currently only SshHermesRunner does this), the
+    # orchestrator picks it up and hands it to EvalArtifactPublisher
+    # for Hippius upload + manifest signing. Other runners leave this
+    # None. Forward-declared as Any to avoid a circular import with
+    # ssh_hermes_runner.TraceBundle.
+    trace_bundle: Any | None = None
 
 
 class PolarisRunner(Protocol):

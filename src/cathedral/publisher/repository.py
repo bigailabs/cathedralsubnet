@@ -559,6 +559,11 @@ async def insert_eval_run(
     polaris_attestation: dict[str, Any] | None = None,
     trace_json: dict[str, Any] | None = None,
     polaris_manifest: dict[str, Any] | None = None,
+    eval_card_excerpt: dict[str, Any] | None = None,
+    eval_artifact_manifest_hash: str | None = None,
+    eval_artifact_bundle_url: str | None = None,
+    eval_artifact_manifest_url: str | None = None,
+    eval_output_schema_version: int = 1,
 ) -> None:
     """Insert an eval_runs row.
 
@@ -586,6 +591,25 @@ async def insert_eval_run(
     `polaris_manifest` is the verified manifest pulled from
     `/api/cathedral/v1/agents/{id}/manifest` after the v2 deploy. Stored
     so future audits can re-verify the Ed25519 signature.
+
+    v1.1.0 eval-output schema split (cathedralai/cathedral#75 PR 4):
+
+    - ``eval_card_excerpt`` — the small Card subset rendered by the site
+      and covered by the v2 signed payload. Populated during the 48h
+      dual-publish window alongside ``output_card_json``.
+    - ``eval_artifact_manifest_hash`` — blake3 hex of the canonical-JSON
+      manifest produced by ``EvalArtifactPublisher.publish()`` (PR 3).
+      Signed under v2; covers the Hermes forensic trail by hash.
+    - ``eval_artifact_bundle_url`` / ``eval_artifact_manifest_url`` —
+      Hippius s3:// URIs for the encrypted bundle and signed manifest.
+      Live in the UNSIGNED response envelope (per Q4 contract — URLs
+      rotate as Hippius CIDs garbage-collect; we anchor integrity on
+      the manifest hash, not the URL identity).
+    - ``eval_output_schema_version`` — routing hint the validator's
+      ``_SIGNED_KEYS_BY_VERSION`` dispatcher reads to pick the right
+      key set. Defaults to 1 so historical rows verify under the v1
+      keyset; v1.1.0 publisher writes 2 when
+      ``CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true``.
     """
     await conn.execute(
         """
@@ -594,8 +618,14 @@ async def insert_eval_run(
             polaris_run_id, task_json, output_card_json, output_card_hash,
             score_parts, weighted_score, ran_at, duration_ms, errors,
             cathedral_signature, polaris_verified, polaris_attestation,
-            trace_json, polaris_manifest
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            trace_json, polaris_manifest,
+            eval_card_excerpt, eval_artifact_manifest_hash,
+            eval_artifact_bundle_url, eval_artifact_manifest_url,
+            eval_output_schema_version
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?
+        )
         """,
         (
             id,
@@ -617,6 +647,11 @@ async def insert_eval_run(
             json.dumps(polaris_attestation) if polaris_attestation is not None else None,
             json.dumps(trace_json) if trace_json is not None else None,
             json.dumps(polaris_manifest) if polaris_manifest is not None else None,
+            json.dumps(eval_card_excerpt) if eval_card_excerpt is not None else None,
+            eval_artifact_manifest_hash,
+            eval_artifact_bundle_url,
+            eval_artifact_manifest_url,
+            int(eval_output_schema_version),
         ),
     )
     await conn.commit()
@@ -681,30 +716,96 @@ async def list_eval_runs_recent(
     conn: aiosqlite.Connection,
     *,
     since: datetime,
+    since_id: str | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """Cross-card recent feed used by the validator pull loop AND the
     public `/v1/leaderboard/recent` endpoint.
 
-    Joined against `agent_submissions` and gated on the verified surface
-    so unverified discovery submissions never appear on the leaderboard
-    feed. Discovery rows never produce eval_runs at all, but the join
-    is defense-in-depth in case a future code path inserts one.
+    Two cursor shapes, dispatched on ``since_id``:
+
+    * **v1.1.0 tuple cursor** (``since_id`` is a string, including
+      ``""``). Predicate ``WHERE (ran_at, id) > (?, ?)`` over the
+      composite total order ``(ran_at, id)``. Used by v1.1.0 validators
+      that thread the ``next_since_ran_at`` + ``next_since_id`` pair
+      back through subsequent pulls. No row is ever returned twice and
+      no row is ever skipped, even when many rows share the same
+      millisecond ``ran_at`` (the cadence eval case).
+    * **v1.0.7 legacy cursor** (``since_id is None``). Predicate
+      ``WHERE ran_at > ?`` — strict `>` on the single timestamp, no
+      tuple comparison. Used when a v1.0.7 validator polls without the
+      ``since_id`` query param. Strict `>` is the cleaner of the two
+      legacy operators (audit Risk 2 belt-and-suspenders): every
+      non-collision tick advances the cursor cleanly past the boundary
+      row, no UPSERT thrashing. The audit acknowledges that >limit
+      rows at one millisecond is unsolvable for a stateless
+      single-string cursor regardless of operator; v1.0.7's fleet is
+      expected to PM2-cycle to v1.1.0 before cadence sweeps land.
+
+    Both branches normalize the ``since`` datetime to the canonical
+    millisecond-precision Z form (matching ``scoring_pipeline._ms_iso``,
+    which is the format every stored ``eval_runs.ran_at`` carries). The
+    naive ``datetime.isoformat()`` renders ``+00:00`` instead of ``Z``,
+    and string comparisons of ``+00:00`` vs ``.000Z`` flip in the
+    opposite direction of the intended chronological semantics. Without
+    this normalization, both the tuple and legacy cursors degrade at
+    the boundary millisecond.
+
+    Ordering on ``(ran_at ASC, id ASC)`` in both branches. The composite
+    index ``idx_eval_ran_at_id`` covers this access pattern.
+
+    Joined against ``agent_submissions`` and gated on the verified
+    surface so unverified discovery submissions never appear on the
+    leaderboard feed. Discovery rows never produce eval_runs at all, but
+    the join is defense-in-depth in case a future code path inserts one.
     """
-    cur = await conn.execute(
-        """
-        SELECT er.* FROM eval_runs er
-        JOIN agent_submissions sub ON sub.id = er.submission_id
-        WHERE er.ran_at >= ?
-          AND sub.status != 'discovery'
-          AND sub.attestation_mode IN ('polaris','tee')
-          AND sub.discovery_only = 0
-        ORDER BY er.ran_at ASC LIMIT ?
-        """,
-        (since.isoformat(), limit),
-    )
+    since_str = _ms_z(since)
+    if since_id is None:
+        # Legacy v1.0.7-style cursor: strict `>` on ran_at only.
+        cur = await conn.execute(
+            """
+            SELECT er.* FROM eval_runs er
+            JOIN agent_submissions sub ON sub.id = er.submission_id
+            WHERE er.ran_at > ?
+              AND sub.status != 'discovery'
+              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.discovery_only = 0
+            ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
+            """,
+            (since_str, limit),
+        )
+    else:
+        # v1.1.0 tuple cursor: row-value comparison over (ran_at, id).
+        cur = await conn.execute(
+            """
+            SELECT er.* FROM eval_runs er
+            JOIN agent_submissions sub ON sub.id = er.submission_id
+            WHERE (er.ran_at, er.id) > (?, ?)
+              AND sub.status != 'discovery'
+              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.discovery_only = 0
+            ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
+            """,
+            (since_str, since_id, limit),
+        )
     rows = await cur.fetchall()
     return [_row_to_eval_run(r, cur.description) for r in rows]
+
+
+def _ms_z(dt: datetime) -> str:
+    """Render a datetime in the same millisecond-precision Z form that
+    ``scoring_pipeline._ms_iso`` writes to every stored ``ran_at``.
+
+    Stored rows look like ``2026-05-10T12:00:00.000Z``; the cursor
+    comparison must use the same shape or ASCII string compares flip
+    (``+`` < ``.`` < ``Z``, so a ``+00:00`` cursor compares as strictly
+    less than any ``.NNNZ`` row even when the underlying instants are
+    equal).
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    s = dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+    return s + "Z"
 
 
 async def list_eval_runs_in_window(
@@ -785,6 +886,55 @@ async def queued_submissions(conn: aiosqlite.Connection, limit: int = 4) -> list
     cur = await conn.execute(
         "SELECT * FROM agent_submissions WHERE status='queued' ORDER BY submitted_at ASC LIMIT ?",
         (limit,),
+    )
+    rows = await cur.fetchall()
+    return [_row_to_submission(r, cur.description) for r in rows]
+
+
+async def submissions_due_for_cadence(
+    conn: aiosqlite.Connection,
+    *,
+    now: datetime,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    """Pick `ranked` submissions whose cadence window has expired.
+
+    cathedralai/cathedral#75 PR 5: each card has a
+    `refresh_cadence_hours` (defaults 24). A `ranked` submission is
+    due for a fresh eval when `now - max(eval_runs.ran_at) >=
+    card.refresh_cadence_hours`. Each cadence tick produces a new
+    eval_runs row tied to the same submission_id — 1:N over time.
+
+    The query joins agent_submissions → card_definitions for the
+    cadence, then LEFT JOINs eval_runs for the latest ran_at per
+    submission. Sorted by "most overdue first" so a backlog drains
+    in priority order.
+
+    `discovery` rows are excluded (they never run evals). `rejected`
+    rows are excluded (the cadence loop doesn't resurrect them; a
+    miner resubmits to re-enter). Only `ranked` is in scope here;
+    `queued` is handled by ``queued_submissions`` (first-eval path).
+    """
+    now_iso = now.isoformat()
+    cur = await conn.execute(
+        """
+        SELECT sub.*,
+               COALESCE(MAX(er.ran_at), sub.submitted_at) AS _last_eval_ran_at,
+               cd.refresh_cadence_hours AS _refresh_cadence_hours
+        FROM agent_submissions sub
+        JOIN card_definitions cd ON cd.id = sub.card_id
+        LEFT JOIN eval_runs er ON er.submission_id = sub.id
+        WHERE sub.status = 'ranked'
+          AND sub.attestation_mode IN ('polaris', 'polaris-deploy', 'ssh-probe', 'tee', 'bundle')
+          AND sub.discovery_only = 0
+        GROUP BY sub.id
+        HAVING (
+            julianday(?) - julianday(COALESCE(MAX(er.ran_at), sub.submitted_at))
+        ) * 24.0 >= cd.refresh_cadence_hours
+        ORDER BY _last_eval_ran_at ASC
+        LIMIT ?
+        """,
+        (now_iso, limit),
     )
     rows = await cur.fetchall()
     return [_row_to_submission(r, cur.description) for r in rows]

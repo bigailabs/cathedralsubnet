@@ -241,7 +241,9 @@ cathedral weights                                    # weight-set status word
 cathedral registration                               # is the validator on the metagraph
 ```
 
-Full validator procedure (mechanism, anti-cheating, requirements, known limits, how to verify a specific eval): [docs/VALIDATOR.md](docs/VALIDATOR.md). Operational runbook (systemd, logs, recovery): [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md).
+Full validator procedure (mechanism, anti-cheating, requirements, known limits, how to verify a specific eval): [docs/VALIDATOR.md](docs/VALIDATOR.md). Operational runbook (systemd, logs, recovery): [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md). v1.1.0 upgrade notes: [docs/validator/UPGRADING_TO_V1_1_0.md](docs/validator/UPGRADING_TO_V1_1_0.md).
+
+You can confirm a validator is running v1.1.0 by querying `https://api.taostats.io/api/validator/weights/latest/v1?netuid=39` and checking `version_key=1001000` on their last weight-set.
 
 ## Documentation map
 

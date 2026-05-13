@@ -369,6 +369,361 @@ def test_leaderboard_recent_returns_cross_card_evals(publisher_client):
 
 
 # --------------------------------------------------------------------------
+# v1.1.0 legacy-cursor compat — `?since=...` without `since_id`
+# --------------------------------------------------------------------------
+#
+# These tests exercise the publisher's two cursor branches:
+#
+# * Legacy v1.0.7 mode (no ``since_id`` query param) — must use strict
+#   ``WHERE ran_at > ?`` so the cursor advances cleanly past the
+#   boundary timestamp once a v1.0.7 validator has set
+#   ``last_seen = items[-1].ran_at``. The original v1.1.0 code defaulted
+#   ``since_id`` to ``""`` and ran ``(ran_at, id) > (since, '')``, which
+#   re-included every row at the boundary on every pull (every UUID is
+#   ``> ''``) and stranded v1.0.7 cursors forever.
+#
+# * v1.1.0 tuple cursor (``since_id`` present, even ``""``) — must use
+#   ``WHERE (ran_at, id) > (?, ?)`` so v1.1.0 validators thread the
+#   ``next_since_ran_at`` + ``next_since_id`` pair and drain ms-collision
+#   bursts without re-delivery.
+#
+# Both branches must produce a consistent forward-progress story over
+# typical (non-ms-collision) traffic so v1.0.x and v1.1.0 validators
+# pulling at the same ``since`` see the same forward-edge rows.
+
+
+def _seed_eval_runs_at_same_ms(db_path: str, *, count: int, ran_at_iso: str) -> list[str]:
+    """Seed `count` eval_runs all at the same ``ran_at``, bypassing the
+    submit + scoring pipeline.
+
+    Returns the list of UUIDs sorted in the lexicographic order the
+    publisher's ``ORDER BY er.ran_at ASC, er.id ASC`` will scan in,
+    so tests can assert pagination boundaries deterministically.
+
+    Pattern mirrors ``tests/v1/test_discovery_surface.py`` — open a
+    second aiosqlite connection to the same WAL DB after the publisher
+    lifespan has run its card-definition seed.
+    """
+    import asyncio
+    import secrets
+    from datetime import UTC, datetime
+
+    from cathedral.publisher import repository
+    from cathedral.validator.db import connect as connect_db
+
+    submission_id = secrets.token_hex(16)
+    miner_hotkey = "5SeededLegacyCursor" + "0" * 28
+
+    async def _do() -> list[str]:
+        conn = await connect_db(db_path)
+        try:
+            await repository.insert_agent_submission(
+                conn,
+                id=submission_id,
+                miner_hotkey=miner_hotkey,
+                card_id="eu-ai-act",
+                bundle_blob_key=f"bundles/{submission_id}.bin",
+                bundle_hash="0" * 64,
+                bundle_size_bytes=1024,
+                encryption_key_id="kek-test",
+                bundle_signature="b64:stub",
+                display_name="Legacy Cursor Probe",
+                bio=None,
+                logo_url=None,
+                soul_md_preview=None,
+                metadata_fingerprint=secrets.token_hex(8),
+                similarity_check_passed=True,
+                rejection_reason=None,
+                status="ranked",
+                submitted_at=datetime.now(UTC),
+                submitted_at_iso=ran_at_iso,
+                first_mover_at=None,
+                attestation_mode="polaris",
+                attestation_verified_at=None,
+                discovery_only=False,
+            )
+            await repository.update_submission_score(
+                conn, submission_id, current_score=0.7, current_rank=1
+            )
+
+            # Generate ids in sorted order so test assertions don't need
+            # to know UUID-v4 lexicographic ordering tricks.
+            ids = [f"00000000-0000-4000-8000-{i:012d}" for i in range(count)]
+            for eval_id in ids:
+                await repository.insert_eval_run(
+                    conn,
+                    id=eval_id,
+                    submission_id=submission_id,
+                    epoch=0,
+                    round_index=0,
+                    polaris_agent_id="polaris-agent",
+                    polaris_run_id="polaris-run",
+                    task_json={"prompt": "demo"},
+                    output_card_json={"id": "eu-ai-act", "idx": eval_id[-12:]},
+                    output_card_hash="a" * 64,
+                    score_parts={"source_quality": 0.5},
+                    weighted_score=0.5,
+                    ran_at=datetime.now(UTC),
+                    ran_at_iso=ran_at_iso,
+                    duration_ms=100,
+                    errors=None,
+                    cathedral_signature="stub-signature-not-verified-by-this-test",
+                )
+            await conn.commit()
+        finally:
+            await conn.close()
+        return ids
+
+    return asyncio.run(_do())
+
+
+def test_leaderboard_recent_legacy_cursor_drains_ms_collision_burst(publisher_app, tmp_path):
+    """v1.1.0 deploy-blocker fix: a v1.0.7 validator polling with just
+    ``?since=...`` (no ``since_id``) MUST be able to walk through more
+    rows than ``limit`` at the same millisecond.
+
+    Pre-fix behavior: the publisher defaulted ``since_id`` to ``""`` and
+    ran ``(ran_at, id) > (since, '')``. Every non-empty UUID satisfies
+    ``id > ''``, so every row at ``ran_at == since`` was re-delivered on
+    every pull. A v1.0.7 cursor advancing to ``items[-1].ran_at`` got
+    stuck and never escaped the boundary millisecond.
+
+    Post-fix: legacy mode uses ``WHERE ran_at > ?`` (strict ``>``). The
+    cursor advances cleanly past the boundary timestamp; subsequent
+    polls return ``[]`` (or whatever is past the boundary). UPSERT on
+    the validator side dedupes the boundary row when re-encountered
+    via normal traffic. The audit acknowledges that >limit rows at one
+    millisecond is unsolvable for a stateless single-string cursor —
+    this test pins the cursor-advancement behavior, not full drain.
+    """
+    from fastapi.testclient import TestClient
+
+    ran_at_iso = "2026-05-10T12:00:00.000Z"
+    db_path = str(tmp_path / "publisher.db")
+
+    with TestClient(publisher_app) as client:
+        ids = _seed_eval_runs_at_same_ms(db_path, count=250, ran_at_iso=ran_at_iso)
+
+        # First pull from a v1.0.7 validator: only `since` passed, no
+        # `since_id`. The startup cursor is 1h ago.
+        since = "2026-05-10T11:00:00.000Z"
+        resp = client.get(
+            "/v1/leaderboard/recent",
+            params={"since": since, "limit": 100},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Page is saturated → legacy next_since must be non-null.
+        assert len(body["items"]) == 100, (
+            f"expected first legacy page to be saturated at 100 rows; got {len(body['items'])}"
+        )
+        assert body["next_since"] is not None, (
+            "v1.0.7 fleet stalls if legacy next_since is null on a saturated page"
+        )
+        first_page_ids = {item["id"] for item in body["items"]}
+        # The publisher orders (ran_at, id) ASC, so first 100 ids are the
+        # lexicographically first 100 of our seeded set.
+        assert first_page_ids == set(ids[:100])
+
+        # Second pull: v1.0.7 advances `last_seen = items[-1].ran_at` and
+        # re-polls. Pre-fix: same 100 rows come back. Post-fix: zero rows
+        # come back because strict `>` excludes the boundary millisecond.
+        resp2 = client.get(
+            "/v1/leaderboard/recent",
+            params={"since": body["next_since"], "limit": 100},
+        )
+        assert resp2.status_code == 200, resp2.text
+        body2 = resp2.json()
+        # The exact post-fix contract: legacy mode strict `>` returns
+        # zero rows because every seeded row has ran_at == since.
+        assert body2["items"] == [], (
+            "Legacy cursor must advance past the boundary millisecond. "
+            "If this returns the same 100 rows as the first page, the "
+            "pre-fix tuple-comparison bug has regressed: "
+            f"got {len(body2['items'])} rows, sample id="
+            f"{(body2['items'][0]['id'] if body2['items'] else None)!r}"
+        )
+        assert body2["next_since"] is None, (
+            f"caught-up legacy response must emit next_since=null; got {body2['next_since']!r}"
+        )
+
+
+def test_leaderboard_recent_tuple_cursor_drains_ms_collision_burst(publisher_app, tmp_path):
+    """v1.1.0 tuple cursor: a validator threading
+    ``since_ran_at`` + ``since_id`` MUST drain all rows at a boundary
+    millisecond across pages of ``limit``.
+
+    This is the v1.1.0 happy path the cadence eval load depends on. The
+    smoke test ``test_v107_v110_back_compat`` exercises the v1.0.7 side
+    of the wire; this one pins the v1.1.0-validator side against the
+    real publisher (no in-memory fake).
+    """
+    from fastapi.testclient import TestClient
+
+    ran_at_iso = "2026-05-10T12:00:00.000Z"
+    db_path = str(tmp_path / "publisher.db")
+
+    with TestClient(publisher_app) as client:
+        ids = _seed_eval_runs_at_same_ms(db_path, count=250, ran_at_iso=ran_at_iso)
+
+        all_persisted: list[str] = []
+        cursor_ran_at = "2026-05-10T11:00:00.000Z"
+        cursor_id: str = ""
+        for _ in range(10):  # 250 / 100 = 3 saturated pages + 1 short, with headroom
+            resp = client.get(
+                "/v1/leaderboard/recent",
+                params={
+                    "since_ran_at": cursor_ran_at,
+                    "since_id": cursor_id,
+                    "limit": 100,
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            page_ids = [item["id"] for item in body["items"]]
+            all_persisted.extend(page_ids)
+            if len(body["items"]) < 100:
+                break
+            # v1.1.0 validators read the tuple cursor fields.
+            cursor_ran_at = body["next_since_ran_at"]
+            cursor_id = body["next_since_id"]
+            assert cursor_ran_at is not None
+            assert cursor_id is not None
+        else:
+            pytest.fail(
+                f"tuple cursor did not drain 250 ms-colliding rows in 10 "
+                f"pages of 100; persisted {len(all_persisted)} ids"
+            )
+
+        assert set(all_persisted) == set(ids), (
+            f"tuple cursor missed rows: persisted {len(set(all_persisted))} of {len(ids)}"
+        )
+        # Each row exactly once — no re-delivery under tuple cursor.
+        assert len(all_persisted) == len(ids), (
+            f"tuple cursor re-delivered rows: persisted {len(all_persisted)} "
+            f"entries for {len(set(all_persisted))} unique ids"
+        )
+
+
+def test_leaderboard_recent_legacy_and_tuple_agree_on_normal_traffic(publisher_app, tmp_path):
+    """Sanity: when ``ran_at`` values do NOT collide, the legacy cursor
+    (``?since=...``) and the tuple cursor
+    (``?since_ran_at=...&since_id=...``) return the same set of rows
+    over consecutive pages.
+
+    Pins forward-progress equivalence so a single subnet running a mix
+    of v1.0.x and v1.1.0 validators sees the same eval feed on both
+    binaries during the rollout window.
+    """
+    import asyncio
+    import secrets
+    from datetime import UTC, datetime, timedelta
+
+    from fastapi.testclient import TestClient
+
+    from cathedral.publisher import repository
+    from cathedral.validator.db import connect as connect_db
+
+    db_path = str(tmp_path / "publisher.db")
+
+    with TestClient(publisher_app) as client:
+        # Seed 5 rows at ms-spaced ran_ats so neither cursor mode degrades.
+        base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+        submission_id = secrets.token_hex(16)
+        expected_ids: list[str] = []
+
+        async def _do() -> None:
+            conn = await connect_db(db_path)
+            try:
+                await repository.insert_agent_submission(
+                    conn,
+                    id=submission_id,
+                    miner_hotkey="5SeededMixedCursorXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                    card_id="eu-ai-act",
+                    bundle_blob_key=f"bundles/{submission_id}.bin",
+                    bundle_hash="0" * 64,
+                    bundle_size_bytes=1024,
+                    encryption_key_id="kek-test",
+                    bundle_signature="b64:stub",
+                    display_name="Mixed Cursor Probe",
+                    bio=None,
+                    logo_url=None,
+                    soul_md_preview=None,
+                    metadata_fingerprint=secrets.token_hex(8),
+                    similarity_check_passed=True,
+                    rejection_reason=None,
+                    status="ranked",
+                    submitted_at=base,
+                    submitted_at_iso="2026-05-10T12:00:00.000Z",
+                    first_mover_at=None,
+                    attestation_mode="polaris",
+                    attestation_verified_at=None,
+                    discovery_only=False,
+                )
+                await repository.update_submission_score(
+                    conn, submission_id, current_score=0.7, current_rank=1
+                )
+                for i in range(5):
+                    rid = f"11111111-1111-4111-8111-{i:012d}"
+                    expected_ids.append(rid)
+                    ran_at = base + timedelta(milliseconds=i * 10)
+                    ran_at_iso = (
+                        ran_at.strftime("%Y-%m-%dT%H:%M:%S.")
+                        + f"{ran_at.microsecond // 1000:03d}"
+                        + "Z"
+                    )
+                    await repository.insert_eval_run(
+                        conn,
+                        id=rid,
+                        submission_id=submission_id,
+                        epoch=0,
+                        round_index=0,
+                        polaris_agent_id="polaris-agent",
+                        polaris_run_id="polaris-run",
+                        task_json={"prompt": "demo"},
+                        output_card_json={"id": "eu-ai-act"},
+                        output_card_hash="a" * 64,
+                        score_parts={"source_quality": 0.5},
+                        weighted_score=0.5,
+                        ran_at=ran_at,
+                        ran_at_iso=ran_at_iso,
+                        duration_ms=100,
+                        errors=None,
+                        cathedral_signature="stub-signature-not-verified-by-this-test",
+                    )
+                await conn.commit()
+            finally:
+                await conn.close()
+
+        asyncio.run(_do())
+
+        since = "2026-05-10T11:00:00.000Z"
+        # Legacy cursor — single page covers all 5.
+        resp_legacy = client.get(
+            "/v1/leaderboard/recent",
+            params={"since": since, "limit": 200},
+        )
+        assert resp_legacy.status_code == 200, resp_legacy.text
+        legacy_ids = [item["id"] for item in resp_legacy.json()["items"]]
+
+        # Tuple cursor — same since, explicit empty since_id.
+        resp_tuple = client.get(
+            "/v1/leaderboard/recent",
+            params={"since_ran_at": since, "since_id": "", "limit": 200},
+        )
+        assert resp_tuple.status_code == 200, resp_tuple.text
+        tuple_ids = [item["id"] for item in resp_tuple.json()["items"]]
+
+        assert legacy_ids == tuple_ids, (
+            "legacy and tuple cursor must agree on row set + order over "
+            f"non-ms-collision traffic; got legacy={legacy_ids} "
+            f"tuple={tuple_ids}"
+        )
+        # And both must cover the full seeded set.
+        assert set(legacy_ids) >= set(expected_ids)
+
+
+# --------------------------------------------------------------------------
 # GET /v1/merkle/{epoch}
 # --------------------------------------------------------------------------
 

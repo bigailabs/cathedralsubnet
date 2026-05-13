@@ -157,6 +157,10 @@ CREATE TABLE IF NOT EXISTS agent_submissions (
     ssh_host                 TEXT,
     ssh_port                 INTEGER,
     ssh_user                 TEXT,
+    -- DEPRECATED v1.1.0 (cathedralai/cathedral#75, PR #77). New rows
+    -- write NULL; v1.0.x rows keep their port value. Removable in
+    -- v1.2.0 once all historical rows have aged out of the 30-day
+    -- rolling window. Search marker: `removable-in-v1-2-0`.
     hermes_port              INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_unique
@@ -193,7 +197,18 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     errors              TEXT,
     cathedral_signature TEXT NOT NULL,
     polaris_verified    INTEGER NOT NULL DEFAULT 0,
-    polaris_attestation TEXT
+    polaris_attestation TEXT,
+    -- v1.1.0 eval-output schema split (cathedralai/cathedral#75 PR 4).
+    -- Populated alongside output_card_json during the 48h dual-publish
+    -- window. After cutover (CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true)
+    -- new rows still set output_card_json + output_card_hash for
+    -- back-compat reads on a hypothetical v1.0.x validator pulling
+    -- mid-cutover. v1.2.0 will drop the legacy columns.
+    eval_card_excerpt           TEXT,
+    eval_artifact_manifest_hash TEXT,
+    eval_artifact_bundle_url    TEXT,
+    eval_artifact_manifest_url  TEXT,
+    eval_output_schema_version  INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_eval_submission_time
     ON eval_runs(submission_id, ran_at DESC);
@@ -201,6 +216,12 @@ CREATE INDEX IF NOT EXISTS idx_eval_epoch ON eval_runs(epoch);
 CREATE INDEX IF NOT EXISTS idx_eval_card_score
     ON eval_runs(submission_id, weighted_score DESC);
 CREATE INDEX IF NOT EXISTS idx_eval_ran_at ON eval_runs(ran_at DESC);
+-- v1.1.0: composite ascending index covering the leaderboard/recent
+-- tuple-cursor scan (WHERE (ran_at, id) > (?, ?) ORDER BY ran_at, id).
+-- See 2026-05-12-track-3-pull-cursor-audit.md and
+-- list_eval_runs_recent() in cathedral.publisher.repository.
+CREATE INDEX IF NOT EXISTS idx_eval_ran_at_id
+    ON eval_runs(ran_at ASC, id ASC);
 
 -- Weekly Merkle anchors of eval results.
 CREATE TABLE IF NOT EXISTS merkle_anchors (
@@ -270,6 +291,34 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     if "polaris_manifest" not in cols:
         await conn.execute("ALTER TABLE eval_runs ADD COLUMN polaris_manifest TEXT")
 
+    # v1.1.0 eval-output schema split (cathedralai/cathedral#75 PR 4).
+    # Splits the legacy `output_card_json` blob into three addressable
+    # fields so the validator pull layer can reference the (small)
+    # excerpt, the (signed) manifest hash, and the (unsigned) bundle
+    # URL independently.
+    #
+    # The split is additive: legacy rows keep their `output_card_json`,
+    # `output_card_hash` columns; new rows populate both legacy AND new
+    # fields during the 48h dual-publish window so a CATHEDRAL_EMIT_V2
+    # flip is reversible without re-running evals.
+    #
+    # `eval_output_schema_version` is the routing hint the validator's
+    # `_SIGNED_KEYS_BY_VERSION` dispatcher (validator-compat branch)
+    # reads to pick the right key set. Defaults to 1 so historical rows
+    # verify under the v1 keyset.
+    if "eval_card_excerpt" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_card_excerpt TEXT")
+    if "eval_artifact_manifest_hash" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_artifact_manifest_hash TEXT")
+    if "eval_artifact_bundle_url" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_artifact_bundle_url TEXT")
+    if "eval_artifact_manifest_url" not in cols:
+        await conn.execute("ALTER TABLE eval_runs ADD COLUMN eval_artifact_manifest_url TEXT")
+    if "eval_output_schema_version" not in cols:
+        await conn.execute(
+            "ALTER TABLE eval_runs ADD COLUMN eval_output_schema_version INTEGER NOT NULL DEFAULT 1"
+        )
+
     # agent_submissions: attestation_mode branching (polaris/tee/unverified).
     # Existing rows default to 'polaris' so back-compat with pre-attestation
     # miners holds — they were always on the verified path. SQLite cannot
@@ -322,8 +371,23 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_port INTEGER")
     if "ssh_user" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN ssh_user TEXT")
+    # DEPRECATED v1.1.0 (cathedralai/cathedral#75, PR #77). The column is
+    # kept so v1.0.x historical rows preserve their port value through
+    # the transition; new rows always write NULL. Removable in v1.2.0
+    # once all historical rows have aged out of the 30-day rolling
+    # window. Search marker: `removable-in-v1-2-0`.
     if "hermes_port" not in sub_cols:
         await conn.execute("ALTER TABLE agent_submissions ADD COLUMN hermes_port INTEGER")
+
+    # v1.1.0: composite ascending index for the tuple-cursor leaderboard
+    # scan. SQLite's `CREATE INDEX IF NOT EXISTS` is idempotent, so it's
+    # safe to run on every connect. Existing publisher DBs upgrading from
+    # v1.0.x only have idx_eval_ran_at (DESC); the new ASC composite is
+    # required for efficient row-value comparison scans.
+    # See 2026-05-12-track-3-pull-cursor-audit.md.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_ran_at_id ON eval_runs(ran_at ASC, id ASC)"
+    )
 
     # Tier A drain (cathedralai/cathedral#70). When the publisher boots
     # with CATHEDRAL_ENABLE_POLARIS_DEPLOY unset/false, sweep any
@@ -411,6 +475,8 @@ async def _widen_attestation_mode_check(conn: aiosqlite.Connection) -> None:
             ssh_host                 TEXT,
             ssh_port                 INTEGER,
             ssh_user                 TEXT,
+            -- DEPRECATED v1.1.0 (#75, PR #77). Removable in v1.2.0.
+            -- Search marker: `removable-in-v1-2-0`.
             hermes_port              INTEGER
         )
         """
