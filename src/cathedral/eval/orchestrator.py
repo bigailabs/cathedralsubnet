@@ -481,32 +481,63 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
     if mode == "bundle":
         return BundleCardRunner()
     if mode == "ssh-probe":
-        # v2 free tier — Cathedral SSHs into the miner's box and queries
-        # the running Hermes locally. No Polaris attestation, no 1.10x
-        # multiplier; lands on `attestation_mode=unverified` rows so
-        # the scoring pipeline omits the verified-runtime multiplier.
-        # See `docs/VALIDATOR.md` for failure-mode codes.
+        # Tier B free tier — Cathedral SSHs into the miner's box.
+        #
+        # v1 (legacy, default): SshProbeRunner. Assumes the miner runs
+        # an HTTP server exposing /healthz + /chat. Built on the wrong
+        # premise that Hermes is HTTP-shaped (cathedralai/cathedral#75).
+        #
+        # v2 (CATHEDRAL_PROBER_VERSION=v2): SshHermesRunner. Native
+        # `hermes -z` invocation over SSH. Snapshot-then-eval pattern
+        # per docs/HERMES.md § L.1. Returns a TraceBundle with the
+        # full Hermes forensic trail (state.db slice, sessions JSON,
+        # request dumps, memories, skills, logs) — the data moat.
+        #
+        # Default is v1 while we smoke-test v2 on the rented Polaris
+        # box. Flip via env var when ready to cut over.
+        prober_version = os.environ.get("CATHEDRAL_PROBER_VERSION", "v1").lower()
+
+        ssh_key_path = os.environ.get("CATHEDRAL_SSH_KEY_PATH") or os.path.expanduser(
+            "~/.ssh/cathedral_probe_ed25519"
+        )
+
+        if prober_version == "v2":
+            from cathedral.eval.ssh_hermes_runner import (
+                SshHermesRunner,
+                SshHermesRunnerConfig,
+            )
+
+            bundle_dir = (
+                os.environ.get("CATHEDRAL_BUNDLE_OUTPUT_DIR") or "/var/lib/cathedral/eval-bundles"
+            )
+            return SshHermesRunner(
+                SshHermesRunnerConfig(
+                    ssh_private_key_path=ssh_key_path,
+                    bundle_output_dir=bundle_dir,
+                    connect_timeout_secs=float(
+                        os.environ.get("CATHEDRAL_SSH_CONNECT_TIMEOUT", "10")
+                    ),
+                    eval_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_EVAL_TIMEOUT", "600")),
+                    transfer_timeout_secs=float(
+                        os.environ.get("CATHEDRAL_SSH_TRANSFER_TIMEOUT", "120")
+                    ),
+                    pinned_model=os.environ.get("CATHEDRAL_HERMES_PINNED_MODEL"),
+                    pinned_provider=os.environ.get("CATHEDRAL_HERMES_PINNED_PROVIDER"),
+                )
+            )
+
+        # v1 (default — legacy HTTP-shaped path)
         from cathedral.eval.ssh_probe_runner import (
             SshProbeRunner,
             SshProbeRunnerConfig,
         )
 
-        ssh_key_path = (
-            os.environ.get("CATHEDRAL_SSH_KEY_PATH")
-            or os.path.expanduser("~/.ssh/cathedral_probe_ed25519")
-        )
         return SshProbeRunner(
             SshProbeRunnerConfig(
                 ssh_private_key_path=ssh_key_path,
-                connect_timeout_secs=float(
-                    os.environ.get("CATHEDRAL_SSH_CONNECT_TIMEOUT", "10")
-                ),
-                prompt_timeout_secs=float(
-                    os.environ.get("CATHEDRAL_SSH_PROMPT_TIMEOUT", "60")
-                ),
-                visit_budget_secs=float(
-                    os.environ.get("CATHEDRAL_SSH_VISIT_BUDGET", "300")
-                ),
+                connect_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_CONNECT_TIMEOUT", "10")),
+                prompt_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_PROMPT_TIMEOUT", "60")),
+                visit_budget_secs=float(os.environ.get("CATHEDRAL_SSH_VISIT_BUDGET", "300")),
             )
         )
     if mode == "polaris-deploy":
