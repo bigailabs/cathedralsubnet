@@ -313,7 +313,7 @@ async def test_happy_path_returns_card_and_bundle(runner_config, eval_task, subm
         if "python3 -c" in cmd:
             return _mk_run_result()
         # `hermes chat -q`
-        if "hermes chat -q" in cmd:
+        if "hermes chat -Q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         # rm -f cleanup
         if cmd.startswith("rm -f"):
@@ -576,7 +576,7 @@ async def test_hermes_output_malformed_when_no_json_in_stdout(runner_config, eva
             return _mk_run_result()
         if "hermes profile create" in cmd:
             return _mk_run_result()
-        if "hermes chat -q" in cmd:
+        if "hermes chat -Q" in cmd:
             return _mk_run_result(stdout="I cannot produce a card today, sorry.")
         if "hermes profile delete" in cmd:
             return _mk_run_result()
@@ -629,7 +629,7 @@ async def test_manifest_shape_matches_spec(runner_config, eval_task, submission)
             return _mk_run_result()
         if "python3 -c" in cmd:
             return _mk_run_result()
-        if "hermes chat -q" in cmd:
+        if "hermes chat -Q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -706,7 +706,7 @@ async def test_verify_command_resolves_tilde_to_absolute_path(runner_config, eva
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes chat -q" in cmd:
+        if "hermes chat -Q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -773,7 +773,7 @@ async def test_absolute_hermes_home_still_shlex_quoted(
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes chat -q" in cmd:
+        if "hermes chat -Q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -827,7 +827,7 @@ async def test_hermes_chat_q_invocation_no_legacy_flags(runner_config, eval_task
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes chat -q" in cmd:
+        if "hermes chat -Q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -850,7 +850,7 @@ async def test_hermes_chat_q_invocation_no_legacy_flags(runner_config, eval_task
             submission=submission,
         )
 
-    invoke_cmds = [c for c in captured_cmds if "hermes chat -q" in c]
+    invoke_cmds = [c for c in captured_cmds if "hermes chat -Q" in c]
     assert invoke_cmds, f"no hermes chat -q invocation captured; saw: {captured_cmds!r}"
     invoke_cmd = invoke_cmds[0]
     assert "--max-turns" not in invoke_cmd, (
@@ -883,7 +883,7 @@ async def test_hermes_invocation_uses_chat_q_not_z(runner_config, eval_task, sub
             return _mk_run_result(stdout="hermes 0.13.0\n")
         if "$HOME" in cmd:
             return _mk_run_result(stdout="/home/cathedral-probe")
-        if "hermes chat -q" in cmd:
+        if "hermes chat -Q" in cmd:
             return _mk_run_result(stdout=f"```json\n{json.dumps(card_json)}\n```\n")
         return _mk_run_result()
 
@@ -907,7 +907,7 @@ async def test_hermes_invocation_uses_chat_q_not_z(runner_config, eval_task, sub
         )
 
     # Must have a `hermes chat -q` invocation
-    chat_q_cmds = [c for c in captured_cmds if "hermes chat -q" in c]
+    chat_q_cmds = [c for c in captured_cmds if "hermes chat -Q" in c]
     assert chat_q_cmds, f"expected a hermes chat -q invocation; captured: {captured_cmds!r}"
 
     # Must NOT have a bare ``hermes -z`` (one-shot) invocation anywhere
