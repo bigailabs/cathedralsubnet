@@ -146,12 +146,22 @@ class SshHermesRunnerConfig:
     connect_retry_initial_secs: float = 1.0
     # Path on the miner box where Hermes lives. Almost always
     # ``~/.hermes`` per Hermes's defaults (``hermes_cli/profiles.py``).
+    # If this starts with ``~/`` we resolve it to an absolute path at
+    # session start by querying ``$HOME`` on the miner box, so that
+    # downstream ``shlex.quote`` calls and SFTP paths see a real
+    # filesystem path (bash does NOT expand ``~`` inside single quotes
+    # and SFTP does no expansion at all).
     hermes_home: str = "~/.hermes"
     # Pinned model + provider for the eval invocation. Set via env on
     # the orchestrator side so all evals against a given card use the
     # same model — neutralizes one source of cross-miner variance.
     pinned_model: str | None = None
     pinned_provider: str | None = None
+    # Cap on agentic-loop turns for ``hermes -z``. The baseline Card
+    # workload is a single-turn JSON emit; multi-turn loops let models
+    # like DeepSeek-V3.1 drift into conversational research replies
+    # instead of structured output. ``None`` omits the flag entirely.
+    eval_max_turns: int | None = 1
 
 
 # --------------------------------------------------------------------------
@@ -337,8 +347,14 @@ class SshHermesRunner:
             hermes_version = await self._hermes_version(conn)
             trace.hermes_version = hermes_version
 
+            # Resolve ``hermes_home`` to an absolute path once. Bash does
+            # not expand ``~`` inside single quotes (which is what
+            # ``shlex.quote`` produces) and SFTP performs no expansion at
+            # all, so every downstream consumer needs a real path.
+            resolved_home = await self._resolve_hermes_home(conn)
+
             # 2. Validate the Hermes install
-            await self._verify_hermes_install(conn)
+            await self._verify_hermes_install(conn, resolved_home)
 
             # 3. Snapshot the primary profile into the eval profile
             await self._clone_profile(conn, eval_profile)
@@ -352,6 +368,7 @@ class SshHermesRunner:
                 eval_profile=eval_profile,
                 prompt=task.prompt,
                 eval_round=eval_round,
+                resolved_home=resolved_home,
             )
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
 
@@ -365,6 +382,7 @@ class SshHermesRunner:
                 hermes_version=hermes_version,
                 card_json=card_json,
                 hermes_stdout=hermes_stdout,
+                resolved_home=resolved_home,
             )
             trace.files_collected = [f["path"] for f in bundle.manifest["files"]]
             trace.bundle_path = str(bundle.bundle_tar_path)
@@ -538,18 +556,51 @@ class SshHermesRunner:
             )
         return stdout.strip()
 
-    async def _verify_hermes_install(self, conn: Any) -> None:
+    async def _resolve_hermes_home(self, conn: Any) -> str:
+        """Resolve ``self.config.hermes_home`` to an absolute path on the
+        miner box, expanding any leading ``~/`` against the remote login
+        user's ``$HOME``. Absolute paths are returned unchanged.
+
+        Why: ``shlex.quote("~/.hermes")`` produces ``'~/.hermes'`` and
+        bash does NOT expand ``~`` inside single quotes. SFTP does no
+        expansion at all. Every downstream consumer needs a real path.
+        """
+        home = self.config.hermes_home
+        if not home.startswith("~/") and home != "~":
+            return home.rstrip("/")
+        # Use printf to avoid the trailing newline ``echo`` adds.
+        stdout, stderr, exit_status = await self._run_remote(
+            conn,
+            'printf "%s" "$HOME"',
+            timeout=10.0,
+            check=False,
+        )
+        remote_home = stdout.strip()
+        if exit_status != 0 or not remote_home:
+            raise SshHermesError(
+                "hermes_install_invalid",
+                f"could not resolve remote $HOME (exit={exit_status} stderr={stderr[:200]})",
+            )
+        tail = "" if home == "~" else home[1:]  # keep leading slash from "/...."
+        absolute = remote_home.rstrip("/") + tail
+        return absolute.rstrip("/")
+
+    async def _verify_hermes_install(self, conn: Any, resolved_home: str) -> None:
         """Check that ``~/.hermes/`` (or configured ``hermes_home``) exists
         and is readable. We can't write here — we use ``hermes profile
         create`` for that — but a missing/broken install fails fast.
+
+        ``resolved_home`` is the absolute path on the miner box (see
+        ``_resolve_hermes_home``). We then ``shlex.quote`` it to keep
+        the no-shell-injection guarantee on hostile/unusual paths.
         """
-        home = shlex.quote(self.config.hermes_home)
+        home = shlex.quote(resolved_home)
         cmd = f"test -d {home} && test -r {home}"
         _, stderr, exit_status = await self._run_remote(conn, cmd, timeout=10.0, check=False)
         if exit_status != 0:
             raise SshHermesError(
                 "hermes_install_invalid",
-                f"hermes_home check failed at {self.config.hermes_home}: {stderr[:200]}",
+                f"hermes_home check failed at {resolved_home}: {stderr[:200]}",
             )
 
     async def _clone_profile(self, conn: Any, eval_profile: str) -> None:
@@ -586,13 +637,14 @@ class SshHermesRunner:
         eval_profile: str,
         prompt: str,
         eval_round: str,
+        resolved_home: str,
     ) -> tuple[dict[str, Any], str]:
         """Run `hermes -z "<prompt>"` against the eval profile. Returns
         (parsed_card_json, raw_stdout). ``hermes -z`` writes plain text
         to stdout — no JSON envelope — so we instruct the agent in the
         prompt to emit a fenced JSON block, then parse it.
         """
-        hermes_home = self._profile_path(eval_profile)
+        hermes_home = self._profile_path(eval_profile, resolved_home)
         envs = [f"HERMES_HOME={shlex.quote(hermes_home)}"]
         if self.config.pinned_provider:
             envs.append(f"HERMES_INFERENCE_PROVIDER={shlex.quote(self.config.pinned_provider)}")
@@ -603,7 +655,15 @@ class SshHermesRunner:
         # source=cli (docs/HERMES.md open question 5). HERMES_HOME-per-eval
         # is our isolation; --source doesn't add anything we don't already
         # have. Omit it.
-        cmd = " ".join(envs) + f" hermes -z {shlex.quote(prompt)}"
+        #
+        # ``--max-turns N`` caps the agentic loop. The Card workload is a
+        # single-turn JSON emit; allowing multi-turn loops lets the model
+        # drift into conversational research replies instead of structured
+        # output (DeepSeek-V3.1 in particular). Default config caps at 1.
+        flags = ""
+        if self.config.eval_max_turns is not None:
+            flags = f" --max-turns {int(self.config.eval_max_turns)}"
+        cmd = " ".join(envs) + f" hermes -z{flags} {shlex.quote(prompt)}"
 
         stdout, stderr, exit_status = await self._run_remote(
             conn,
@@ -625,10 +685,13 @@ class SshHermesRunner:
             )
         return card_json, stdout
 
-    def _profile_path(self, eval_profile: str) -> str:
+    def _profile_path(self, eval_profile: str, resolved_home: str) -> str:
         # Mirrors hermes_cli/profiles.py: profiles live at
         # $HERMES_HOME/profiles/<name>/. Default HERMES_HOME is ~/.hermes.
-        return f"{self.config.hermes_home.rstrip('/')}/profiles/{eval_profile}"
+        # ``resolved_home`` is the absolute path returned by
+        # ``_resolve_hermes_home`` — see that method for why we must not
+        # use ``self.config.hermes_home`` directly here.
+        return f"{resolved_home.rstrip('/')}/profiles/{eval_profile}"
 
     # ----------------------------------------------------------------------
     # Collection + bundle assembly
@@ -645,11 +708,12 @@ class SshHermesRunner:
         hermes_version: str,
         card_json: dict[str, Any],
         hermes_stdout: str,
+        resolved_home: str,
     ) -> TraceBundle:
         """Snapshot state.db via sqlite3.backup(), SCP back the rest,
         compute hashes, write manifest, tar.gz the bundle, blake3 it.
         """
-        profile_path = self._profile_path(eval_profile)
+        profile_path = self._profile_path(eval_profile, resolved_home)
         local_root = Path(tempfile.mkdtemp(prefix=f"cathedral-eval-{eval_round}-"))
         try:
             # Snapshot state.db via Hermes's own consistent-backup pattern
