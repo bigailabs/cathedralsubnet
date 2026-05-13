@@ -5,9 +5,12 @@
 #
 # Examples:
 #   ./scripts/miner/submit_agent_bundle.sh --help
-#   ./scripts/miner/submit_agent_bundle.sh --bundle .../cathedral-baseline-bundle.zip \
-#     --wallet-name Crimzor --wallet-hotkey crim --card-id eu-ai-act \
-#     --display-name crimzor-baseline --ssh-host 102.215.78.57 --ssh-user cathedral-probe
+#   ./scripts/miner/submit_agent_bundle.sh --bundle .../cathedral-baseline-bundle.zip \\
+#     --wallet-name NAME --wallet-hotkey HOTKEY --card-id eu-ai-act \\
+#     --display-name LABEL --ssh-host HOST --ssh-user cathedral-probe
+#   ./scripts/miner/submit_agent_bundle.sh --loop --pack-command '.../pack_baseline_bundle.sh' \\
+#     --bundle .../cathedral-baseline-bundle.zip ...same wallet/ssh...
+#   (--loop: default 60s between tries; skips POST when bundle hash unchanged unless --submit-unchanged)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"

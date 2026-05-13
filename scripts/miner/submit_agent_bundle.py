@@ -13,6 +13,9 @@ Manual: after ``source .venv/bin/activate`` use **&&** before ``PYTHONPATH=src p
 (never glue ``activate`` and ``PYTHONPATH`` on one line).
 
 Miner host: run scripts/miner/verify_cathedral_probe.sh as ssh_user before submitting.
+
+Loop: ``--loop`` sleeps ``--interval-secs`` (default **60**) between tries. Unless
+``--submit-unchanged``, identical bundle bytes skip POST to avoid duplicate 409s.
 """
 
 from __future__ import annotations
@@ -103,15 +106,21 @@ def main() -> int:
     p.add_argument(
         "--interval-secs",
         type=int,
-        default=600,
+        default=60,
         metavar="N",
-        help="Sleep between iterations when --loop (default 600).",
+        help="Sleep between iterations when --loop (default 60 = 1 minute).",
     )
     p.add_argument(
         "--pack-command",
         default=None,
         metavar="SHELL",
         help="Run via bash -lc before each read of --bundle (e.g. pack_baseline_bundle.sh).",
+    )
+    p.add_argument(
+        "--submit-unchanged",
+        action="store_true",
+        help="With --loop, POST even when bundle_hash matches the previous iteration "
+        "(default: skip POST to avoid 409 duplicate spam).",
     )
     args = p.parse_args()
 
@@ -137,6 +146,7 @@ def main() -> int:
         print("--interval-secs must be >= 1", file=sys.stderr)
         return 1
 
+    last_bundle_hash: str | None = None
     while True:
         if args.pack_command:
             _run_pack(args.pack_command)
@@ -144,9 +154,23 @@ def main() -> int:
         raw = args.bundle.read_bytes()
         bundle_hash = blake3.blake3(raw).hexdigest()
 
+        if (
+            args.loop
+            and last_bundle_hash is not None
+            and bundle_hash == last_bundle_hash
+            and not args.submit_unchanged
+        ):
+            print(
+                f"{_ts()} skip POST bundle_hash={bundle_hash[:16]}... "
+                "(unchanged since last pack; edit sources or use --submit-unchanged)"
+            )
+            time.sleep(args.interval_secs)
+            continue
+
         with httpx.Client(timeout=120.0) as client:
             r = _post_submit(raw=raw, wallet=wallet, hk=hk, url=url, data=data, client=client)
 
+        last_bundle_hash = bundle_hash
         print(f"{_ts()} {r.status_code} bundle_hash={bundle_hash[:16]}... {r.text}")
 
         if r.status_code == 202:
