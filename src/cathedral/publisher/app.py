@@ -117,9 +117,7 @@ def _materialize_ssh_probe_key() -> None:
     logger.info("ssh_probe_key_materialized", path=str(target))
 
 
-def build_publisher_app(
-    ctx_factory: Any, *, start_eval_loop: bool = True
-) -> FastAPI:
+def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> FastAPI:
     """Build the FastAPI app. `ctx_factory` is an async callable returning
     a `PublisherContext` — kept indirect so tests can inject mocks.
 
@@ -214,6 +212,29 @@ def build_publisher_app(
 
     app = FastAPI(title="Cathedral Publisher", lifespan=lifespan)
 
+    # CORS — cathedral.computer (static site on Cloudflare Pages) fetches
+    # /v1/agents/{id} directly from the publisher to populate the agent
+    # profile modal. Without these headers the in-browser fetch fails and
+    # the modal can only show the seed data baked into the page (no
+    # hotkey, vigil, sparkline, or recent-stones list). Allow the two
+    # public origins plus the live preview deploys; reads are public so
+    # the surface is intentionally permissive.
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=(
+            r"^https://(cathedral\.computer|"
+            r"www\.cathedral\.computer|"
+            r"[a-z0-9-]+\.cathedral-site\.pages\.dev|"
+            r"localhost:\d+)$"
+        ),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+        max_age=600,
+    )
+
     # Always render `{"detail": "<string>"}` per CONTRACTS.md Section 9 lock #3.
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -228,9 +249,7 @@ def build_publisher_app(
         )
 
     @app.exception_handler(RequestValidationError)
-    async def _validation_handler(
-        _request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
+    async def _validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
         # Surface a single readable line; the full pydantic detail is
         # logged separately for the operator dashboard.
         first = exc.errors()[0] if exc.errors() else {"msg": "invalid request"}
@@ -347,9 +366,7 @@ def build_publisher_app(
             try:
                 seed = bytes.fromhex(sk_hex)
                 priv = Ed25519PrivateKey.from_private_bytes(seed)
-                pub = priv.public_key().public_bytes(
-                    Encoding.Raw, PublicFormat.Raw
-                )
+                pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
                 out["keys"].append(
                     {
                         "kid": "cathedral-eval-signing",
@@ -382,9 +399,7 @@ def build_publisher_app(
                         "alg": "EdDSA",
                         "kty": "OKP",
                         "crv": "Ed25519",
-                        "x": _b64.urlsafe_b64encode(polaris_bytes)
-                        .rstrip(b"=")
-                        .decode(),
+                        "x": _b64.urlsafe_b64encode(polaris_bytes).rstrip(b"=").decode(),
                         "public_key_hex": polaris_hex,
                         "purpose": (
                             "Polaris signs runtime attestations over each "
@@ -441,6 +456,7 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
             hippius = client
         except Exception as e:
             import structlog
+
             structlog.get_logger(__name__).warning(
                 "hippius_unavailable_falling_back_to_stub", error=str(e)
             )
@@ -448,9 +464,7 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
 
         signing_hex = os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY")
         if not signing_hex:
-            raise RuntimeError(
-                "CATHEDRAL_EVAL_SIGNING_KEY env var required (32-byte hex)"
-            )
+            raise RuntimeError("CATHEDRAL_EVAL_SIGNING_KEY env var required (32-byte hex)")
         signer = EvalSigner.from_env_hex(signing_hex)
 
         polaris: PolarisRunner
@@ -462,9 +476,7 @@ def from_settings(database_path: str = "data/publisher.db") -> FastAPI:
         else:
             polaris = HttpPolarisRunner(
                 HttpPolarisRunnerConfig(
-                    base_url=os.environ.get(
-                        "POLARIS_BASE_URL", "https://api.polaris.computer"
-                    ),
+                    base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
                     api_token=os.environ.get("POLARIS_API_TOKEN", ""),
                 )
             )
@@ -557,8 +569,7 @@ async def _seed_default_card_definitions(conn: aiosqlite.Connection) -> None:
                 }
             ],
             task_templates=[
-                f"Summarize material {card['display_name']} developments "
-                "in the last 24 hours."
+                f"Summarize material {card['display_name']} developments in the last 24 hours."
             ],
             scoring_rubric=dict(_DEFAULT_RUBRIC),
             refresh_cadence_hours=24,
@@ -595,8 +606,7 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
     async def _factory() -> PublisherContext:
         # Master KEK — encryption depends on this; generate ephemeral if missing.
         if not (
-            os.environ.get("CATHEDRAL_KEK_HEX")
-            or os.environ.get("CATHEDRAL_MASTER_ENCRYPTION_KEY")
+            os.environ.get("CATHEDRAL_KEK_HEX") or os.environ.get("CATHEDRAL_MASTER_ENCRYPTION_KEY")
         ):
             os.environ["CATHEDRAL_KEK_HEX"] = secrets.token_bytes(32).hex()
 
@@ -626,9 +636,7 @@ def build_app(database_path: str = "data/publisher.db") -> FastAPI:
         else:
             polaris = HttpPolarisRunner(
                 HttpPolarisRunnerConfig(
-                    base_url=os.environ.get(
-                        "POLARIS_BASE_URL", "https://api.polaris.computer"
-                    ),
+                    base_url=os.environ.get("POLARIS_BASE_URL", "https://api.polaris.computer"),
                     api_token=os.environ.get("POLARIS_API_TOKEN", ""),
                 )
             )
