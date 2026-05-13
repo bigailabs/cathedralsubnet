@@ -10,6 +10,58 @@ need to know about.
 
 ---
 
+## v1.1.7 — Prober: hermes chat -q (full agentic loop)
+
+**Date:** 2026-05-13
+
+**Headline:** The SSH prober now invokes `hermes chat -q` (full agentic
+loop with tool calls + skill execution + multiple model turns + memory
+reads) instead of `hermes -z` (one-shot `model.generate(prompt)` with
+no agent loop). Cathedral's value prop is verifying the agent actually
+did work — fetching source URLs, calling tools, reasoning across
+turns. The `-z` invocation stripped exactly that out.
+
+### Fixed
+
+- **Prober no longer bypasses the Hermes agent loop.** `hermes -z` was
+  a one-shot model call: no tool calls, no skill execution, no URL
+  fetching, no memory reads. Iota1's test tonight (submission
+  `13bb4a12`) confirmed the failure mode: Hermes returned "I apologize
+  for the difficulties in accessing real-time information about
+  Article 5 of the AI Act..." because `-z` doesn't run the agent that
+  would have fetched the source. v1.1.7 switches to `hermes chat -q`,
+  which runs the full Hermes agent loop end-to-end.
+- **Trace bundles now capture the full tool-call history.** Request
+  dumps, session messages, and the SQLite slice now reflect a real
+  agentic run rather than a single API call. Proof-of-loop counts
+  (`tool_call_count`, `api_call_count`, `tool_calls_observed`) become
+  the real verifiable-work signal.
+
+### Changed
+
+- **`SshHermesRunnerConfig.eval_timeout_secs` default raised from 120s
+  to 300s.** The agentic loop has to think, call tools, wait for tool
+  results, and think again, so the one-shot 120s budget is too tight.
+  The orchestrator's `CATHEDRAL_SSH_EVAL_TIMEOUT` env default also
+  moves from 600s → 300s for consistency (was already 600s in the
+  env-driven path).
+- **Dropped `SshHermesRunnerConfig.eval_max_turns` and the
+  `CATHEDRAL_HERMES_MAX_TURNS` env wrapper.** `hermes chat -q` has no
+  equivalent CLI flag, and we want the full agentic loop now rather
+  than a single-turn cap. The old field was already inert on Hermes
+  0.13.0 (the `--max-turns` flag does not exist in 0.13.0; v1.1.5
+  stopped passing it).
+
+### For miners
+
+No miner-side change required. The same `~/.hermes/` skills you've
+already shipped now get exercised by the agent during the eval round.
+If your `soul.md` instructs the agent to cite sources, the agent will
+now actually fetch those sources rather than hallucinating around the
+gap. Trace bundles get richer; scoring weights are unchanged.
+
+---
+
 ## v1.1.4 — Miner-onboard UX: resubmits + public failed-evals
 
 **Date:** 2026-05-12

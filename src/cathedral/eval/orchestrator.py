@@ -572,10 +572,11 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
         # premise that Hermes is HTTP-shaped (cathedralai/cathedral#75).
         #
         # v2 (CATHEDRAL_PROBER_VERSION=v2): SshHermesRunner. Native
-        # `hermes -z` invocation over SSH. Snapshot-then-eval pattern
-        # per docs/HERMES.md § L.1. Returns a TraceBundle with the
-        # full Hermes forensic trail (state.db slice, sessions JSON,
-        # request dumps, memories, skills, logs) — the data moat.
+        # `hermes chat -q` invocation over SSH (v1.1.7; previously
+        # `hermes -z`). Snapshot-then-eval pattern per docs/HERMES.md
+        # § L.1. Returns a TraceBundle with the full Hermes forensic
+        # trail (state.db slice, sessions JSON, request dumps,
+        # memories, skills, logs) — the data moat.
         #
         # Default is v1 while we smoke-test v2 on the rented Polaris
         # box. Flip via env var when ready to cut over.
@@ -594,15 +595,10 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
             bundle_dir = (
                 os.environ.get("CATHEDRAL_BUNDLE_OUTPUT_DIR") or "/var/lib/cathedral/eval-bundles"
             )
-            # ``CATHEDRAL_HERMES_MAX_TURNS`` controls the agentic loop cap
-            # for ``hermes -z``. Default is 1 (single-turn JSON emit). Set
-            # to ``0`` or empty string to omit the flag entirely.
-            _max_turns_raw = os.environ.get("CATHEDRAL_HERMES_MAX_TURNS", "1").strip()
-            _max_turns: int | None
-            if not _max_turns_raw or _max_turns_raw == "0":
-                _max_turns = None
-            else:
-                _max_turns = int(_max_turns_raw)
+            # ``CATHEDRAL_HERMES_MAX_TURNS`` was removed in v1.1.7 along
+            # with the ``eval_max_turns`` config field: ``hermes chat -q``
+            # has no equivalent CLI flag, and we want the full agentic
+            # loop now rather than a single-turn cap.
 
             return SshHermesRunner(
                 SshHermesRunnerConfig(
@@ -611,13 +607,12 @@ def _resolve_polaris_runner_from_env() -> PolarisRunner:
                     connect_timeout_secs=float(
                         os.environ.get("CATHEDRAL_SSH_CONNECT_TIMEOUT", "10")
                     ),
-                    eval_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_EVAL_TIMEOUT", "600")),
+                    eval_timeout_secs=float(os.environ.get("CATHEDRAL_SSH_EVAL_TIMEOUT", "300")),
                     transfer_timeout_secs=float(
                         os.environ.get("CATHEDRAL_SSH_TRANSFER_TIMEOUT", "120")
                     ),
                     pinned_model=os.environ.get("CATHEDRAL_HERMES_PINNED_MODEL"),
                     pinned_provider=os.environ.get("CATHEDRAL_HERMES_PINNED_PROVIDER"),
-                    eval_max_turns=_max_turns,
                 )
             )
 
