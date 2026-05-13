@@ -11,6 +11,8 @@ Example (once):
     --card-id eu-ai-act --display-name crimzor-baseline \\
     --ssh-host 203.0.113.10 --ssh-user cathedral-probe
 
+On the miner host, run scripts/miner/verify_cathedral_probe.sh as ssh_user before submitting.
+
 Example (loop: repack then submit every interval; 409 = unchanged, keep going):
   PYTHONPATH=src python scripts/miner/submit_agent_bundle.py --loop --interval-secs 600 \\
     --pack-command '/home/you/Projects/cathedral/scripts/pack_baseline_bundle.sh' \\
