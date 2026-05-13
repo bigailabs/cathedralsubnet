@@ -366,10 +366,26 @@ class SshHermesRunner:
             #    agentic loop's tool calls + skill executions) to disk
             #    on miner box.
             t_invoke = time.monotonic()
+            # Build a fully-formed task prompt that:
+            #   (a) carries the deterministic task question, and
+            #   (b) carries the source_pool URLs so the agent fetches
+            #       through skills instead of hallucinating citations from
+            #       training data.
+            sources_block = ""
+            if task.sources:
+                src_lines = []
+                for s in task.sources:
+                    # Each Source has alias='class' but field name class_.
+                    cls = getattr(s, "class_", None) or getattr(s, "source_class", None) or "other"
+                    cls_val = cls.value if hasattr(cls, "value") else str(cls)
+                    src_lines.append(f"- {s.url}  [class: {cls_val}]")
+                sources_block = "\n\nSource pool to fetch via the fetch_url skill (use each, do not invent URLs):\n" + "\n".join(src_lines)
+            enriched_prompt = task.prompt + sources_block
+
             card_json, hermes_stdout = await self._invoke_hermes(
                 conn,
                 eval_profile=eval_profile,
-                prompt=task.prompt,
+                prompt=enriched_prompt,
                 eval_round=eval_round,
                 resolved_home=resolved_home,
             )
