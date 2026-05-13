@@ -330,24 +330,47 @@ async def get_leaderboard_recent(
     """Cross-card recent eval feed for the validator pull loop.
 
     v1.1.0 introduces a tuple-shaped cursor ``(since_ran_at, since_id)``
-    with strict `>` comparison, replacing the v1.0.x ``since=<ran_at>``
-    cursor with ``>=`` comparison. The new cursor is a total order on
-    ``(ran_at, id)`` so it cannot drop or duplicate rows at millisecond
-    collisions — the failure mode the cadence eval load surfaced. See
-    ``2026-05-12-track-3-pull-cursor-audit.md`` Risk 2.
+    with strict `>` row-value comparison, replacing the v1.0.x
+    ``since=<ran_at>`` cursor with ``>=`` comparison. The new cursor is
+    a total order on ``(ran_at, id)`` so it cannot drop or duplicate
+    rows at millisecond collisions — the failure mode the cadence eval
+    load surfaced. See ``2026-05-12-track-3-pull-cursor-audit.md``
+    Risk 2.
 
-    Back-compat: v1.0.7 validators only send ``since``. We accept that
-    and treat it as ``since_ran_at`` with ``since_id=""``. The empty
-    string sorts before any UUID, so the first page returns every row
-    with ``ran_at > since`` plus the boundary row at ``ran_at == since``
-    if its ``id > ""`` (always true for non-empty UUIDs). On subsequent
-    pulls, the validator advances using ``next_since`` (legacy) and the
-    UPSERT on ``pulled_eval_runs`` dedupes any boundary overlap. v1.1.0
-    validators use ``since_ran_at`` + ``since_id`` for the exact cursor.
+    Back-compat: v1.0.7 validators only send ``since`` (no
+    ``since_id``). We **distinguish "not sent" from "sent empty"** —
+    FastAPI's ``Query(default=None)`` leaves ``since_id is None`` when
+    the client omitted the param, and ``since_id == ""`` when the
+    client sent it with an empty value. The two cases route to
+    different SQL predicates:
 
-    Response: dual-emits both legacy ``next_since`` and the v1.1.0 pair
-    ``next_since_ran_at`` + ``next_since_id``. Old validators read the
-    former; new validators read the latter.
+    * ``since_id is None`` (legacy): ``WHERE ran_at > ?`` — strict `>`
+      on the single timestamp, no tuple comparison. Matches what
+      v1.0.7's stateless single-string cursor can actually express.
+      Originally the code coerced ``since_id`` to ``""`` and ran the
+      tuple comparison ``(ran_at, id) > (since, '')``; because every
+      non-empty UUID is ``> ''``, this re-included every row at the
+      boundary millisecond on every pull, and the v1.0.7 cursor
+      (advanced to ``items[-1].ran_at``) never escaped. Strict `>`
+      cleanly advances past the boundary timestamp once it's reached
+      — at the cost of skipping any rows whose ``ran_at`` exactly
+      equals the cursor, which is fine for normal traffic (UPSERT
+      dedupe covered the v1.0.7 case where the boundary row was
+      re-pulled; with strict `>` there's nothing to dedupe) but
+      cannot drain a >limit ms-collision burst from a v1.0.7
+      validator. That residual is unsolvable for a stateless
+      single-string cursor and is the documented operational risk
+      during the deploy-day window before the v1.0.7 fleet
+      PM2-cycles to v1.1.0 — see Test 4 in
+      ``tests/smoke/test_v107_v110_back_compat.py``.
+    * ``since_id`` is a string (v1.1.0 tuple cursor, even ``""``):
+      ``WHERE (ran_at, id) > (?, ?)``. v1.1.0 validators thread the
+      ``next_since_ran_at`` + ``next_since_id`` pair so the boundary
+      millisecond is drained without re-delivery.
+
+    Response: dual-emits both legacy ``next_since`` and the v1.1.0
+    pair ``next_since_ran_at`` + ``next_since_id``. Old validators
+    read the former; new validators read the latter.
     """
     ctx: PublisherContext = request.app.state.ctx
 
@@ -368,7 +391,18 @@ async def get_leaderboard_recent(
             status_code=400,
             detail="since / since_ran_at must be ISO-8601",
         )
-    cursor_id = since_id or ""
+
+    # Pass ``since_id`` through with its None-vs-string distinction
+    # preserved. The repository branches on this to pick legacy
+    # (``ran_at > ?``) vs tuple (``(ran_at, id) > (?, ?)``) semantics.
+    # NOTE: if the client sent ``since_ran_at`` (v1.1.0 shape) but
+    # omitted ``since_id``, we still default to tuple mode with an
+    # empty-string id — the wire contract is that a v1.1.0 caller
+    # using the new param names opts into the new semantics.
+    if since_ran_at is not None:
+        cursor_id: str | None = since_id or ""
+    else:
+        cursor_id = since_id
 
     runs = await repository.list_eval_runs_recent(
         ctx.db, since=since_dt, since_id=cursor_id, limit=limit

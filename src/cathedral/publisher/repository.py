@@ -681,46 +681,96 @@ async def list_eval_runs_recent(
     conn: aiosqlite.Connection,
     *,
     since: datetime,
-    since_id: str = "",
+    since_id: str | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """Cross-card recent feed used by the validator pull loop AND the
     public `/v1/leaderboard/recent` endpoint.
 
-    Cursor is a row-value tuple ``(ran_at, id)`` with strict `>`
-    comparison — see ``2026-05-12-track-3-pull-cursor-audit.md``. Ordering
-    on ``(ran_at ASC, id ASC)`` makes the scan a total order: no row is
-    ever returned twice and no row is ever skipped, even when many rows
-    share the same millisecond ``ran_at`` (the cadence eval case). The
-    composite index ``idx_eval_ran_at_id`` (created in
-    ``_apply_migrations``) covers this access pattern.
+    Two cursor shapes, dispatched on ``since_id``:
 
-    For back-compat with v1.0.7 validators that only pass ``since``,
-    callers MAY pass ``since_id=""`` — the empty string sorts before any
-    UUID, so combined with strict `>` it behaves equivalently to the
-    legacy "ran_at >= since" semantics on the first pull (the first ms
-    boundary is included exactly once; subsequent pulls advance through
-    the composite cursor as normal).
+    * **v1.1.0 tuple cursor** (``since_id`` is a string, including
+      ``""``). Predicate ``WHERE (ran_at, id) > (?, ?)`` over the
+      composite total order ``(ran_at, id)``. Used by v1.1.0 validators
+      that thread the ``next_since_ran_at`` + ``next_since_id`` pair
+      back through subsequent pulls. No row is ever returned twice and
+      no row is ever skipped, even when many rows share the same
+      millisecond ``ran_at`` (the cadence eval case).
+    * **v1.0.7 legacy cursor** (``since_id is None``). Predicate
+      ``WHERE ran_at > ?`` — strict `>` on the single timestamp, no
+      tuple comparison. Used when a v1.0.7 validator polls without the
+      ``since_id`` query param. Strict `>` is the cleaner of the two
+      legacy operators (audit Risk 2 belt-and-suspenders): every
+      non-collision tick advances the cursor cleanly past the boundary
+      row, no UPSERT thrashing. The audit acknowledges that >limit
+      rows at one millisecond is unsolvable for a stateless
+      single-string cursor regardless of operator; v1.0.7's fleet is
+      expected to PM2-cycle to v1.1.0 before cadence sweeps land.
+
+    Both branches normalize the ``since`` datetime to the canonical
+    millisecond-precision Z form (matching ``scoring_pipeline._ms_iso``,
+    which is the format every stored ``eval_runs.ran_at`` carries). The
+    naive ``datetime.isoformat()`` renders ``+00:00`` instead of ``Z``,
+    and string comparisons of ``+00:00`` vs ``.000Z`` flip in the
+    opposite direction of the intended chronological semantics. Without
+    this normalization, both the tuple and legacy cursors degrade at
+    the boundary millisecond.
+
+    Ordering on ``(ran_at ASC, id ASC)`` in both branches. The composite
+    index ``idx_eval_ran_at_id`` covers this access pattern.
 
     Joined against ``agent_submissions`` and gated on the verified
     surface so unverified discovery submissions never appear on the
     leaderboard feed. Discovery rows never produce eval_runs at all, but
     the join is defense-in-depth in case a future code path inserts one.
     """
-    cur = await conn.execute(
-        """
-        SELECT er.* FROM eval_runs er
-        JOIN agent_submissions sub ON sub.id = er.submission_id
-        WHERE (er.ran_at, er.id) > (?, ?)
-          AND sub.status != 'discovery'
-          AND sub.attestation_mode IN ('polaris','tee')
-          AND sub.discovery_only = 0
-        ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
-        """,
-        (since.isoformat(), since_id, limit),
-    )
+    since_str = _ms_z(since)
+    if since_id is None:
+        # Legacy v1.0.7-style cursor: strict `>` on ran_at only.
+        cur = await conn.execute(
+            """
+            SELECT er.* FROM eval_runs er
+            JOIN agent_submissions sub ON sub.id = er.submission_id
+            WHERE er.ran_at > ?
+              AND sub.status != 'discovery'
+              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.discovery_only = 0
+            ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
+            """,
+            (since_str, limit),
+        )
+    else:
+        # v1.1.0 tuple cursor: row-value comparison over (ran_at, id).
+        cur = await conn.execute(
+            """
+            SELECT er.* FROM eval_runs er
+            JOIN agent_submissions sub ON sub.id = er.submission_id
+            WHERE (er.ran_at, er.id) > (?, ?)
+              AND sub.status != 'discovery'
+              AND sub.attestation_mode IN ('polaris','tee')
+              AND sub.discovery_only = 0
+            ORDER BY er.ran_at ASC, er.id ASC LIMIT ?
+            """,
+            (since_str, since_id, limit),
+        )
     rows = await cur.fetchall()
     return [_row_to_eval_run(r, cur.description) for r in rows]
+
+
+def _ms_z(dt: datetime) -> str:
+    """Render a datetime in the same millisecond-precision Z form that
+    ``scoring_pipeline._ms_iso`` writes to every stored ``ran_at``.
+
+    Stored rows look like ``2026-05-10T12:00:00.000Z``; the cursor
+    comparison must use the same shape or ASCII string compares flip
+    (``+`` < ``.`` < ``Z``, so a ``+00:00`` cursor compares as strictly
+    less than any ``.NNNZ`` row even when the underlying instants are
+    equal).
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    s = dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+    return s + "Z"
 
 
 async def list_eval_runs_in_window(
