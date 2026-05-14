@@ -34,6 +34,7 @@ import blake3
 from cathedral.v3.archive import TrajectoryArchive
 from cathedral.v3.receipt import ReceiptSigner
 from cathedral.v3.types import (
+    CodingFailureClass,
     DistillationReadiness,
     TaskSplit,
     TaskType,
@@ -118,7 +119,17 @@ def export_dpo(
 ) -> dict:
     """Write `dpo.jsonl` preference pairs (chosen vs. rejected).
 
-    Both sides of a pair must pass the split filter.
+    Both sides of a pair must pass:
+      - the split filter (`allowed_splits`)
+      - `_is_safe_for_preference_training(t)`, which refuses NEGATIVE,
+        trusted-fixture-mode, sandbox-violation, and any bug_repro
+        trajectory that did not run in a real (Docker) sandbox.
+
+    DPO is the most leak-prone export: a model trained on a
+    chosen/rejected pair learns the *delta* in behaviour, so even one
+    unsandboxed or trusted-fixture-mode trajectory on either side
+    poisons the preference signal. We refuse them at the row level,
+    regardless of whether the operator promoted the split.
     """
     splits = allowed_splits or _DEFAULT_EXPORTABLE_SPLITS
     pairs = archive.preference_pairs(task_type=task_type, limit=limit, min_delta=min_delta)
@@ -130,6 +141,16 @@ def export_dpo(
             if not winner or not loser:
                 continue
             if not _is_exportable(winner, splits) or not _is_exportable(loser, splits):
+                continue
+            # Asymmetric gate: the winner must be a safe positive
+            # example (oracle trustworthy AND readiness != NEGATIVE);
+            # the loser only needs a trustworthy oracle (NEGATIVE is
+            # the canonical "rejected" signal). Either side carrying
+            # trusted_fixture_mode / SANDBOX_VIOLATION / non-Docker
+            # bug_repro poisons the pair.
+            if not _winner_is_safe_for_preference(winner):
+                continue
+            if not _loser_is_safe_for_preference(loser):
                 continue
             # The pair shares the same job, so both trajectories share
             # the same hidden_context.
@@ -289,6 +310,67 @@ def _is_exportable(t: Trajectory, allowed_splits: frozenset[TaskSplit]) -> bool:
     return t.job.task_split in allowed_splits
 
 
+def _is_safe_oracle_for_preference(t: Trajectory) -> bool:
+    """Either side of a DPO pair must have a trustworthy oracle.
+
+    Untrustworthy oracle = the validator did not run the candidate
+    under real isolation. The split filter (`_is_exportable`) is not
+    enough — once an operator promotes OPERATOR_REVIEW into
+    `allowed_splits`, oracle trustworthiness must still gate every
+    row.
+
+    Reject:
+      - verifier_metrics["trusted_fixture_mode"] is True
+      - coding_failure == SANDBOX_VIOLATION
+      - bug_repro trajectories whose sandbox is not real (Docker)
+    """
+    if t.score.verifier_metrics.get("trusted_fixture_mode") is True:
+        return False
+    if t.score.coding_failure == CodingFailureClass.SANDBOX_VIOLATION:
+        return False
+    if t.job.task_type is TaskType.BUG_REPRO:
+        vm = t.score.verifier_metrics
+        if vm.get("sandbox_is_real") is False:
+            return False
+        # For bug_repro: if the verifier ran without explicit
+        # sandbox metadata (older trajectory shape), refuse — safer
+        # default than allowing through.
+        if vm.get("sandbox_backend", "") != "docker":
+            return False
+    return True
+
+
+def _winner_is_safe_for_preference(t: Trajectory) -> bool:
+    """The chosen side of a DPO pair must additionally not be NEGATIVE.
+
+    A NEGATIVE-readiness *loser* is fine — it's exactly the signal DPO
+    learns from. But a NEGATIVE winner means we'd be training the
+    model to imitate a bad output, which inverts the preference signal.
+    """
+    if not _is_safe_oracle_for_preference(t):
+        return False
+    if t.score.readiness == DistillationReadiness.NEGATIVE:
+        return False
+    return True
+
+
+def _loser_is_safe_for_preference(t: Trajectory) -> bool:
+    """The rejected side of a DPO pair must have a trustworthy oracle.
+
+    NEGATIVE readiness is allowed (and useful — it's the canonical
+    rejected signal).
+    """
+    return _is_safe_oracle_for_preference(t)
+
+
+def _is_safe_for_preference_training(t: Trajectory) -> bool:
+    """Back-compat helper: the strict gate used by tests/callers that
+    want a single yes/no without distinguishing winner from loser.
+    Equivalent to the winner gate.
+    """
+    return _winner_is_safe_for_preference(t)
+
+
 def _sanitize_tool_result(call: ToolCall) -> object:
     """Scrub oracle output before placing a tool result in a training row.
 
@@ -324,53 +406,133 @@ def _sanitize_tool_result(call: ToolCall) -> object:
 # coincide with an oracle string, it gets scrubbed.
 
 _HIDDEN_SENTINEL = "<hidden-oracle-content>"
-# A miner output shorter than this is treated as too small to risk a
-# substring match against (would scrub legitimate words like "from"). The
-# bug_repro oracle strings are multi-line tests and full source files, so
-# anything below this length cannot meaningfully reveal them.
+# A non-oracle hidden string shorter than this is treated as too small to
+# risk a substring match against (would scrub legitimate words like
+# "from"). The bug_repro source/reference strings are multi-line and
+# above this length, so the threshold only matters for incidental short
+# values; SHORT_ORACLE_KEYS below get scrubbed regardless.
 _MIN_HIDDEN_SUBSTRING_LEN = 24
 
+# Hidden-context keys whose VALUES are short identifiers that name
+# specific oracle signals (exception class names, expected log labels,
+# specific symptom strings). These must be scrubbed even when shorter
+# than the substring threshold, otherwise prose like
+# "the hidden oracle was ZeroDivisionError" would round-trip into the
+# training corpus.
+#
+# Each name here is matched against the key in `hidden_context`; the
+# value gets scrub-always semantics, but only when it looks like an
+# oracle identifier (alnum + underscore, length 3..64). This keeps the
+# rule from scrubbing common English words even if an operator stuffs
+# something arbitrary into a hidden field.
+_SHORT_ORACLE_KEYS: frozenset[str] = frozenset(
+    {
+        "expected_symptom",
+        "expected_label",
+        "expected_tool",
+        "expected_exception",
+    }
+)
 
-def _collect_hidden_strings(t: Trajectory) -> list[str]:
+
+# A "short oracle" is a hidden value that must be scrubbed even when
+# below _MIN_HIDDEN_SUBSTRING_LEN. Each entry is (value, is_short_oracle).
+HiddenString = tuple[str, bool]
+
+
+def _looks_like_oracle_identifier(s: str) -> bool:
+    if not 3 <= len(s) <= 64:
+        return False
+    # Identifier-ish: letters, digits, underscores; no spaces, no
+    # punctuation. Avoids scrubbing arbitrary English the operator
+    # might have stuffed into a hidden_context value.
+    return all(c.isalnum() or c == "_" for c in s)
+
+
+def _collect_hidden_strings(t: Trajectory) -> list[HiddenString]:
     """Flatten every string leaf in `job.hidden_context`.
 
-    Returns a list ordered from longest to shortest so that scrubbing
-    matches the most specific (and longest) hidden string first.
+    Returns a list of (value, is_short_oracle), ordered longest first so
+    that scrubbing matches the most specific hidden string before any
+    incidental short overlap.
     """
-    out: list[str] = []
+    out: list[HiddenString] = []
 
-    def walk(node: object) -> None:
+    def walk(node: object, key_path: tuple[str, ...]) -> None:
         if isinstance(node, str):
             if node.strip():
-                out.append(node)
+                is_short_oracle = (
+                    bool(key_path)
+                    and key_path[-1] in _SHORT_ORACLE_KEYS
+                    and _looks_like_oracle_identifier(node)
+                )
+                out.append((node, is_short_oracle))
         elif isinstance(node, dict):
-            for v in node.values():
-                walk(v)
+            for k, v in node.items():
+                walk(v, (*key_path, str(k)))
         elif isinstance(node, list | tuple):
             for v in node:
-                walk(v)
+                walk(v, key_path)
 
-    walk(t.job.hidden_context)
+    walk(t.job.hidden_context, ())
     # Sort longest first so we don't prematurely match a short prefix.
-    out.sort(key=len, reverse=True)
+    out.sort(key=lambda hs: len(hs[0]), reverse=True)
     return out
 
 
-def _scrub_text(text: str | None, hidden: list[str]) -> str | None:
+def _scrub_text(text: str | None, hidden: list[HiddenString]) -> str | None:
     if text is None or not isinstance(text, str) or not text:
         return text
     scrubbed = text
-    for h in hidden:
-        if not h:
+    for value, is_short_oracle in hidden:
+        if not value:
             continue
-        if h == scrubbed:
+        if value == scrubbed:
             return _HIDDEN_SENTINEL
-        if len(h) >= _MIN_HIDDEN_SUBSTRING_LEN and h in scrubbed:
-            scrubbed = scrubbed.replace(h, _HIDDEN_SENTINEL)
+        # Long values: substring-scrub past the length threshold.
+        # Short oracle identifiers (e.g. ZeroDivisionError): scrub
+        # whenever they appear, but only as whole-word substrings to
+        # avoid mangling unrelated text that incidentally embeds them.
+        if is_short_oracle:
+            scrubbed = _replace_whole_word(scrubbed, value, _HIDDEN_SENTINEL)
+        elif len(value) >= _MIN_HIDDEN_SUBSTRING_LEN and value in scrubbed:
+            scrubbed = scrubbed.replace(value, _HIDDEN_SENTINEL)
     return scrubbed
 
 
-def _sanitize_tool_args(args: object, hidden: list[str]) -> object:
+def _replace_whole_word(haystack: str, needle: str, replacement: str) -> str:
+    """Replace `needle` in `haystack` only where adjacent characters are
+    not identifier characters. Keeps "ZeroDivisionError" replaceable
+    inside prose ("...was ZeroDivisionError.") without mangling longer
+    identifiers that happen to embed it.
+    """
+    if not needle or needle not in haystack:
+        return haystack
+    out_parts: list[str] = []
+    i = 0
+    nlen = len(needle)
+    while i < len(haystack):
+        j = haystack.find(needle, i)
+        if j == -1:
+            out_parts.append(haystack[i:])
+            break
+        # Boundary check: char before and after must not be an
+        # identifier continuation char.
+        before_ok = j == 0 or not (haystack[j - 1].isalnum() or haystack[j - 1] == "_")
+        after_idx = j + nlen
+        after_ok = after_idx >= len(haystack) or not (
+            haystack[after_idx].isalnum() or haystack[after_idx] == "_"
+        )
+        out_parts.append(haystack[i:j])
+        if before_ok and after_ok:
+            out_parts.append(replacement)
+        else:
+            out_parts.append(needle)
+        i = j + nlen
+    return "".join(out_parts)
+
+
+def _sanitize_tool_args(args: object, hidden: list[HiddenString]) -> object:
     """Recursively scrub hidden oracle content out of tool args."""
     if isinstance(args, str):
         return _scrub_text(args, hidden)
@@ -381,7 +543,7 @@ def _sanitize_tool_args(args: object, hidden: list[str]) -> object:
     return args
 
 
-def _sanitize_tool_result_values(result: object, hidden: list[str]) -> object:
+def _sanitize_tool_result_values(result: object, hidden: list[HiddenString]) -> object:
     """Like `_sanitize_tool_args` but for tool result values.
 
     Also runs the oracle-key replacement so the keys-but-not-values

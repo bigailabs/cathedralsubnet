@@ -119,3 +119,10 @@ ignore = ["S101", "S104", "S105", "UP036", "UP042"]
 # Sandbox runner intentionally executes subprocesses; that is its job.
 # Inputs are validated by SandboxConfig.validate() before reaching subprocess.run.
 "src/cathedral/v3/sandbox/runner.py" = ["S603"]
+# Fixture-only code_patch test runner. Same exemption pattern as
+# sandbox/runner.py: subprocess.run is called with an argv list (no
+# shell), a strict module-name regex blocks path/dunder/stdlib names,
+# a hard wall-clock timeout bounds execution, and the working dir is
+# a fresh TemporaryDirectory. Inputs come from validator-owned
+# fixtures, not from arbitrary miner-supplied test source.
+"src/cathedral/v3/validator/tools.py" = ["S603"]
