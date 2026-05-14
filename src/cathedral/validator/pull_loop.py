@@ -367,6 +367,16 @@ async def run_pull_loop(
             inner_pulls = 0
             total_fetched = 0
             total_persisted = 0
+            # `drained` is True iff this outer tick exited the inner
+            # loop by hitting a non-saturated page (len(items) < limit).
+            # Transport errors, malformed payloads, and saturation-cap
+            # exhaustion all leave it False — none of those prove the
+            # backfill window has been walked end-to-end, and we MUST
+            # NOT write the durable marker on any of them. Doing so on
+            # a first-tick transport error would lock the validator
+            # out of ever re-backfilling on restart (PR #109 review
+            # C1 — would recreate the exact divergence #109 fixes).
+            drained = False
             while inner_pulls < _MAX_INNER_PULLS:
                 inner_pulls += 1
                 try:
@@ -390,10 +400,24 @@ async def run_pull_loop(
                     logger.warning("pull_transport_error", error=str(e))
                     break
 
-                items = payload.get("items") or []
-                if not isinstance(items, list):
-                    logger.warning("pull_payload_malformed")
+                # Strict shape check: missing-key, null, and non-list
+                # values are all malformed payloads — none of them prove
+                # the cursor reached the head of the feed, so they MUST
+                # NOT trigger the drained-tick path that writes the
+                # backfill marker. The pre-fix `payload.get("items") or []`
+                # coerced `{}`, `{"items": null}`, and `{"items": []}`
+                # into the same empty-list code path, and an empty-list
+                # response (legitimately "caught up") would then look
+                # identical to the malformed cases. See review C1 on
+                # PR #110.
+                if "items" not in payload or not isinstance(payload["items"], list):
+                    logger.warning(
+                        "pull_payload_malformed",
+                        has_items_key="items" in payload,
+                        items_type=type(payload.get("items")).__name__,
+                    )
                     break
+                items = payload["items"]
 
                 persisted = 0
                 for item in items:
@@ -448,8 +472,13 @@ async def run_pull_loop(
                             cursor_id = last_id
 
                 # If the page wasn't saturated we're caught up; break the
-                # inner loop and sleep until the next outer tick.
+                # inner loop and sleep until the next outer tick. This is
+                # the ONLY path that proves the cursor reached the head
+                # of the publisher's feed — anything else (cap, error,
+                # malformed payload) means there are still rows behind
+                # the cursor we have not pulled.
                 if len(items) < limit:
+                    drained = True
                     break
 
             await health.heartbeat("last_evidence_pass_at")
@@ -458,13 +487,13 @@ async def run_pull_loop(
                 fetched=total_fetched,
                 persisted=total_persisted,
                 inner_pulls=inner_pulls,
+                drained=drained,
             )
 
-            # First successful drained pass under the current code: the
-            # backfill window is fully hydrated. Persist the durable
-            # marker so subsequent restarts skip the forced backfill,
-            # and notify run_weight_loop it's safe to publish.
-            if not backfill_already_done:
+            # Only persist the durable backfill marker after a
+            # successfully drained outer tick. See `drained` comment
+            # above for the failure modes this guards against.
+            if drained and not backfill_already_done:
                 await _mark_backfill_complete(conn)
                 backfill_already_done = True
                 logger.info(
@@ -474,7 +503,11 @@ async def run_pull_loop(
                     fetched=total_fetched,
                     persisted=total_persisted,
                 )
-            if initial_backfill_complete is not None and not initial_backfill_complete.is_set():
+            if (
+                drained
+                and initial_backfill_complete is not None
+                and not initial_backfill_complete.is_set()
+            ):
                 initial_backfill_complete.set()
 
             await _sleep_or_stop(stop, interval_secs)
