@@ -25,8 +25,34 @@ async def run_weight_loop(
     burn_uid: int = 204,
     forced_burn_percentage: float = 98.0,
     stop: asyncio.Event | None = None,
+    initial_backfill_complete: asyncio.Event | None = None,
+    initial_backfill_timeout_secs: float = 120.0,
 ) -> None:
     stop = stop or asyncio.Event()
+    # Wait for the pull_loop's first drained catch-up pass before the
+    # first weight set. Without this, a freshly-upgraded validator can
+    # publish a vector computed from a half-hydrated 7-day window. The
+    # event is set permanently after the first complete pass, so
+    # subsequent iterations are unblocked. Timeout caps the wait so a
+    # broken pull loop can't pin the weight loop forever — if the
+    # backfill hasn't completed in 2 minutes, fall through and publish
+    # with whatever's in the local DB (better than no weights at all).
+    if initial_backfill_complete is not None and not initial_backfill_complete.is_set():
+        logger.info(
+            "weight_loop_waiting_for_backfill",
+            timeout_secs=initial_backfill_timeout_secs,
+        )
+        try:
+            await asyncio.wait_for(
+                initial_backfill_complete.wait(),
+                timeout=initial_backfill_timeout_secs,
+            )
+            logger.info("weight_loop_backfill_signal_received")
+        except TimeoutError:
+            logger.warning(
+                "weight_loop_backfill_timeout",
+                timeout_secs=initial_backfill_timeout_secs,
+            )
     while not stop.is_set():
         try:
             metagraph = await chain.metagraph()
