@@ -36,6 +36,11 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
         app.state.bearer = ctx.bearer
 
         stop = asyncio.Event()
+        # Shared signal: pull_loop sets this after its first fully-drained
+        # catch-up pass; weight_loop awaits it before the first set_weights.
+        # Prevents a freshly-upgraded validator from publishing a vector
+        # computed off a half-hydrated 7-day window. Set once, never reset.
+        initial_backfill_complete = asyncio.Event()
         tasks = [
             asyncio.create_task(
                 worker.run_worker(
@@ -58,6 +63,7 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                     burn_uid=ctx.settings.weights.burn_uid,
                     forced_burn_percentage=ctx.settings.weights.forced_burn_percentage,
                     stop=stop,
+                    initial_backfill_complete=initial_backfill_complete,
                 )
             ),
             asyncio.create_task(
@@ -80,6 +86,7 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                         interval_secs=ctx.settings.publisher.pull_interval_secs,
                         api_token=ctx.publisher_api_token,
                         stop=stop,
+                        initial_backfill_complete=initial_backfill_complete,
                     )
                 )
             )
@@ -88,6 +95,9 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
                 "pull_loop_disabled",
                 reason="cathedral_public_key not configured",
             )
+            # No pull loop wired — unblock weight_loop immediately so it
+            # doesn't hang on the backfill signal that will never fire.
+            initial_backfill_complete.set()
         try:
             yield
         finally:
