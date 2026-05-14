@@ -50,13 +50,14 @@ The skill doc carries the exact card schema, signing payload format, endpoints, 
 
 ## What a validator does
 
-The validator binary in this repo (`cathedral-validator`) runs three asyncio loops on the same sqlite database:
+The validator binary in this repo (`cathedral-validator`) runs four asyncio loops on the same sqlite database when `cathedral-validator serve` is invoked:
 
-1. The verification worker drains `claims` rows, fetches Polaris records, verifies signatures, scores the card, and writes `scores`. This is the legacy `/v1/claim` flow that pre-dates the agent-bundle pipeline; it still drives the on-chain side.
-2. The pull loop (`cathedral.validator.pull_loop`) reads `GET /v1/leaderboard/recent` from the publisher, verifies every `EvalRun` projection against the Cathedral public key, and upserts a row keyed by `miner_hotkey`.
-3. The weight loop joins the latest score per hotkey to the metagraph's uids, normalizes, and calls `subtensor.set_weights`.
+1. The legacy `/v1/claim` worker drains pending `claims` rows, fetches Polaris records, verifies signatures, scores the card, and writes `scores`. This is the pre-bundle intake path. It still boots today because some miners are still on it and because the worker is the writer of the legacy `scores` rows that the weight loop blends with `pulled_eval_runs`.
+2. The pull loop (`cathedral.validator.pull_loop`) reads `GET /v1/leaderboard/recent` from the publisher every 30s by default, verifies every `EvalRun` projection against `CATHEDRAL_PUBLIC_KEY_HEX` (the Cathedral eval-signing pubkey from JWKS), and upserts to `pulled_eval_runs` keyed by `eval_run_id`. The loop is only spawned when `CATHEDRAL_PUBLIC_KEY_HEX` is set; if absent, startup logs `pull_loop_disabled`.
+3. The weight loop joins the latest score per hotkey (across both `scores` and `pulled_eval_runs`) to the metagraph's uids, normalizes, and calls `subtensor.set_weights`.
+4. The stall watchdog flips `health.stalled = true` if heartbeats stop landing.
 
-For v1, the producer side (miner submits, Cathedral runtime evaluates, publisher signs) is live. The validator pull loop verifies signatures today; on-chain weight setting and weekly Merkle anchoring are wired in code but not yet running against the live publisher signature stream. See **Status**.
+The pull loop is live on the testnet validator (SN292), verifying live publisher signatures against the pinned Cathedral pubkey and writing weight inputs. On-chain weight setting is also live. Weekly Merkle anchoring is wired in code but not yet running on a schedule. See **Status**.
 
 Full procedure for someone running a validator: [docs/VALIDATOR.md](docs/VALIDATOR.md).
 
@@ -146,7 +147,7 @@ Verified live, 2026-05-11:
 - Validator binary running on SN292 testnet (uid 32), pulling signed eval-runs from the publisher, verifying the cathedral signature locally, and dispatching `set_weights` every 600 seconds with a 98% burn floor to the subnet owner uid.
 - Provisioning: `scripts/provision_validator.sh` and `scripts/provision_miner.sh` stand up a validator or miner-probe from scratch on Ubuntu 22.04+; PM2 supervises both apps with systemd boot persistence; `bin/updater.sh` watches for signed git tags and reloads on release.
 
-Wired in code, not yet running against live signatures:
+Wired in code, not yet running:
 
 - On-chain Merkle anchoring (weekly `system.remarkWithEvent`). Merkle code path exists in `cathedral.publisher.merkle` and `cathedral.chain.anchor`; not running on a schedule yet.
 - SN39 mainnet validator. Code path proven on SN292 testnet; needs a registered SN39 hotkey with stake + permit to set weights on mainnet.
@@ -220,13 +221,17 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 
-# Copy and edit config/testnet.toml (or mainnet.toml):
-#   - network.validator_hotkey  -- your registered hotkey ss58
-#   - polaris.public_key_hex    -- Polaris Ed25519 public key
-#   - http.bearer_token_env     -- env var holding your bearer token
+# Fetch both pubkeys from the publisher's JWKS and pin them locally.
+curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json | jq
 
-export CATHEDRAL_BEARER=<token>
-export CATHEDRAL_PUBLIC_KEY_HEX=<cathedral publisher public key, hex>
+# Copy and edit config/testnet.toml (or mainnet.toml):
+#   - network.validator_hotkey: your registered hotkey ss58 (required)
+#   - network.wallet_name:      local Bittensor wallet name (usually edit)
+#   - polaris.public_key_hex:   pin kid=polaris-runtime-attestation from JWKS
+
+export CATHEDRAL_BEARER=$(openssl rand -hex 32)              # local /v1/claim auth
+export CATHEDRAL_PUBLIC_KEY_HEX=<kid=cathedral-eval-signing> # gates the pull loop
+# export CATHEDRAL_PUBLISHER_TOKEN=...                       # optional, future-facing
 
 cathedral-validator migrate --config config/testnet.toml
 cathedral-validator serve   --config config/testnet.toml
@@ -259,7 +264,7 @@ You can confirm a validator is running v1.1.0 by querying `https://api.taostats.
 ## Future enhancements
 
 - On-chain weekly Merkle anchoring of `EvalRun` projections.
-- Validator pull-loop running in production against the live publisher signature stream.
+- SN39 mainnet validator weight-setting (code path proven on SN292 testnet).
 - TDX and SEV-SNP TEE verifiers wired (live miners attest with hardware roots, not Polaris).
 - Per-domain rubric profiles (legal vs. finance vs. science).
 - Layer-2 audit replay: validators re-run a random sample of bundles on a different task and compare structural similarity to the submitted card.

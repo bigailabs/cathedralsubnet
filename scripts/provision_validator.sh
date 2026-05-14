@@ -25,11 +25,23 @@
 set -euo pipefail
 
 # --- Inputs -----------------------------------------------------------------
+#
+# CATHEDRAL_BEARER          local validator bearer for its own /v1/claim endpoint
+#                           (NOT publisher-read auth). Generate locally; do not
+#                           send to anyone.
+# CATHEDRAL_PUBLIC_KEY_HEX  Cathedral eval-signing pubkey (kid=cathedral-eval-signing
+#                           in /.well-known/cathedral-jwks.json). Gates the pull
+#                           loop; if unset, the loop is not spawned.
+# POLARIS_PUBLIC_KEY_HEX    Polaris runtime-attestation pubkey (kid=polaris-runtime-attestation
+#                           in the same JWKS document). Goes into TOML
+#                           polaris.public_key_hex; required because
+#                           `cathedral-validator serve` still constructs the
+#                           legacy /v1/claim worker.
 
 : "${CATHEDRAL_RELEASE_TAG:=main}"
-: "${CATHEDRAL_BEARER:?CATHEDRAL_BEARER is required}"
-: "${CATHEDRAL_PUBLIC_KEY_HEX:?CATHEDRAL_PUBLIC_KEY_HEX is required}"
-: "${POLARIS_PUBLIC_KEY_HEX:?POLARIS_PUBLIC_KEY_HEX is required}"
+: "${CATHEDRAL_BEARER:?CATHEDRAL_BEARER is required (local validator bearer)}"
+: "${CATHEDRAL_PUBLIC_KEY_HEX:?CATHEDRAL_PUBLIC_KEY_HEX is required (JWKS kid=cathedral-eval-signing)}"
+: "${POLARIS_PUBLIC_KEY_HEX:?POLARIS_PUBLIC_KEY_HEX is required (JWKS kid=polaris-runtime-attestation)}"
 : "${BT_WALLET_NAME:=cathedral-validator}"
 : "${BT_WALLET_HOTKEY:=default}"
 : "${BT_NETWORK:=test}"
