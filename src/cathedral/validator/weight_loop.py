@@ -29,15 +29,28 @@ async def run_weight_loop(
     initial_backfill_timeout_secs: float = 120.0,
 ) -> None:
     stop = stop or asyncio.Event()
-    # Wait for the pull_loop's first drained catch-up pass before the
-    # first weight set. Without this, a freshly-upgraded validator can
-    # publish a vector computed from a half-hydrated 7-day window. The
-    # event is set permanently after the first complete pass, so
-    # subsequent iterations are unblocked. Timeout caps the wait so a
-    # broken pull loop can't pin the weight loop forever — if the
-    # backfill hasn't completed in 2 minutes, fall through and publish
-    # with whatever's in the local DB (better than no weights at all).
-    if initial_backfill_complete is not None and not initial_backfill_complete.is_set():
+    # Track whether the initial backfill ever signalled completion.
+    # `backfill_ready` becomes True the first time
+    # `initial_backfill_complete` is observed set. If the timeout
+    # fallback path fires it stays False — every `weights_set` log
+    # line carries this flag so operators reading the log can tell
+    # whether the published vector was computed from a known-good
+    # 7-day window or a possibly-thin local DB.
+    backfill_ready = False
+    if initial_backfill_complete is None or initial_backfill_complete.is_set():
+        backfill_ready = True
+    else:
+        # Wait for the pull_loop's first drained catch-up pass before
+        # the first weight set. Without this, a freshly-upgraded
+        # validator can publish a vector computed from a half-hydrated
+        # 7-day window. The event is set permanently after the first
+        # complete pass, so subsequent iterations are unblocked.
+        # Timeout caps the wait so a broken pull loop can't pin the
+        # weight loop forever — if the backfill hasn't completed in
+        # ``initial_backfill_timeout_secs``, fall through and publish
+        # with whatever's in the local DB. Better to ship a thin
+        # vector than no vector at all, but log loudly + set
+        # `backfill_ready=False` so it's visible.
         logger.info(
             "weight_loop_waiting_for_backfill",
             timeout_secs=initial_backfill_timeout_secs,
@@ -47,13 +60,31 @@ async def run_weight_loop(
                 initial_backfill_complete.wait(),
                 timeout=initial_backfill_timeout_secs,
             )
+            backfill_ready = True
             logger.info("weight_loop_backfill_signal_received")
         except TimeoutError:
             logger.warning(
-                "weight_loop_backfill_timeout",
+                "weight_loop_backfill_timeout_publishing_thin_vector",
                 timeout_secs=initial_backfill_timeout_secs,
+                consequence=(
+                    "First weights_set will run with whatever rows the "
+                    "local DB has — likely a strict subset of the "
+                    "publisher's 7-day feed. Subsequent ticks recheck "
+                    "the event and may upgrade to backfill_ready=True."
+                ),
             )
     while not stop.is_set():
+        # The event can land between ticks (e.g. timeout fell through
+        # before backfill completed, then backfill completed during
+        # the first set_weights). Re-check on every iteration so the
+        # log flag stays accurate without restarting the loop.
+        if (
+            not backfill_ready
+            and initial_backfill_complete is not None
+            and initial_backfill_complete.is_set()
+        ):
+            backfill_ready = True
+            logger.info("weight_loop_backfill_signal_received_late")
         try:
             metagraph = await chain.metagraph()
             registered = await chain.is_registered()
@@ -115,6 +146,11 @@ async def run_weight_loop(
                 # Surface which uids actually shipped so operators can sanity-
                 # check against the on-chain weight set without diffing logs.
                 uids=[uid for uid, _ in normalized][:20],
+                # True only when this validator's pull_loop has signalled
+                # that the 7-day backfill drained. A `False` here means
+                # the weight vector was computed from a possibly-thin
+                # local DB (timeout fallback path or no pull loop wired).
+                backfill_ready=backfill_ready,
             )
         except Exception as e:
             logger.warning("weight_loop_error", error=str(e))

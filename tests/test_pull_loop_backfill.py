@@ -380,3 +380,228 @@ async def test_fresh_validator_backfill_hydrates_weight_window(tmp_path) -> None
     assert scores.get("5HotkeyOfMasonBackfilledByFreshValidator") == pytest.approx(0.66)
 
     await conn.close()
+
+
+# --------------------------------------------------------------------------
+# C1 regression — marker write must gate on a successfully drained tick.
+#
+# PR #109 first-merge review caught: the marker was being written on every
+# outer tick that exited the inner loop, regardless of WHY it exited.
+# Transport error, malformed payload, and saturation-cap exhaustion all
+# break the inner loop without proving the cursor reached the head of the
+# publisher's feed. Writing the marker on those paths locks the validator
+# out of ever re-backfilling on restart, recreating the exact divergence
+# PR #109 is supposed to fix.
+#
+# These tests pin the fix: marker is written ONLY after an outer tick that
+# saw `len(items) < limit` (a non-saturated page = caught up).
+# --------------------------------------------------------------------------
+
+
+async def _run_one_pull_tick(
+    conn,
+    monkeypatch,
+    fake_transport_handler,
+    *,
+    initial_backfill_event: object | None = None,
+    limit: int = 500,
+) -> object:
+    """Run exactly one outer tick of `run_pull_loop` against a fake httpx
+    transport and return the asyncio.Event that was passed for backfill
+    signalling (so tests can assert on `is_set()`).
+
+    Uses ``stop`` set immediately after the first outer tick to avoid
+    hanging on the 30s sleep.
+    """
+    import asyncio
+
+    import httpx
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+
+    from cathedral.validator.health import Health
+
+    # Wrap the AsyncClient constructor so the loop hits our MockTransport.
+    real_init = httpx.AsyncClient.__init__
+
+    def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs["transport"] = httpx.MockTransport(fake_transport_handler)
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _patched_init)
+
+    stop = asyncio.Event()
+    backfill_event = initial_backfill_event or asyncio.Event()
+
+    # Sentinel: after the first `pull_loop_tick`, set stop so the outer
+    # loop exits before the 30s sleep blocks the test.
+    from cathedral.validator import pull_loop as pull_loop_mod
+
+    original_info = pull_loop_mod.logger.info
+
+    def _maybe_stop_after_tick(event: str, **fields):  # type: ignore[no-untyped-def]
+        original_info(event, **fields)
+        if event == "pull_loop_tick":
+            stop.set()
+
+    monkeypatch.setattr(pull_loop_mod.logger, "info", _maybe_stop_after_tick)
+
+    sk = Ed25519PrivateKey.generate()
+    task = asyncio.create_task(
+        pull_loop_mod.run_pull_loop(
+            conn=conn,
+            publisher_url="https://fake.cathedral.test",
+            cathedral_public_key=sk.public_key(),
+            health=Health(),
+            interval_secs=0.01,
+            stop=stop,
+            limit=limit,
+            initial_backfill_complete=backfill_event,
+        )
+    )
+    await asyncio.wait_for(task, timeout=3)
+    return backfill_event
+
+
+@pytest.mark.asyncio
+async def test_marker_not_written_on_transport_error(tmp_path, monkeypatch) -> None:
+    """C1.a — HTTP error must not write the durable marker.
+
+    A first-tick transport failure used to write `backfill_complete`
+    anyway, locking the validator out of ever re-backfilling. Now the
+    `drained` flag gates the marker write.
+    """
+    import httpx
+
+    def fail_with_timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("simulated network failure")
+
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        event = await _run_one_pull_tick(conn, monkeypatch, fail_with_timeout)
+        assert not await _backfill_completed_under_current_code(conn), (
+            "C1.a: backfill marker must NOT be written when the first publisher call errors out"
+        )
+        assert not event.is_set(), (
+            "C1.a: initial_backfill_complete event must NOT be set when "
+            "the first publisher call errors out"
+        )
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_marker_not_written_on_malformed_payload(tmp_path, monkeypatch) -> None:
+    """C1.b — malformed payload (`items` not a list) must not write the marker.
+
+    A misbehaving / corrupt publisher response used to count as a
+    drained tick, locking the validator out of re-backfill.
+    """
+    import httpx
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": "not-a-list"})
+
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        event = await _run_one_pull_tick(conn, monkeypatch, malformed)
+        assert not await _backfill_completed_under_current_code(conn), (
+            "C1.b: backfill marker must NOT be written when the publisher "
+            "returns a malformed `items` payload"
+        )
+        assert not event.is_set()
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_marker_not_written_on_saturation_cap_exhaustion(tmp_path, monkeypatch) -> None:
+    """C1.c — hitting _MAX_INNER_PULLS without ever draining must not
+    write the marker.
+
+    A publisher with a giant backlog could feed `_MAX_INNER_PULLS`
+    saturated pages without ever returning `len(items) < limit`. That
+    means there are still rows behind the cursor. Pre-fix this still
+    wrote the marker; post-fix it doesn't.
+    """
+    import secrets
+
+    import httpx
+
+    page_size = 2  # tiny `limit` makes saturation cheap to simulate
+
+    def always_saturated(request: httpx.Request) -> httpx.Response:
+        # Return exactly `page_size` items every time so the inner loop
+        # always considers itself saturated and hits the cap.
+        items = []
+        for _ in range(page_size):
+            # Use fully-formed but signature-invalid entries — the
+            # verification step will reject them, but that's fine for
+            # this test: we want to assert the marker logic gates on
+            # `drained`, not on `persisted`.
+            items.append(
+                {
+                    "id": secrets.token_hex(8),
+                    "agent_id": secrets.token_hex(8),
+                    "agent_display_name": "x",
+                    "card_id": "eu-ai-act",
+                    "output_card": {"id": "eu-ai-act"},
+                    "output_card_hash": "0" * 64,
+                    "weighted_score": 0.0,
+                    "polaris_verified": False,
+                    "ran_at": datetime.now(UTC).isoformat(),
+                    "cathedral_signature": "AAAA",
+                    "merkle_epoch": None,
+                }
+            )
+        return httpx.Response(
+            200,
+            json={
+                "items": items,
+                # Advance the cursor so the next saturated page comes back.
+                "next_since_ran_at": items[-1]["ran_at"],
+                "next_since_id": items[-1]["id"],
+            },
+        )
+
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        event = await _run_one_pull_tick(conn, monkeypatch, always_saturated, limit=page_size)
+        assert not await _backfill_completed_under_current_code(conn), (
+            "C1.c: backfill marker must NOT be written when the inner "
+            "loop exits via saturation cap exhaustion — there are still "
+            "rows behind the cursor"
+        )
+        assert not event.is_set(), "C1.c: event must NOT be set on saturation-cap exit"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_marker_is_written_after_drained_tick(tmp_path, monkeypatch) -> None:
+    """Positive control: a tick that returns `len(items) < limit` DOES
+    write the marker and set the event. Pairs with the three negative
+    cases above.
+    """
+    import httpx
+
+    def empty_page(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "items": [],
+                "next_since_ran_at": None,
+                "next_since_id": None,
+            },
+        )
+
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        event = await _run_one_pull_tick(conn, monkeypatch, empty_page)
+        assert await _backfill_completed_under_current_code(conn), (
+            "positive control: drained tick (len(items)=0 < limit) MUST write the marker"
+        )
+        assert event.is_set(), "positive control: drained tick MUST set the backfill event"
+    finally:
+        await conn.close()
