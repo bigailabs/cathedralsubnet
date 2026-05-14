@@ -516,6 +516,63 @@ async def test_marker_not_written_on_malformed_payload(tmp_path, monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_marker_not_written_on_empty_payload_object(tmp_path, monkeypatch) -> None:
+    """C1.b.i — payload missing the `items` key entirely (e.g. `{}`)
+    must not write the marker.
+
+    Caught in PR #110 re-review: ``payload.get("items") or []`` coerced
+    a missing key into an empty list, which then looked identical to
+    "publisher caught up, drained tick" and wrote the marker. Production
+    failure: malformed 200 response on the first post-upgrade poll
+    records "backfill complete" without walking the feed, then the next
+    restart resumes from old local max and misses days 1-7 again.
+    """
+    import httpx
+
+    def empty_object(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        event = await _run_one_pull_tick(conn, monkeypatch, empty_object)
+        assert not await _backfill_completed_under_current_code(conn), (
+            "C1.b.i: backfill marker must NOT be written when the "
+            "publisher returns a 200 with no `items` key — that's a "
+            "malformed payload, not a caught-up cursor"
+        )
+        assert not event.is_set(), "C1.b.i: event must NOT be set on missing-key payload"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_marker_not_written_on_null_items(tmp_path, monkeypatch) -> None:
+    """C1.b.ii — payload with `items: null` must not write the marker.
+
+    Same C1 surface as the empty-object case: ``payload.get("items") or []``
+    coerced `None` into `[]`, which then triggered the drained-tick
+    path. The fix uses an explicit `not isinstance(payload["items"], list)`
+    check so None falls through to the malformed-payload branch.
+    """
+    import httpx
+
+    def null_items(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": None})
+
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        event = await _run_one_pull_tick(conn, monkeypatch, null_items)
+        assert not await _backfill_completed_under_current_code(conn), (
+            "C1.b.ii: backfill marker must NOT be written when the "
+            "publisher returns `items: null` — that's malformed, not "
+            "a caught-up cursor"
+        )
+        assert not event.is_set(), "C1.b.ii: event must NOT be set on null-items payload"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_marker_not_written_on_saturation_cap_exhaustion(tmp_path, monkeypatch) -> None:
     """C1.c — hitting _MAX_INNER_PULLS without ever draining must not
     write the marker.

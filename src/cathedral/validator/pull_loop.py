@@ -400,10 +400,24 @@ async def run_pull_loop(
                     logger.warning("pull_transport_error", error=str(e))
                     break
 
-                items = payload.get("items") or []
-                if not isinstance(items, list):
-                    logger.warning("pull_payload_malformed")
+                # Strict shape check: missing-key, null, and non-list
+                # values are all malformed payloads — none of them prove
+                # the cursor reached the head of the feed, so they MUST
+                # NOT trigger the drained-tick path that writes the
+                # backfill marker. The pre-fix `payload.get("items") or []`
+                # coerced `{}`, `{"items": null}`, and `{"items": []}`
+                # into the same empty-list code path, and an empty-list
+                # response (legitimately "caught up") would then look
+                # identical to the malformed cases. See review C1 on
+                # PR #110.
+                if "items" not in payload or not isinstance(payload["items"], list):
+                    logger.warning(
+                        "pull_payload_malformed",
+                        has_items_key="items" in payload,
+                        items_type=type(payload.get("items")).__name__,
+                    )
                     break
+                items = payload["items"]
 
                 persisted = 0
                 for item in items:
