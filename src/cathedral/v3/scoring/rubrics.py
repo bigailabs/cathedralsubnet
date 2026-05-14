@@ -65,6 +65,13 @@ def score_trajectory(traj: Trajectory) -> ScoreParts:
 
 
 def _readiness(parts: ScoreParts) -> DistillationReadiness:
+    # Sandbox violations and trusted-fixture-mode runs are PERMANENTLY
+    # NEGATIVE regardless of score, because their oracle output cannot
+    # be trusted as training signal.
+    if parts.coding_failure == CodingFailureClass.SANDBOX_VIOLATION:
+        return DistillationReadiness.NEGATIVE
+    if parts.verifier_metrics.get("trusted_fixture_mode") is True:
+        return DistillationReadiness.NEGATIVE
     if parts.failure_class != FailureClass.NONE and parts.weighted < _NEGATIVE_THRESHOLD:
         return DistillationReadiness.NEGATIVE
     if parts.weighted >= _GOLD_THRESHOLD and parts.failure_class == FailureClass.NONE:
@@ -301,7 +308,24 @@ def _score_bug_repro(traj: Trajectory) -> ScoreParts:
       - symptom_match: the failure output must contain the expected symptom
 
     Composed score: 0.5 * fails_on_buggy + 0.4 * passes_on_fixed + 0.1 * symptom_match.
-    The strongest signal is bug_repro proper (fail on buggy); the rest gate gaming.
+
+    HARD SANDBOX GATE: this rubric refuses to award any positive score
+    when the sandbox backend that ran the candidate test is not Docker
+    (or another future real sandbox). SubprocessBackend is a degraded
+    CI/dev fallback that does NOT isolate miner-supplied code; awarding
+    rewardable scores on its output would let an attacker run arbitrary
+    code outside any isolation. The gate sets:
+      - weighted = 0
+      - coding_failure = SANDBOX_VIOLATION
+      - readiness = NEGATIVE  (set by `_readiness` once failure_class
+                              is non-NONE and score < threshold)
+
+    The gate can be relaxed for a trusted-fixture mode by setting
+    ``CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1``. Even then the
+    rubric tags `verifier_metrics["trusted_fixture_mode"] = True` and
+    forces `readiness = NEGATIVE` so the trajectory cannot count as
+    SFT/DPO gold; this exists only so dev/CI can smoke-test the loop
+    without a running Docker daemon.
     """
     sink = _sink(traj, "bug_repro") or {}
     submitted = sink.get("test_source") is not None
@@ -309,6 +333,36 @@ def _score_bug_repro(traj: Trajectory) -> ScoreParts:
     passes_on_fixed = bool(sink.get("passes_on_fixed"))
     symptom_match = bool(sink.get("symptom_match"))
     sandbox_backend = sink.get("sandbox_backend") or ""
+    trusted_fixture_mode = os.environ.get("CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS") == "1"
+
+    # ----- hard sandbox gate -----
+    sandbox_is_real = sandbox_backend == "docker"
+    if submitted and not sandbox_is_real and not trusted_fixture_mode:
+        return ScoreParts(
+            dimensions={
+                "submitted": 1.0,
+                "fails_on_buggy": 0.0,
+                "passes_on_fixed": 0.0,
+                "symptom_match": 0.0,
+            },
+            weighted=0.0,
+            failure_class=FailureClass.IRRELEVANT,
+            coding_failure=CodingFailureClass.SANDBOX_VIOLATION,
+            verifier_metrics={
+                "sandbox_backend": sandbox_backend,
+                "sandbox_is_real": False,
+                "fails_on_buggy": fails_on_buggy,
+                "passes_on_fixed": passes_on_fixed,
+                "symptom_match": symptom_match,
+            },
+            readiness=DistillationReadiness.NEGATIVE,
+            notes=(
+                "sandbox_violation: bug_repro requires Docker. Set "
+                "CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1 to run in "
+                "trusted-fixture mode (still scored as NEGATIVE so it "
+                "cannot become training-gold)."
+            ),
+        )
 
     dims = {
         "submitted": 1.0 if submitted else 0.0,
@@ -333,6 +387,28 @@ def _score_bug_repro(traj: Trajectory) -> ScoreParts:
         coding_fc = CodingFailureClass.FLAKE
 
     fc = FailureClass.NONE if coding_fc == CodingFailureClass.NONE else FailureClass.IRRELEVANT
+
+    # Trusted-fixture mode: the substantive scoring still runs (so we
+    # can smoke-test the rubric), but the trajectory is permanently
+    # marked NEGATIVE so it cannot leak into SFT/DPO gold.
+    if not sandbox_is_real and trusted_fixture_mode:
+        return ScoreParts(
+            dimensions=dims,
+            weighted=round(weighted, 4),
+            failure_class=fc if fc != FailureClass.NONE else FailureClass.IRRELEVANT,
+            coding_failure=coding_fc,
+            verifier_metrics={
+                "sandbox_backend": sandbox_backend,
+                "sandbox_is_real": False,
+                "trusted_fixture_mode": True,
+                "fails_on_buggy": fails_on_buggy,
+                "passes_on_fixed": passes_on_fixed,
+                "symptom_match": symptom_match,
+            },
+            readiness=DistillationReadiness.NEGATIVE,
+            notes="trusted_fixture_mode: substrate smoke test only, never gold",
+        )
+
     return ScoreParts(
         dimensions=dims,
         weighted=round(weighted, 4),
@@ -340,6 +416,7 @@ def _score_bug_repro(traj: Trajectory) -> ScoreParts:
         coding_failure=coding_fc,
         verifier_metrics={
             "sandbox_backend": sandbox_backend,
+            "sandbox_is_real": sandbox_is_real,
             "fails_on_buggy": fails_on_buggy,
             "passes_on_fixed": passes_on_fixed,
             "symptom_match": symptom_match,

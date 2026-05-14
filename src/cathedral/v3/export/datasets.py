@@ -131,10 +131,13 @@ def export_dpo(
                 continue
             if not _is_exportable(winner, splits) or not _is_exportable(loser, splits):
                 continue
+            # The pair shares the same job, so both trajectories share
+            # the same hidden_context.
+            hidden = _collect_hidden_strings(winner)
             yield {
                 "prompt": prompt_visible_to_miner(winner),
-                "chosen": winner.result.final_output,
-                "rejected": loser.result.final_output,
+                "chosen": _scrub_text(winner.result.final_output, hidden),
+                "rejected": _scrub_text(loser.result.final_output, hidden),
                 "score_delta": round(p.score_delta, 4),
                 "task_type": winner.job.task_type.value,
                 "winner_trajectory_id": winner.trajectory_id,
@@ -172,9 +175,10 @@ def export_rm(
                 continue
             if task_type and t.job.task_type != task_type:
                 continue
+            hidden = _collect_hidden_strings(t)
             yield {
                 "prompt": prompt_visible_to_miner(t),
-                "completion": t.result.final_output,
+                "completion": _scrub_text(t.result.final_output, hidden),
                 "score": t.score.weighted,
                 "dimensions": t.score.dimensions,
                 "task_type": t.job.task_type.value,
@@ -203,36 +207,49 @@ def export_rm(
 def _sft_row(t: Trajectory) -> dict:
     """SFT row in OpenAI chat format.
 
-    Includes the tool trace so the fine-tuned model learns tool use,
-    but ALL tool results pass through `_sanitize_tool_result` so
-    validator-owned oracle output (fails_on_buggy, passes_on_fixed,
-    symptom_match, ...) is replaced with a sentinel before
-    serialization.
+    Includes the tool trace so the fine-tuned model learns tool use.
+    Three sanitizers run on every output string before it lands in a
+    training row:
+      - `_sanitize_tool_args(args, hidden)` scrubs hidden oracle
+        content out of tool args (e.g. `submit_test.test_source` that
+        copied `hidden_context.reference_test_source` verbatim).
+      - `_sanitize_tool_result_values(result, hidden)` scrubs hidden
+        content out of tool results AND replaces known oracle-output
+        keys with `<oracle-output>` so the boolean signal is gone.
+      - `_scrub_text(final_output, hidden)` scrubs the final assistant
+        message for verbatim or substring matches against any hidden
+        oracle string.
     """
-    messages = [
+    hidden = _collect_hidden_strings(t)
+    messages: list[dict] = [
         {"role": "system", "content": "You are a Cathedral agent. Solve the job."},
         {"role": "user", "content": prompt_visible_to_miner(t)},
     ]
     for tc in t.tool_calls:
         if tc.tool_name.startswith("__"):
             continue
+        sanitized_args = _sanitize_tool_args(tc.args, hidden)
         messages.append(
             {
                 "role": "assistant",
-                "content": json.dumps({"tool": tc.tool_name, "args": tc.args}, sort_keys=True),
+                "content": json.dumps(
+                    {"tool": tc.tool_name, "args": sanitized_args},
+                    sort_keys=True,
+                    default=str,
+                ),
             }
         )
         if tc.ok:
-            sanitized = _sanitize_tool_result(tc)
+            sanitized_result = _sanitize_tool_result_values(tc.result, hidden)
             messages.append(
                 {
                     "role": "tool",
-                    "content": json.dumps(sanitized, default=str, sort_keys=True)[:2000],
+                    "content": json.dumps(sanitized_result, default=str, sort_keys=True)[:2000],
                 }
             )
         else:
             messages.append({"role": "tool", "content": f"error: {tc.error}"})
-    messages.append({"role": "assistant", "content": t.result.final_output})
+    messages.append({"role": "assistant", "content": _scrub_text(t.result.final_output, hidden)})
     return {
         "messages": messages,
         "task_type": t.job.task_type.value,
@@ -263,6 +280,12 @@ def prompt_visible_to_miner(t: Trajectory) -> str:
 
 
 def _is_exportable(t: Trajectory, allowed_splits: frozenset[TaskSplit]) -> bool:
+    # Belt-and-braces: HELDOUT_EVAL is NEVER exportable, even if an
+    # operator passes `allowed_splits={TaskSplit.HELDOUT_EVAL}` by
+    # accident. A held-out trajectory in any training row would
+    # invalidate the eval set.
+    if t.job.task_split is TaskSplit.HELDOUT_EVAL:
+        return False
     return t.job.task_split in allowed_splits
 
 
@@ -279,6 +302,104 @@ def _sanitize_tool_result(call: ToolCall) -> object:
     if isinstance(raw, dict):
         return {k: ("<oracle-output>" if k in _ORACLE_RESULT_KEYS else v) for k, v in raw.items()}
     return raw
+
+
+# ---------------------------------------------------------------------------
+# hidden-content sanitizer
+# ---------------------------------------------------------------------------
+#
+# The earlier firewall scrubbed oracle *result values* but not the oracle
+# content that a miner might copy into its outputs:
+#  - tool args (especially `submit_test.test_source` for bug_repro, into
+#    which the privileged heuristic miner pastes
+#    `hidden_context.reference_test_source`)
+#  - final assistant output (the heuristic also returns it as final_output)
+#  - DPO chosen/rejected
+#  - RM completion
+#
+# This sanitizer walks any string field through `_scrub_text(s, hidden)`,
+# which replaces any whole-string or substring match against the set of
+# hidden-context strings with a sentinel. We deliberately err on the side
+# of over-redaction for coding-job exports: if a miner output happens to
+# coincide with an oracle string, it gets scrubbed.
+
+_HIDDEN_SENTINEL = "<hidden-oracle-content>"
+# A miner output shorter than this is treated as too small to risk a
+# substring match against (would scrub legitimate words like "from"). The
+# bug_repro oracle strings are multi-line tests and full source files, so
+# anything below this length cannot meaningfully reveal them.
+_MIN_HIDDEN_SUBSTRING_LEN = 24
+
+
+def _collect_hidden_strings(t: Trajectory) -> list[str]:
+    """Flatten every string leaf in `job.hidden_context`.
+
+    Returns a list ordered from longest to shortest so that scrubbing
+    matches the most specific (and longest) hidden string first.
+    """
+    out: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, str):
+            if node.strip():
+                out.append(node)
+        elif isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list | tuple):
+            for v in node:
+                walk(v)
+
+    walk(t.job.hidden_context)
+    # Sort longest first so we don't prematurely match a short prefix.
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def _scrub_text(text: str | None, hidden: list[str]) -> str | None:
+    if text is None or not isinstance(text, str) or not text:
+        return text
+    scrubbed = text
+    for h in hidden:
+        if not h:
+            continue
+        if h == scrubbed:
+            return _HIDDEN_SENTINEL
+        if len(h) >= _MIN_HIDDEN_SUBSTRING_LEN and h in scrubbed:
+            scrubbed = scrubbed.replace(h, _HIDDEN_SENTINEL)
+    return scrubbed
+
+
+def _sanitize_tool_args(args: object, hidden: list[str]) -> object:
+    """Recursively scrub hidden oracle content out of tool args."""
+    if isinstance(args, str):
+        return _scrub_text(args, hidden)
+    if isinstance(args, dict):
+        return {k: _sanitize_tool_args(v, hidden) for k, v in args.items()}
+    if isinstance(args, list):
+        return [_sanitize_tool_args(v, hidden) for v in args]
+    return args
+
+
+def _sanitize_tool_result_values(result: object, hidden: list[str]) -> object:
+    """Like `_sanitize_tool_args` but for tool result values.
+
+    Also runs the oracle-key replacement so the keys-but-not-values
+    contract from `_sanitize_tool_result` still holds.
+    """
+    if isinstance(result, dict):
+        out: dict[str, object] = {}
+        for k, v in result.items():
+            if k in _ORACLE_RESULT_KEYS:
+                out[k] = "<oracle-output>"
+            else:
+                out[k] = _sanitize_tool_result_values(v, hidden)
+        return out
+    if isinstance(result, list):
+        return [_sanitize_tool_result_values(v, hidden) for v in result]
+    if isinstance(result, str):
+        return _scrub_text(result, hidden)
+    return result
 
 
 def _write_jsonl(

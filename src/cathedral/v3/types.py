@@ -256,7 +256,7 @@ class Receipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    receipt_version: str = "v2"
+    receipt_version: str = "v3"
     trajectory_id: str
     job_id: str
     task_type: TaskType

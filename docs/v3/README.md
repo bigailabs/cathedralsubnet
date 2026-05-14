@@ -5,10 +5,10 @@ verifiable agentic workforce. Lives entirely at `src/cathedral/v3/` and
 does not touch v1.
 
 This is the substrate that v3 coding-job families (`bug_repro`,
-`test_gen`) and other verified-run job families will land on top of. The
-coding families themselves are intentionally out of scope here — they
-require sandbox runner infra, repo bundle builder, and coding-specific
-failure-class labels we will add as separate work.
+`test_gen`) land on top of. **`bug_repro` (Phase 1 alpha), the sandbox
+runner, and the signed repo bundle builder are all part of this PR.**
+`test_gen` and the mutation harness remain out of scope and will land
+in Phase 2 after `bug_repro` calibration.
 
 > Read first: `docs/v3/ARCHITECTURE.md`, `docs/v3/ASSUMPTIONS.md`,
 > `docs/v3/ROADMAP.md`.

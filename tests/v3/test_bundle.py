@@ -194,3 +194,99 @@ def test_round_trip_via_model_dump(signer: ReceiptSigner) -> None:
     reloaded = RepoBundle.model_validate_json(blob)
     v = verify_bundle(reloaded)
     assert v.ok
+
+
+# ---------------------------------------------------------------------------
+# trust-boundary: externally supplied bundles
+# ---------------------------------------------------------------------------
+
+
+def _forge_unsafe_bundle(signer: ReceiptSigner, unsafe_path: str) -> RepoBundle:
+    """Build a real bundle, then forge a self-signed copy with an unsafe path.
+
+    This is what an attacker who controls the signing key would do.
+    `build_bundle` rejects unsafe paths up front, so we have to build a
+    safe bundle first and then mutate it via `model_copy` and re-sign,
+    bypassing `_validate_path` at construction. `verify_bundle` is the
+    only thing standing between us and writing outside `dest`.
+    """
+    from cathedral.v3.bundle.builder import RepoBundleEntry
+
+    body = "x = 1\n"
+    raw = body.encode("utf-8")
+    entry = RepoBundleEntry(
+        path=unsafe_path,
+        size_bytes=len(raw),
+        blake3_hex=__import__("blake3").blake3(raw).hexdigest(),
+    )
+    forged = RepoBundle(
+        bundle_id="bundle_unsafe_test",
+        label="forged",
+        created_at=__import__("datetime").datetime.now(__import__("datetime").UTC),
+        entries=[entry],
+        contents={unsafe_path: body},
+        aggregate_blake3_hex="",
+        signer_pubkey_hex=signer.public_hex,
+        signature_hex="",
+    )
+    forged = forged.model_copy(update={"aggregate_blake3_hex": forged.recompute_aggregate()})
+    sig = signer.sign_bytes(forged.canonical_manifest())
+    return forged.model_copy(update={"signature_hex": sig})
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "../escape.txt",
+        "../../escape.txt",
+        "/etc/passwd",
+        "./still_bad.py",
+        "",
+        "..",
+        ".",
+        "src\\windows.py",
+        "src/seg with space.py",
+        "src/../escape.py",
+    ],
+)
+def test_verify_rejects_externally_supplied_unsafe_paths(
+    signer: ReceiptSigner, unsafe: str
+) -> None:
+    forged = _forge_unsafe_bundle(signer, unsafe)
+    v = verify_bundle(forged)
+    assert v.ok is False, f"verify_bundle accepted unsafe path: {unsafe!r}"
+    assert v.per_file_ok is False
+    assert "unsafe" in (v.reason or "")
+
+
+def test_materialize_refuses_to_escape_dest(signer: ReceiptSigner, tmp_path: Path) -> None:
+    forged = _forge_unsafe_bundle(signer, "../escape.txt")
+    dest = tmp_path / "out"
+    v = materialize_bundle(forged, dest)
+    assert v.ok is False
+    # The escape target should NOT exist.
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_materialize_refuses_absolute_path_entry(signer: ReceiptSigner, tmp_path: Path) -> None:
+    forged = _forge_unsafe_bundle(signer, "/tmp/cathedral_v3_escape_test_file.txt")
+    dest = tmp_path / "out"
+    v = materialize_bundle(forged, dest)
+    assert v.ok is False
+    # The absolute escape path should NOT have been written.
+    assert not Path("/tmp/cathedral_v3_escape_test_file.txt").exists()
+
+
+def test_materialize_writes_legitimate_nested_paths(signer: ReceiptSigner, tmp_path: Path) -> None:
+    # Nested safe paths still work end-to-end.
+    deep_files = {
+        "a.py": "print('a')\n",
+        "src/inner/b.py": "print('b')\n",
+        "src/inner/deeper/c.py": "print('c')\n",
+    }
+    b = build_bundle(deep_files, signer=signer, label="nested")
+    dest = tmp_path / "out"
+    v = materialize_bundle(b, dest)
+    assert v.ok
+    for rel in deep_files:
+        assert (dest / rel).read_text() == deep_files[rel]

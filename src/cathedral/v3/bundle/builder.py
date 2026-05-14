@@ -190,12 +190,26 @@ def verify_bundle(
     *,
     expected_pubkey_hex: str | None = None,
 ) -> BundleVerification:
-    """Check per-file hashes, aggregate hash, and signature.
+    """Check entry-path safety, per-file hashes, aggregate hash, signature.
+
+    Trust boundary: a `RepoBundle` may arrive from an external source
+    (network, disk, a miner). build_bundle's path validation is not
+    enough — we must revalidate every entry path here too, otherwise a
+    self-signed bundle with `../escape.txt` would verify and then
+    write outside `dest` in materialize_bundle.
 
     If `expected_pubkey_hex` is set, also fails when the bundle was
     signed by a different key.
     """
     for entry in bundle.entries:
+        try:
+            _validate_path(entry.path)
+        except ValueError as e:
+            return BundleVerification(
+                ok=False,
+                reason=f"unsafe entry path: {e}",
+                per_file_ok=False,
+            )
         content = bundle.contents.get(entry.path)
         if content is None:
             return BundleVerification(
@@ -243,8 +257,10 @@ def materialize_bundle(bundle: RepoBundle, dest: Path) -> BundleVerification:
     """Write the bundle into `dest`, then re-verify every byte.
 
     Refuses to write if `dest` exists and is not an empty directory.
-    Returns the verification result; on failure, leaves whatever has
-    been written so the caller can inspect.
+    Refuses any entry whose resolved path would land outside `dest`
+    (belt-and-braces against `verify_bundle` regressing on path
+    validation, or against symlinks inside `dest` redirecting writes
+    elsewhere).
     """
     dest = Path(dest)
     if dest.exists() and any(dest.iterdir()):
@@ -253,10 +269,21 @@ def materialize_bundle(bundle: RepoBundle, dest: Path) -> BundleVerification:
     v = verify_bundle(bundle)
     if not v.ok:
         return v
+
+    # Resolve dest once so symlink games in the parents don't fool us.
+    dest_resolved = dest.resolve()
     for entry in bundle.entries:
-        out = dest / entry.path
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(bundle.contents[entry.path])
+        target = (dest / entry.path).resolve()
+        try:
+            target.relative_to(dest_resolved)
+        except ValueError:
+            return BundleVerification(
+                ok=False,
+                reason=f"refusing to write outside dest: {entry.path}",
+                per_file_ok=False,
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(bundle.contents[entry.path])
     return v
 
 

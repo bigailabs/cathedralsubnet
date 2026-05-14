@@ -8,7 +8,9 @@
 
 This branch ships the **v3 trajectory data substrate**: the generalized agent loop, validator tool bus, scoring, ed25519 receipts, BLAKE3 bundle hashing, SQLite archive, dataset exports, replay engine, EMA weight computation. It is **not** a replacement for the v1 validator/miner/publisher stack; v1 continues to run unchanged at `cathedral.*` outside this package.
 
-Coding-job families (`bug_repro`, `test_gen`) are the natural next layer on top of this substrate. They are intentionally **not** in this PR — they require sandbox runner infra, repo bundle builder, and a coding-specific failure-class enum that we will add as separate work.
+Coding-job families build on this substrate. **`bug_repro` (Phase 1 alpha), the Docker-backed sandbox runner (`cathedral.v3.sandbox`), the signed repo bundle builder (`cathedral.v3.bundle`), the coding-specific failure-class enum (`CodingFailureClass`), and the hidden-field firewall for SFT/DPO/RM exports are all included in this PR.** `test_gen` and the mutation harness remain out of scope; they land in Phase 2 after `bug_repro` is calibrated.
+
+A hard sandbox gate enforces the trust boundary: `bug_repro` refuses to award any positive score when the sandbox backend is anything other than Docker, unless the operator explicitly opts into the trusted-fixture escape hatch via `CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1`, in which case readiness stays permanently `NEGATIVE`.
 
 ## The thesis, restated
 
@@ -16,28 +18,34 @@ A subnet is only as valuable as the data it generates. Cathedral v1 generated **
 
 This is not an eval subnet. It is a labour market where the labour is the product.
 
-## Phase 0 capability status
+## Capability status
 
-This branch is the **launch candidate for the v3 trajectory data substrate**. It is not a drop-in replacement for the v1 subnet, and it does not yet implement the v3 coding-job families.
+This branch is the **launch candidate for the v3 trajectory data substrate plus the `bug_repro` Phase 1 alpha**. It is not a drop-in replacement for the v1 subnet.
 
 | Capability | Status | Notes |
 |---|---|---|
-| Five task types end-to-end on fixtures | implemented | research, code_patch, tool_route, multi_step, classify |
+| Five generic task types end-to-end on fixtures | implemented | research, code_patch, tool_route, multi_step, classify |
+| `bug_repro` coding task (Phase 1 alpha) | implemented | 3 curated fixtures, validator-side oracle, `task_split=OPERATOR_REVIEW` by default |
+| `CodingFailureClass` enum | implemented | `sandbox_violation`, `no_bug_repro`, `fixed_commit_fails`, `flake`, ... |
+| `TaskSplit` enum + export filter | implemented | default exports refuse `OPERATOR_REVIEW` and `HELDOUT_EVAL`; `HELDOUT_EVAL` is **never** exportable even with explicit `allowed_splits` |
+| Sandbox runner | implemented | `cathedral.v3.sandbox` with `DockerBackend` (real isolation) and `SubprocessBackend` (degraded fallback). `bug_repro` rubric refuses any positive score from subprocess unless `CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1` is set, and even then readiness stays `NEGATIVE`. |
+| Signed repo bundle builder | implemented | `cathedral.v3.bundle`: per-file BLAKE3, aggregate BLAKE3, ed25519 signature. `verify_bundle` re-validates every entry path; `materialize_bundle` refuses to write outside `dest` |
+| Hidden-field export firewall | implemented | `hidden_context` strings are scrubbed out of SFT tool args, SFT final output, DPO `chosen`/`rejected`, RM `completion`. Oracle result keys retain their schema but values become `<oracle-output>` |
 | Echo / heuristic / LLM reference miners | implemented | LLM falls back to heuristic when `CATHEDRAL_V3_LLM_API_KEY` is unset |
 | Tool-bus observation | implemented | in-process, per-job handler set |
 | Per-task rubric scoring | implemented | scores in `[0, 1]`, failure class + readiness enum |
-| ed25519 receipts + BLAKE3 bundle hash | implemented | matches v1 hashing convention |
+| ed25519 receipts + BLAKE3 bundle hash | implemented | `receipt_version="v3"` |
 | SQLite trajectory archive | implemented | indexed, queryable |
 | SFT / DPO / RM export + signed manifest | implemented | manifest hashes are BLAKE3 |
 | Replay engine | implemented | single-miner, against a stored trajectory |
 | Local EMA weight computation | implemented | normalized across miners present |
-| `code_patch` fixture-only test runner | implemented, fixture-only | `subprocess.run` argv list, no shell, hard timeout, fresh tempdir. NOT a sandbox. |
+| `code_patch` fixture-only test runner | implemented, fixture-only | `subprocess.run` argv list, no shell, hard timeout, fresh tempdir. NOT a sandbox; separate from `cathedral.v3.sandbox`. |
 | On-chain `set_weights` push | stubbed, unverified | code path exists behind `CATHEDRAL_V3_CHAIN_ENABLED=1`; not exercised on a live netuid in this branch |
-| Per-job `workdir` and file sandboxing | planned | no `workdir` is provisioned today |
+| `test_gen` task type | **out of scope** | Phase 2, after `bug_repro` calibration |
+| Mutation harness | **out of scope** | Phase 2 |
 | HTTP recording proxy / egress allowlist | planned | LLM miner calls outbound directly |
-| Container / runtime attestation | planned | Phase 1 alongside `PolarisRunnerMiner` |
-| Validator quorum / inter-validator agreement | planned | Phase 3 |
-| External job submission API | planned | Phase 3 |
+| Validator quorum / inter-validator agreement | planned | Phase 4 |
+| External job submission API | planned | Phase 4 |
 
 ## Components
 
