@@ -27,24 +27,6 @@ async def run_weight_loop(
     stop: asyncio.Event | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
-    if disabled:
-        # Even in dry mode we still want metagraph reads + registration check
-        # so the runbook surfaces real state. We just skip set_weights.
-        await health.update(weight_status=WeightStatus.DISABLED)
-        while not stop.is_set():
-            try:
-                metagraph = await chain.metagraph()
-                registered = await chain.is_registered()
-                await health.update(current_block=metagraph.block, registered=registered)
-                await health.heartbeat("last_metagraph_at")
-            except Exception as e:
-                logger.warning("metagraph_read_error", error=str(e))
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=interval_secs)
-            except TimeoutError:
-                pass
-        return
-
     while not stop.is_set():
         try:
             metagraph = await chain.metagraph()
@@ -97,7 +79,7 @@ async def run_weight_loop(
             )
             normalized = normalize(burned)
 
-            status = await chain.set_weights(normalized)
+            status = WeightStatus.DISABLED if disabled else await chain.set_weights(normalized)
             await health.update(weight_status=status)
             await health.heartbeat("last_weight_set_at")
             logger.info(
