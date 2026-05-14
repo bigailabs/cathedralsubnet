@@ -170,34 +170,119 @@ async def latest_pulled_score_per_hotkey(
     return {str(r[0]): float(r[1]) for r in rows}
 
 
+# Durable marker recording that a 7-day backfill has completed under the
+# current pull_loop code. Bumped whenever the backfill-window semantics
+# change so existing validators redo the backfill after auto-update.
+_BACKFILL_MARKER_KEY = "initial_backfill_completed_at"
+_BACKFILL_CODE_VERSION = "v1"
+
+
+async def _ensure_meta_table(conn: aiosqlite.Connection) -> None:
+    """Create the durable pull-loop metadata table if it doesn't exist.
+
+    Single-row-per-key store. We use it for the backfill-completion
+    marker; any future durable pull_loop state goes here too.
+    """
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pull_loop_meta (
+            key           TEXT PRIMARY KEY,
+            value         TEXT NOT NULL,
+            code_version  TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )
+        """
+    )
+    await conn.commit()
+
+
+async def _backfill_completed_under_current_code(conn: aiosqlite.Connection) -> bool:
+    """True iff a 7-day backfill has finished under this code version.
+
+    Without this marker, an upgrade-and-restart on an existing validator
+    DB would see "recent rows exist, resume from max(ran_at)" and never
+    backfill the older end of the new 7-day window. That's the exact
+    failure that left Rizzo/Kraken/RT21 weighting fewer masons than
+    TAO.com even after PR #105 shipped.
+    """
+    await _ensure_meta_table(conn)
+    cur = await conn.execute(
+        "SELECT code_version FROM pull_loop_meta WHERE key = ?",
+        (_BACKFILL_MARKER_KEY,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return False
+    return str(row[0]) == _BACKFILL_CODE_VERSION
+
+
+async def _mark_backfill_complete(conn: aiosqlite.Connection) -> None:
+    """Persist the "we have walked the full 7-day window" marker.
+
+    Called by ``run_pull_loop`` after the first drained catch-up pass.
+    Subsequent restarts will see the marker and skip the forced
+    backfill — they resume from local max(ran_at) like the steady-state
+    case. If we ever change the backfill-window semantics, bump
+    ``_BACKFILL_CODE_VERSION`` to invalidate every existing marker and
+    force a re-backfill across the fleet.
+    """
+    await _ensure_meta_table(conn)
+    now = datetime.now(UTC).isoformat()
+    await conn.execute(
+        """
+        INSERT INTO pull_loop_meta (key, value, code_version, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value=excluded.value,
+            code_version=excluded.code_version,
+            updated_at=excluded.updated_at
+        """,
+        (_BACKFILL_MARKER_KEY, now, _BACKFILL_CODE_VERSION, now),
+    )
+    await conn.commit()
+
+
 async def _initial_cursor(
     conn: aiosqlite.Connection, *, backfill_days: int = _INITIAL_BACKFILL_DAYS
 ) -> tuple[str, str]:
     """Pick the (since_ran_at, since_id) tuple cursor for the first pull.
 
-    Rules (in order):
-    1. If `pulled_eval_runs` is empty, seed at ``now - backfill_days``
-       with an empty id. Fresh validator hydrates the full scoring window.
-    2. If the highest ``ran_at`` in the table is within the backfill
-       window, resume from that exact (ran_at, id). The tuple cursor's
-       strict `>` comparison plus ``upsert_pulled_eval``'s ON CONFLICT
-       guarantees no duplicates if the publisher re-serves a row.
-    3. If the highest ``ran_at`` is older than the backfill window
-       (validator was down longer than the scoring window cares about),
-       reset to ``now - backfill_days``. Pulling rows older than 7d
-       would not change ``latest_pulled_score_per_hotkey``'s answer.
+    Two-mode logic guarded by the durable backfill marker:
 
-    Idempotent on restart: case 2 is the steady-state path. Case 1
-    only fires once per validator install. Case 3 fires after long
-    downtime.
+    A. **Backfill not yet completed under this code version** (no marker,
+       or marker written by older code). Seed at ``now - backfill_days``
+       with an empty id, regardless of what rows are already in
+       ``pulled_eval_runs``. This is the load-bearing case for the
+       upgrade path: validators that auto-updated with recent rows
+       already in their DB MUST re-walk the older end of the window so
+       their ``weights_pre_burn`` vector converges with everyone else's.
+       ``upsert_pulled_eval``'s ON CONFLICT clause absorbs re-served
+       rows safely.
+
+    B. **Backfill marker is current.** Steady-state restart. Resume from
+       the highest persisted ``(ran_at, eval_run_id)``. The tuple
+       cursor's strict ``>`` ensures we never re-pull the boundary row
+       (cheap optimization on top of the upsert's idempotence).
+
+       Sub-case B': if the highest persisted ran_at is older than the
+       backfill window, the validator was down longer than the scoring
+       window cares about. Reseed at the backfill floor — pulling rows
+       older than 7d wouldn't change
+       ``latest_pulled_score_per_hotkey``'s answer.
 
     The table is created lazily by ``upsert_pulled_eval`` on the first
     successful pull, so handle the absence-of-table case (sqlite raises
-    OperationalError on SELECT FROM nonexistent table) by treating it
-    as case 1.
+    OperationalError on SELECT FROM nonexistent table) by falling back
+    to the backfill floor.
     """
     backfill_floor_dt = datetime.now(UTC) - timedelta(days=backfill_days)
     backfill_floor = backfill_floor_dt.isoformat()
+
+    # Mode A: force backfill if marker is absent or stale.
+    if not await _backfill_completed_under_current_code(conn):
+        return backfill_floor, ""
+
+    # Mode B: marker present and current — resume from max(ran_at).
     try:
         cur = await conn.execute(
             "SELECT ran_at, eval_run_id FROM pulled_eval_runs "
@@ -232,6 +317,7 @@ async def run_pull_loop(
     api_token: str | None = None,
     stop: asyncio.Event | None = None,
     limit: int = _DEFAULT_PULL_LIMIT,
+    initial_backfill_complete: asyncio.Event | None = None,
 ) -> None:
     """Long-running pull loop. Polls publisher every ``interval_secs``.
 
@@ -246,20 +332,30 @@ async def run_pull_loop(
     again immediately without sleeping. Capped at ``_MAX_INNER_PULLS``
     inner iterations per outer tick so a misbehaving publisher can't
     starve the loop.
+
+    Initial-backfill signal: ``initial_backfill_complete`` is set after
+    the first outer tick that fully drains the cursor (i.e. returns a
+    non-saturated page). ``run_weight_loop`` awaits this event before
+    its first ``set_weights`` so a freshly-upgraded validator does not
+    publish a weight vector computed from a half-hydrated 7-day window.
+    Subsequent ticks leave the event set; only the first set matters.
     """
     stop = stop or asyncio.Event()
     base = publisher_url.rstrip("/")
-    # Initial cursor: resume from last persisted (ran_at, id) so a
-    # restart picks up where the previous process left off. If the DB
-    # is empty (or hasn't seen rows newer than the backfill window),
-    # seed from "now - 7 days" so a fresh validator hydrates the
-    # 7-day scoring window before its first weights_set. See
-    # `_initial_cursor` for the full rules.
+    # Initial cursor: force backfill from `now - 7d` if the durable
+    # backfill marker is absent or stale (existing validators that
+    # auto-updated keep recent rows in pulled_eval_runs from the old
+    # 1-hour-seed code; without forcing a backfill they would never
+    # hydrate the older end of the new 7-day window). After backfill
+    # we write the marker so subsequent restarts resume from
+    # max(ran_at). See ``_initial_cursor`` for the full rules.
     cursor_ran_at, cursor_id = await _initial_cursor(conn)
+    backfill_already_done = await _backfill_completed_under_current_code(conn)
     logger.info(
         "pull_loop_initial_cursor",
         since_ran_at=cursor_ran_at,
         since_id=cursor_id or "<empty>",
+        backfill_mode="resume" if backfill_already_done else "backfill",
     )
 
     headers: dict[str, str] = {}
@@ -364,6 +460,23 @@ async def run_pull_loop(
                 inner_pulls=inner_pulls,
             )
 
+            # First successful drained pass under the current code: the
+            # backfill window is fully hydrated. Persist the durable
+            # marker so subsequent restarts skip the forced backfill,
+            # and notify run_weight_loop it's safe to publish.
+            if not backfill_already_done:
+                await _mark_backfill_complete(conn)
+                backfill_already_done = True
+                logger.info(
+                    "pull_loop_backfill_complete",
+                    cursor_ran_at=cursor_ran_at,
+                    cursor_id=cursor_id or "<empty>",
+                    fetched=total_fetched,
+                    persisted=total_persisted,
+                )
+            if initial_backfill_complete is not None and not initial_backfill_complete.is_set():
+                initial_backfill_complete.set()
+
             await _sleep_or_stop(stop, interval_secs)
 
 
@@ -447,7 +560,9 @@ async def _sleep_or_stop(stop: asyncio.Event, secs: float) -> None:
 
 __all__ = [
     "PullVerificationError",
+    "_backfill_completed_under_current_code",
     "_initial_cursor",
+    "_mark_backfill_complete",
     "latest_pulled_score_per_hotkey",
     "pull_once",
     "run_once",
