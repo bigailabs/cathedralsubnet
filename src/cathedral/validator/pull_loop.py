@@ -48,6 +48,16 @@ _DEFAULT_PULL_LIMIT = 500
 # outer tick — ~5.7M rows/day ceiling.
 _MAX_INNER_PULLS = 4
 
+# Initial-cursor window. weight_loop computes a 7-day rolling mean per
+# hotkey (cathedralai/cathedral#105). A fresh validator that seeds its
+# cursor at "now - 1 hour" never hydrates the rest of the 7-day window,
+# so its weights_pre_burn vector under-counts masons compared to a
+# validator that's been running for days. Seed at "now - 7 days" so a
+# first-boot validator catches up to the scoring window before its
+# first weight set. Re-pulling rows is safe — `upsert_pulled_eval`'s
+# ON CONFLICT clause idempotently updates by eval_run_id.
+_INITIAL_BACKFILL_DAYS = 7
+
 
 class PullVerificationError(Exception):
     """An eval-run record from the publisher failed cathedral signature check."""
@@ -160,6 +170,58 @@ async def latest_pulled_score_per_hotkey(
     return {str(r[0]): float(r[1]) for r in rows}
 
 
+async def _initial_cursor(
+    conn: aiosqlite.Connection, *, backfill_days: int = _INITIAL_BACKFILL_DAYS
+) -> tuple[str, str]:
+    """Pick the (since_ran_at, since_id) tuple cursor for the first pull.
+
+    Rules (in order):
+    1. If `pulled_eval_runs` is empty, seed at ``now - backfill_days``
+       with an empty id. Fresh validator hydrates the full scoring window.
+    2. If the highest ``ran_at`` in the table is within the backfill
+       window, resume from that exact (ran_at, id). The tuple cursor's
+       strict `>` comparison plus ``upsert_pulled_eval``'s ON CONFLICT
+       guarantees no duplicates if the publisher re-serves a row.
+    3. If the highest ``ran_at`` is older than the backfill window
+       (validator was down longer than the scoring window cares about),
+       reset to ``now - backfill_days``. Pulling rows older than 7d
+       would not change ``latest_pulled_score_per_hotkey``'s answer.
+
+    Idempotent on restart: case 2 is the steady-state path. Case 1
+    only fires once per validator install. Case 3 fires after long
+    downtime.
+
+    The table is created lazily by ``upsert_pulled_eval`` on the first
+    successful pull, so handle the absence-of-table case (sqlite raises
+    OperationalError on SELECT FROM nonexistent table) by treating it
+    as case 1.
+    """
+    backfill_floor_dt = datetime.now(UTC) - timedelta(days=backfill_days)
+    backfill_floor = backfill_floor_dt.isoformat()
+    try:
+        cur = await conn.execute(
+            "SELECT ran_at, eval_run_id FROM pulled_eval_runs "
+            "ORDER BY ran_at DESC, eval_run_id DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+    except aiosqlite.OperationalError:
+        row = None
+
+    if row is None:
+        return backfill_floor, ""
+
+    last_ran_at = str(row[0])
+    last_id = str(row[1])
+    # Compare ISO-8601 strings lexicographically — the publisher's
+    # ran_at format is fixed-width ISO with `Z` or `+00:00`, so
+    # lexicographic comparison matches chronological comparison for
+    # rows within the same timezone (UTC). Mismatched zones would
+    # require parsing; we don't ship those.
+    if last_ran_at < backfill_floor:
+        return backfill_floor, ""
+    return last_ran_at, last_id
+
+
 async def run_pull_loop(
     *,
     conn: aiosqlite.Connection,
@@ -187,10 +249,18 @@ async def run_pull_loop(
     """
     stop = stop or asyncio.Event()
     base = publisher_url.rstrip("/")
-    # Initial cursor: 1 hour ago, no id constraint (empty string sorts
-    # before any UUID and the strict `>` keeps the boundary inclusive).
-    cursor_ran_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-    cursor_id = ""
+    # Initial cursor: resume from last persisted (ran_at, id) so a
+    # restart picks up where the previous process left off. If the DB
+    # is empty (or hasn't seen rows newer than the backfill window),
+    # seed from "now - 7 days" so a fresh validator hydrates the
+    # 7-day scoring window before its first weights_set. See
+    # `_initial_cursor` for the full rules.
+    cursor_ran_at, cursor_id = await _initial_cursor(conn)
+    logger.info(
+        "pull_loop_initial_cursor",
+        since_ran_at=cursor_ran_at,
+        since_id=cursor_id or "<empty>",
+    )
 
     headers: dict[str, str] = {}
     if api_token:
@@ -377,6 +447,7 @@ async def _sleep_or_stop(stop: asyncio.Event, secs: float) -> None:
 
 __all__ = [
     "PullVerificationError",
+    "_initial_cursor",
     "latest_pulled_score_per_hotkey",
     "pull_once",
     "run_once",
