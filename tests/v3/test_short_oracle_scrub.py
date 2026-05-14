@@ -265,3 +265,151 @@ def test_sft_export_strips_short_oracle(tmp_home: Path) -> None:
     assert m["row_count"] >= 1
     text = out.read_text()
     assert "ZeroDivisionError" not in text
+
+
+# ---------------------------------------------------------------------------
+# Multi-word and punctuated symptoms (the reviewer's case).
+# These are NOT identifier-shaped, so the previous identifier gate
+# skipped them and they leaked through prose.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "symptom,output,must_not_appear",
+    [
+        # Plain multi-word symptom
+        (
+            "division by zero",
+            "hidden symptom was division by zero",
+            "division by zero",
+        ),
+        # With trailing punctuation
+        (
+            "division by zero",
+            "raises division by zero.",
+            "division by zero",
+        ),
+        # Mid-sentence with quotes
+        (
+            "got None",
+            'output said "got None" instead of a number',
+            "got None",
+        ),
+        # Verb-phrase symptom
+        (
+            "state leaked",
+            "the test demonstrates that state leaked across calls",
+            "state leaked",
+        ),
+    ],
+)
+def test_multiword_short_oracle_is_scrubbed(
+    symptom: str, output: str, must_not_appear: str
+) -> None:
+    traj = _forge_short_oracle_trajectory(
+        final_output=output,
+        expected_symptom=symptom,
+    )
+    hidden = _collect_hidden_strings(traj)
+    out = _scrub_text(traj.result.final_output, hidden)
+    assert out is not None
+    assert must_not_appear not in out
+
+
+def test_multiword_short_oracle_respects_word_boundary() -> None:
+    """The boundary check still prevents over-scrubbing when the
+    symptom appears inside a larger word on either side.
+    """
+    traj = _forge_short_oracle_trajectory(
+        final_output="subdivision by zero is unrelated to the bug",
+        expected_symptom="division by zero",
+    )
+    hidden = _collect_hidden_strings(traj)
+    out = _scrub_text(traj.result.final_output, hidden)
+    assert out is not None
+    # "subdivision by zero" starts with 'sub' (word char before the
+    # 'd' of "division"), so the boundary check refuses the match.
+    assert "subdivision by zero" in out
+
+
+def test_multiword_short_oracle_end_to_end_sft(tmp_home: Path) -> None:
+    """The reviewer's exact repro pattern: a multi-word symptom
+    appearing verbatim in final_output must not survive SFT export.
+    """
+    traj = _forge_short_oracle_trajectory(
+        final_output="hidden symptom was division by zero",
+        expected_symptom="division by zero",
+        readiness=DistillationReadiness.GOLD,
+        weighted=1.0,
+    )
+    archive = TrajectoryArchive(tmp_home)
+    archive.insert(traj)
+    out = tmp_home / "sft.jsonl"
+    m = export_sft(
+        archive,
+        out,
+        signer=None,
+        min_score=0.5,
+        allowed_splits=frozenset({TaskSplit.TRAIN_EXPORTABLE}),
+    )
+    assert m["row_count"] >= 1
+    text = out.read_text()
+    assert "division by zero" not in text
+
+
+def test_multiword_short_oracle_end_to_end_rm(tmp_home: Path) -> None:
+    traj = _forge_short_oracle_trajectory(
+        final_output="hidden symptom was division by zero",
+        expected_symptom="division by zero",
+    )
+    archive = TrajectoryArchive(tmp_home)
+    archive.insert(traj)
+    out = tmp_home / "rm.jsonl"
+    m = export_rm(
+        archive,
+        out,
+        signer=None,
+        allowed_splits=frozenset({TaskSplit.TRAIN_EXPORTABLE}),
+    )
+    assert m["row_count"] >= 1
+    text = out.read_text()
+    assert "division by zero" not in text
+
+
+def test_multiword_short_oracle_end_to_end_dpo(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    winner = _forge_short_oracle_trajectory(
+        final_output="hidden symptom was division by zero",
+        expected_symptom="division by zero",
+        readiness=DistillationReadiness.GOLD,
+        weighted=1.0,
+    )
+    loser = _forge_short_oracle_trajectory(
+        final_output="output mentioned division by zero anyway",
+        expected_symptom="division by zero",
+        readiness=DistillationReadiness.DISCARD,
+        weighted=0.4,
+    )
+    loser = loser.model_copy(update={"job": winner.job})
+    archive = TrajectoryArchive(tmp_home)
+    archive.insert(winner)
+    archive.insert(loser)
+    pair = _PrefPair(
+        job_id=winner.job.job_id,
+        winner_trajectory_id=winner.trajectory_id,
+        loser_trajectory_id=loser.trajectory_id,
+        score_delta=0.6,
+    )
+    monkeypatch.setattr(archive, "preference_pairs", lambda **kw: [pair])
+    out = tmp_home / "dpo.jsonl"
+    m = export_dpo(
+        archive,
+        out,
+        signer=None,
+        min_delta=0.0,
+        allowed_splits=frozenset({TaskSplit.TRAIN_EXPORTABLE}),
+    )
+    assert m["row_count"] == 1
+    text = out.read_text()
+    assert "division by zero" not in text

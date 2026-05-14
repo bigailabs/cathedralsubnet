@@ -413,18 +413,19 @@ _HIDDEN_SENTINEL = "<hidden-oracle-content>"
 # values; SHORT_ORACLE_KEYS below get scrubbed regardless.
 _MIN_HIDDEN_SUBSTRING_LEN = 24
 
-# Hidden-context keys whose VALUES are short identifiers that name
-# specific oracle signals (exception class names, expected log labels,
-# specific symptom strings). These must be scrubbed even when shorter
-# than the substring threshold, otherwise prose like
-# "the hidden oracle was ZeroDivisionError" would round-trip into the
-# training corpus.
+# Hidden-context keys whose VALUES are oracle signals that must be
+# scrubbed even when shorter than the substring threshold. Examples:
+#   expected_symptom        -- e.g. "ZeroDivisionError", "division by
+#                              zero", "state leaked", "got None"
+#   expected_label          -- e.g. "bug", "feature_request"
+#   expected_tool           -- e.g. "kv_set"
+#   expected_exception      -- exception class name
 #
-# Each name here is matched against the key in `hidden_context`; the
-# value gets scrub-always semantics, but only when it looks like an
-# oracle identifier (alnum + underscore, length 3..64). This keeps the
-# rule from scrubbing common English words even if an operator stuffs
-# something arbitrary into a hidden field.
+# An identifier-shape rule used to gate scrubbing, but the reviewer
+# correctly pointed out that real expected_symptom values are arbitrary
+# failure-output substrings, not necessarily identifiers. Anything an
+# operator places under one of these keys is treated as oracle data and
+# scrubbed from exported text.
 _SHORT_ORACLE_KEYS: frozenset[str] = frozenset(
     {
         "expected_symptom",
@@ -434,39 +435,43 @@ _SHORT_ORACLE_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Floor length for short-oracle values. Anything shorter (e.g. "a") is
+# considered too generic to safely scrub from prose; we accept that
+# leak risk rather than redact every single letter that appears.
+_MIN_SHORT_ORACLE_LEN = 3
+
 
 # A "short oracle" is a hidden value that must be scrubbed even when
 # below _MIN_HIDDEN_SUBSTRING_LEN. Each entry is (value, is_short_oracle).
 HiddenString = tuple[str, bool]
 
 
-def _looks_like_oracle_identifier(s: str) -> bool:
-    if not 3 <= len(s) <= 64:
-        return False
-    # Identifier-ish: letters, digits, underscores; no spaces, no
-    # punctuation. Avoids scrubbing arbitrary English the operator
-    # might have stuffed into a hidden_context value.
-    return all(c.isalnum() or c == "_" for c in s)
-
-
 def _collect_hidden_strings(t: Trajectory) -> list[HiddenString]:
     """Flatten every string leaf in `job.hidden_context`.
 
-    Returns a list of (value, is_short_oracle), ordered longest first so
-    that scrubbing matches the most specific hidden string before any
-    incidental short overlap.
+    Returns a list of (value, is_short_oracle), ordered longest first
+    so that scrubbing matches the most specific hidden string before
+    any incidental short overlap.
+
+    A value is flagged as `is_short_oracle` when its key (the last
+    segment of its path through `hidden_context`) is in
+    `_SHORT_ORACLE_KEYS`. Such values are scrubbed regardless of
+    length or shape, including multi-word symptoms like
+    "division by zero".
     """
     out: list[HiddenString] = []
 
     def walk(node: object, key_path: tuple[str, ...]) -> None:
         if isinstance(node, str):
-            if node.strip():
-                is_short_oracle = (
-                    bool(key_path)
-                    and key_path[-1] in _SHORT_ORACLE_KEYS
-                    and _looks_like_oracle_identifier(node)
-                )
-                out.append((node, is_short_oracle))
+            stripped = node.strip()
+            if not stripped:
+                return
+            is_short_oracle = (
+                bool(key_path)
+                and key_path[-1] in _SHORT_ORACLE_KEYS
+                and len(stripped) >= _MIN_SHORT_ORACLE_LEN
+            )
+            out.append((node, is_short_oracle))
         elif isinstance(node, dict):
             for k, v in node.items():
                 walk(v, (*key_path, str(k)))
@@ -490,21 +495,31 @@ def _scrub_text(text: str | None, hidden: list[HiddenString]) -> str | None:
         if value == scrubbed:
             return _HIDDEN_SENTINEL
         # Long values: substring-scrub past the length threshold.
-        # Short oracle identifiers (e.g. ZeroDivisionError): scrub
-        # whenever they appear, but only as whole-word substrings to
-        # avoid mangling unrelated text that incidentally embeds them.
+        # Short-oracle values (any string under SHORT_ORACLE_KEYS,
+        # including multi-word symptoms): scrub on word boundaries so
+        # we don't mangle longer identifiers/words that happen to
+        # embed them.
         if is_short_oracle:
-            scrubbed = _replace_whole_word(scrubbed, value, _HIDDEN_SENTINEL)
+            scrubbed = _replace_on_word_boundary(scrubbed, value, _HIDDEN_SENTINEL)
         elif len(value) >= _MIN_HIDDEN_SUBSTRING_LEN and value in scrubbed:
             scrubbed = scrubbed.replace(value, _HIDDEN_SENTINEL)
     return scrubbed
 
 
-def _replace_whole_word(haystack: str, needle: str, replacement: str) -> str:
-    """Replace `needle` in `haystack` only where adjacent characters are
-    not identifier characters. Keeps "ZeroDivisionError" replaceable
-    inside prose ("...was ZeroDivisionError.") without mangling longer
-    identifiers that happen to embed it.
+def _is_word_char(c: str) -> bool:
+    return c.isalnum() or c == "_"
+
+
+def _replace_on_word_boundary(haystack: str, needle: str, replacement: str) -> str:
+    """Replace `needle` in `haystack` only where it sits on a word
+    boundary on both sides.
+
+    A "word boundary" here is: the character immediately before/after
+    the match is not a word character (alnum or underscore). This
+    works for identifiers ("ZeroDivisionError" matches but
+    "MyZeroDivisionErrorWrapper" doesn't) AND for multi-word symptoms
+    ("division by zero" matches "raises division by zero." but
+    leaves "subdivision by zero" alone because of the leading "sub").
     """
     if not needle or needle not in haystack:
         return haystack
@@ -516,13 +531,9 @@ def _replace_whole_word(haystack: str, needle: str, replacement: str) -> str:
         if j == -1:
             out_parts.append(haystack[i:])
             break
-        # Boundary check: char before and after must not be an
-        # identifier continuation char.
-        before_ok = j == 0 or not (haystack[j - 1].isalnum() or haystack[j - 1] == "_")
+        before_ok = j == 0 or not _is_word_char(haystack[j - 1])
         after_idx = j + nlen
-        after_ok = after_idx >= len(haystack) or not (
-            haystack[after_idx].isalnum() or haystack[after_idx] == "_"
-        )
+        after_ok = after_idx >= len(haystack) or not _is_word_char(haystack[after_idx])
         out_parts.append(haystack[i:j])
         if before_ok and after_ok:
             out_parts.append(replacement)
@@ -530,6 +541,10 @@ def _replace_whole_word(haystack: str, needle: str, replacement: str) -> str:
             out_parts.append(needle)
         i = j + nlen
     return "".join(out_parts)
+
+
+# Backwards-compat alias for callers still importing the prior name.
+_replace_whole_word = _replace_on_word_boundary
 
 
 def _sanitize_tool_args(args: object, hidden: list[HiddenString]) -> object:
