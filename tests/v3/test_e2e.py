@@ -41,15 +41,15 @@ async def test_one_tick_end_to_end(tmp_home: Path) -> None:
     ]
     rt = Runtime(home=tmp_home, miners=miners)
     r = await rt.tick()
-    # 5 task types x 3 miners = 15 trajectories
-    assert len(r.trajectories) == 15
+    # 6 task types x 3 miners = 18 trajectories
+    assert len(r.trajectories) == 18
     # every trajectory has a bundle hash
     for t in r.trajectories:
         assert t.bundle_hash, f"missing bundle hash on {t.trajectory_id}"
     # archive recall works
     archive = TrajectoryArchive(tmp_home)
     stats = archive.stats()
-    assert stats.total == 15
+    assert stats.total == 18
     assert set(stats.by_task) == {tt.value for tt in TaskType}
     # the heuristic miner should win at least once
     assert any(t.miner_kind == "heuristic" and t.score.weighted >= 0.85 for t in r.trajectories), (

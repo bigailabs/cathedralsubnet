@@ -11,11 +11,13 @@ See docs/v3/ARCHITECTURE.md for the full design.
 
 from cathedral.v3.types import (
     AgentResult,
+    CodingFailureClass,
     DistillationReadiness,
     FailureClass,
     JobSpec,
     Receipt,
     ScoreParts,
+    TaskSplit,
     TaskType,
     ToolCall,
     Trajectory,
@@ -24,11 +26,13 @@ from cathedral.v3.types import (
 
 __all__ = [
     "AgentResult",
+    "CodingFailureClass",
     "DistillationReadiness",
     "FailureClass",
     "JobSpec",
     "Receipt",
     "ScoreParts",
+    "TaskSplit",
     "TaskType",
     "ToolCall",
     "Trajectory",

@@ -30,6 +30,8 @@ def build_handlers(job: JobSpec) -> dict[str, Callable[[dict[str, Any]], Any]]:
         return _multi_step_tools(job)
     if job.task_type is TaskType.CLASSIFY:
         return _classify_tools(job)
+    if job.task_type is TaskType.BUG_REPRO:
+        return _bug_repro_tools(job)
     return {}
 
 
@@ -313,6 +315,97 @@ def _classify_tools(job: JobSpec) -> dict[str, Callable]:
     return {
         "label": label,
         "__sink_chosen__": lambda _a: dict(chosen),
+    }
+
+
+# ---------------------------------------------------------------------------
+# bug_repro
+# ---------------------------------------------------------------------------
+
+
+def _bug_repro_tools(job: JobSpec) -> dict[str, Callable]:
+    """Validator-owned oracle for bug_repro.
+
+    The miner sees only `buggy_source` (in `context`). The
+    `fixed_source` and `expected_symptom` live in `hidden_context`
+    and never reach the miner.
+    """
+    from cathedral.v3.sandbox import SandboxConfig, available_backend
+
+    buggy = job.context["buggy_source"]
+    module_name = job.context["module_name"]
+    fixed = job.hidden_context["fixed_source"]
+    expected_symptom = job.hidden_context["expected_symptom"]
+
+    submitted: dict[str, Any] = {
+        "test_source": None,
+        "buggy_run": None,
+        "fixed_run": None,
+        "fails_on_buggy": False,
+        "passes_on_fixed": False,
+        "symptom_match": False,
+        "sandbox_backend": None,
+    }
+
+    backend = available_backend()
+    cfg = SandboxConfig(timeout_seconds=10.0)
+
+    def read_buggy_source(_args: dict) -> dict:
+        return {"module_name": module_name, "content": buggy}
+
+    def submit_test(args: dict) -> dict:
+        test_source = (args.get("test_source") or "").strip()
+        if not test_source:
+            return {"ok": False, "error": "empty test_source"}
+        submitted["test_source"] = test_source
+
+        # Run against buggy. Expected to FAIL with expected_symptom in output.
+        r_buggy = backend.run(
+            test_source,
+            cfg,
+            files={f"{module_name}.py": buggy},
+        )
+        # Run against fixed. Expected to PASS.
+        r_fixed = backend.run(
+            test_source,
+            cfg,
+            files={f"{module_name}.py": fixed},
+        )
+        submitted["buggy_run"] = {
+            "ok": r_buggy.ok,
+            "exit_code": r_buggy.exit_code,
+            "stdout_tail": r_buggy.stdout[-400:],
+            "stderr_tail": r_buggy.stderr[-400:],
+            "timed_out": r_buggy.timed_out,
+            "backend": r_buggy.backend,
+        }
+        submitted["fixed_run"] = {
+            "ok": r_fixed.ok,
+            "exit_code": r_fixed.exit_code,
+            "stdout_tail": r_fixed.stdout[-400:],
+            "stderr_tail": r_fixed.stderr[-400:],
+            "timed_out": r_fixed.timed_out,
+            "backend": r_fixed.backend,
+        }
+        submitted["fails_on_buggy"] = not r_buggy.ok and not r_buggy.timed_out
+        submitted["passes_on_fixed"] = r_fixed.ok
+        # Symptom match: the expected substring should appear in the
+        # buggy run's failure output.
+        combined_buggy_output = (r_buggy.stderr or "") + (r_buggy.stdout or "")
+        submitted["symptom_match"] = expected_symptom in combined_buggy_output
+        submitted["sandbox_backend"] = backend.backend_name
+
+        return {
+            "fails_on_buggy": submitted["fails_on_buggy"],
+            "passes_on_fixed": submitted["passes_on_fixed"],
+            "symptom_match": submitted["symptom_match"],
+            "sandbox_backend": backend.backend_name,
+        }
+
+    return {
+        "read_buggy_source": read_buggy_source,
+        "submit_test": submit_test,
+        "__sink_bug_repro__": lambda _a: dict(submitted),
     }
 
 

@@ -116,3 +116,6 @@ ignore = ["S101", "S104", "S105", "UP036", "UP042"]
 "src/cathedral/v3/jobs/generator.py" = ["S311"]
 # CLI print formatting uses long status lines; word-wrapping degrades UX.
 "src/cathedral/v3/cli/main.py" = ["E501"]
+# Sandbox runner intentionally executes subprocesses; that is its job.
+# Inputs are validated by SandboxConfig.validate() before reaching subprocess.run.
+"src/cathedral/v3/sandbox/runner.py" = ["S603"]

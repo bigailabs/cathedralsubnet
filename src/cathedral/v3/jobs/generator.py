@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import random
 
+from cathedral.v3.jobs.bug_repro_fixtures import BUG_REPRO_FIXTURES
 from cathedral.v3.jobs.fixtures import (
     CLASSIFY_FIXTURES,
     CODE_PATCH_FIXTURES,
@@ -17,7 +18,7 @@ from cathedral.v3.jobs.fixtures import (
     RESEARCH_CORPUS,
     TOOL_ROUTE_FIXTURES,
 )
-from cathedral.v3.types import JobSpec, TaskType, ToolDescriptor
+from cathedral.v3.types import JobSpec, TaskSplit, TaskType, ToolDescriptor
 
 
 def available_task_types() -> list[TaskType]:
@@ -45,6 +46,8 @@ def generate_job(task_type: TaskType, seed: int = 0) -> JobSpec:
         return _multi_step(rng, seed)
     if task_type is TaskType.CLASSIFY:
         return _classify(rng, seed)
+    if task_type is TaskType.BUG_REPRO:
+        return _bug_repro(rng, seed)
     raise ValueError(f"unknown task type: {task_type}")
 
 
@@ -216,6 +219,59 @@ def _classify(rng: random.Random, seed: int) -> JobSpec:
         rubric_id="classify_v1",
         seed=seed,
         deadline_seconds=20.0,
+    )
+
+
+def _bug_repro(rng: random.Random, seed: int) -> JobSpec:
+    item = rng.choice(BUG_REPRO_FIXTURES)
+    return JobSpec(
+        task_type=TaskType.BUG_REPRO,
+        prompt=(
+            f"Issue: {item['issue_title']}\n\n"
+            f"{item['issue_body']}\n\n"
+            "Write a minimal regression test that fails on the current "
+            "(buggy) source and passes on the fixed source. Submit it "
+            "via the `submit_test` tool."
+        ),
+        context={
+            # Public: the miner sees the buggy source and the module name.
+            "fixture_id": item["fixture_id"],
+            "module_name": item["module_name"],
+            "buggy_source": item["buggy_source"],
+            "hint": item["expected_call_hint"],
+        },
+        hidden_context={
+            # Validator-only oracles. Never exported into training prompts.
+            # Trusted baseline miners (the heuristic) may read this; LLM
+            # miners and any third-party miner receive only `public_view()`.
+            "fixed_source": item["fixed_source"],
+            "expected_symptom": item["expected_symptom"],
+            "reference_test_source": item["reference_test_source"],
+        },
+        tools=[
+            ToolDescriptor(
+                name="read_buggy_source",
+                description="Read the current buggy source for the module under test.",
+                args_schema={},
+            ),
+            ToolDescriptor(
+                name="submit_test",
+                description=(
+                    "Submit a Python test script. The validator will run it "
+                    "against both the buggy and the fixed source and check "
+                    "that it fails on buggy, passes on fixed, with the "
+                    "expected symptom in the failure output."
+                ),
+                args_schema={"test_source": "string"},
+            ),
+        ],
+        expected_artifacts=["regression_test"],
+        rubric_id="bug_repro_v1",
+        seed=seed,
+        deadline_seconds=60.0,
+        # Default to operator_review: the alpha runs human-reviewed,
+        # with low or no reward weight, until we calibrate.
+        task_split=TaskSplit.OPERATOR_REVIEW,
     )
 
 

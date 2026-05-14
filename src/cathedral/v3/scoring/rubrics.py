@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 from cathedral.v3.types import (
+    CodingFailureClass,
     DistillationReadiness,
     FailureClass,
     ScoreParts,
@@ -49,6 +50,8 @@ def score_trajectory(traj: Trajectory) -> ScoreParts:
         parts = _score_multi_step(traj)
     elif tt is TaskType.CLASSIFY:
         parts = _score_classify(traj)
+    elif tt is TaskType.BUG_REPRO:
+        parts = _score_bug_repro(traj)
     else:
         parts = ScoreParts(
             dimensions={},
@@ -280,6 +283,67 @@ def _score_classify(traj: Trajectory) -> ScoreParts:
         dimensions={"label_acc": correct},
         weighted=correct,
         failure_class=fc,
+        readiness=DistillationReadiness.DISCARD,
+    )
+
+
+# ---------------------------------------------------------------------------
+# bug_repro
+# ---------------------------------------------------------------------------
+
+
+def _score_bug_repro(traj: Trajectory) -> ScoreParts:
+    """Score a bug_repro trajectory.
+
+    Three load-bearing oracle signals from the validator's sandbox runs:
+      - fails_on_buggy: the candidate test must fail on the buggy source
+      - passes_on_fixed: the candidate test must pass on the fixed source
+      - symptom_match: the failure output must contain the expected symptom
+
+    Composed score: 0.5 * fails_on_buggy + 0.4 * passes_on_fixed + 0.1 * symptom_match.
+    The strongest signal is bug_repro proper (fail on buggy); the rest gate gaming.
+    """
+    sink = _sink(traj, "bug_repro") or {}
+    submitted = sink.get("test_source") is not None
+    fails_on_buggy = bool(sink.get("fails_on_buggy"))
+    passes_on_fixed = bool(sink.get("passes_on_fixed"))
+    symptom_match = bool(sink.get("symptom_match"))
+    sandbox_backend = sink.get("sandbox_backend") or ""
+
+    dims = {
+        "submitted": 1.0 if submitted else 0.0,
+        "fails_on_buggy": 1.0 if fails_on_buggy else 0.0,
+        "passes_on_fixed": 1.0 if passes_on_fixed else 0.0,
+        "symptom_match": 1.0 if symptom_match else 0.0,
+    }
+    weighted = (
+        0.5 * dims["fails_on_buggy"] + 0.4 * dims["passes_on_fixed"] + 0.1 * dims["symptom_match"]
+    )
+
+    coding_fc = CodingFailureClass.NONE
+    if not submitted:
+        coding_fc = CodingFailureClass.NO_BUG_REPRO
+    elif not fails_on_buggy and passes_on_fixed:
+        # passes on both — does not reproduce the bug
+        coding_fc = CodingFailureClass.NO_BUG_REPRO
+    elif passes_on_fixed is False and fails_on_buggy:
+        # also fails on the fixed commit — too broad / brittle
+        coding_fc = CodingFailureClass.FIXED_COMMIT_FAILS
+    elif not symptom_match and fails_on_buggy:
+        coding_fc = CodingFailureClass.FLAKE
+
+    fc = FailureClass.NONE if coding_fc == CodingFailureClass.NONE else FailureClass.IRRELEVANT
+    return ScoreParts(
+        dimensions=dims,
+        weighted=round(weighted, 4),
+        failure_class=fc,
+        coding_failure=coding_fc,
+        verifier_metrics={
+            "sandbox_backend": sandbox_backend,
+            "fails_on_buggy": fails_on_buggy,
+            "passes_on_fixed": passes_on_fixed,
+            "symptom_match": symptom_match,
+        },
         readiness=DistillationReadiness.DISCARD,
     )
 

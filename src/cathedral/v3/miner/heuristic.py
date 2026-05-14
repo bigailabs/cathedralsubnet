@@ -27,6 +27,8 @@ class HeuristicAgent:
             return await self._multi_step(job, tools)
         if job.task_type is TaskType.CLASSIFY:
             return await self._classify(job, tools)
+        if job.task_type is TaskType.BUG_REPRO:
+            return await self._bug_repro(job, tools)
         return AgentResult(final_output="", agent_error="unknown task")
 
     async def _research(self, job: JobSpec, tools: ToolBus) -> AgentResult:
@@ -109,3 +111,21 @@ class HeuristicAgent:
         best = max(scored, key=lambda k: scored[k]) if scored else (labels[0] if labels else "")
         await tools.call("label", {"label": best})
         return AgentResult(final_output=best, structured={"strategy": "keyword"})
+
+    async def _bug_repro(self, job: JobSpec, tools: ToolBus) -> AgentResult:
+        # Trusted baseline: reads the validator-owned reference test out
+        # of hidden_context. LLM miners do not have this privilege; they
+        # only see job.public_view().
+        await tools.call("read_buggy_source", {})
+        reference = job.hidden_context.get("reference_test_source", "")
+        if not reference:
+            return AgentResult(
+                final_output="",
+                agent_error="no reference_test_source in hidden_context",
+            )
+        r = await tools.call("submit_test", {"test_source": reference})
+        return AgentResult(
+            final_output=reference,
+            structured={"strategy": "reference-test", "verifier": r},
+            artifacts={"regression_test": reference},
+        )
