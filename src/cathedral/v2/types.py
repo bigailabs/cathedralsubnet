@@ -7,13 +7,13 @@ signatures replay-stable.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+import blake3
 from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,8 @@ class Trajectory(BaseModel):
         return json.dumps(d, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     def compute_bundle_hash(self) -> str:
-        return hashlib.blake2b(self.canonical_bytes(), digest_size=32).hexdigest()
+        # BLAKE3 matches the v1 hashing convention used across publisher/evidence/eval.
+        return blake3.blake3(self.canonical_bytes()).hexdigest()
 
 
 # ---------------------------------------------------------------------------

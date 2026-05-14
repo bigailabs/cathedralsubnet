@@ -18,6 +18,7 @@ from cathedral.v2.archive import TrajectoryArchive
 from cathedral.v2.export import export_dpo, export_rm, export_sft
 from cathedral.v2.jobs import generate_job
 from cathedral.v2.miner import EchoAgent, HeuristicAgent
+from cathedral.v2.miner.base import MinerAgent
 from cathedral.v2.miner.llm import LLMAgent
 from cathedral.v2.receipt import verify_receipt
 from cathedral.v2.replay import replay
@@ -33,7 +34,11 @@ def tmp_home(tmp_path: Path) -> Path:
 
 @pytest.mark.asyncio
 async def test_one_tick_end_to_end(tmp_home: Path) -> None:
-    miners = [EchoAgent("hk_echo"), HeuristicAgent("hk_heuristic"), LLMAgent("hk_llm")]
+    miners: list[MinerAgent] = [
+        EchoAgent("hk_echo"),
+        HeuristicAgent("hk_heuristic"),
+        LLMAgent("hk_llm"),
+    ]
     rt = Runtime(home=tmp_home, miners=miners)
     r = await rt.tick()
     # 5 task types x 3 miners = 15 trajectories

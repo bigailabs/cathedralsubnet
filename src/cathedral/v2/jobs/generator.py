@@ -7,6 +7,7 @@ test suites can be plugged in later via the same JobSpec.context shape.
 
 from __future__ import annotations
 
+import hashlib
 import random
 
 from cathedral.v2.jobs.fixtures import (
@@ -23,8 +24,17 @@ def available_task_types() -> list[TaskType]:
     return list(TaskType)
 
 
+def _derive_seed(task_type: TaskType, seed: int) -> int:
+    # Stable across processes (Python's hash() is salted by PYTHONHASHSEED).
+    # We use blake2b here purely as a PRNG seed source, separate from the
+    # BLAKE3 bundle/manifest hashes used for receipts and exports.
+    payload = f"{task_type.value}:{seed}".encode()
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, "big")
+
+
 def generate_job(task_type: TaskType, seed: int = 0) -> JobSpec:
-    rng = random.Random(seed * 1009 + hash(task_type.value) & 0xFFFFFFFF)
+    rng = random.Random(_derive_seed(task_type, seed))
     if task_type is TaskType.RESEARCH:
         return _research(rng, seed)
     if task_type is TaskType.CODE_PATCH:

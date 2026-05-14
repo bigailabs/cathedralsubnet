@@ -10,28 +10,36 @@ This document captures every assumption made during the v2 rewrite so an operato
 
 3. **SQLite is enough for the local archive.** Trajectories are append-only, queries are bounded by miner and time, and a single validator generates O(10k) rows/day. Postgres is a config switch (`CATHEDRAL_V2_DB_URL`) when it matters.
 
-4. **Signatures use ed25519 by default.** sr25519 is supported when a bittensor wallet is present (`CATHEDRAL_V2_WALLET=…`); the wire format includes `signature_scheme` so verifiers dispatch correctly. The receipt schema does not assume either scheme — it's just a versioned blob with a `scheme` field.
+4. **Signatures use ed25519 by default.** This branch only implements ed25519 — `signature_scheme` on the wire is always `"ed25519"`. The receipt schema is a versioned blob with a `scheme` field, so adding sr25519 (via a bittensor wallet) in a later branch is forward-compatible; `CATHEDRAL_V2_WALLET` today only configures the on-chain weight push, not signing.
 
 5. **Scores live in `[0, 1]`.** Every rubric must produce this range. Per-dimension weights compose multiplicatively for the final score; the weight loop only sees the composed score.
 
 ## Soft assumptions (overridable via config or env)
 
+**Implemented overrides** (the env var is read by code on this branch):
+
 | Assumption | Default | Override |
 |---|---|---|
-| LLM provider | Chutes (`https://llm.chutes.ai/v1`) | `CATHEDRAL_V2_LLM_BASE_URL`, `CATHEDRAL_V2_LLM_API_KEY` |
+| LLM base URL | `https://llm.chutes.ai/v1` | `CATHEDRAL_V2_LLM_BASE_URL` |
+| LLM API key | unset (LLM miner falls back to heuristic) | `CATHEDRAL_V2_LLM_API_KEY` |
 | LLM model | `MiniMax-M2.5-TEE` | `CATHEDRAL_V2_LLM_MODEL` |
-| Archive dir | `~/.cathedral/v2/` | `CATHEDRAL_V2_HOME` |
-| DB path | `$CATHEDRAL_V2_HOME/archive.db` | `CATHEDRAL_V2_DB_URL` (supports `sqlite:///` and `postgres://`) |
-| Artifact dir | `$CATHEDRAL_V2_HOME/artifacts/` | `CATHEDRAL_V2_ARTIFACTS_DIR` |
-| Signing key | ed25519 keypair auto-generated at first run | `CATHEDRAL_V2_SIGNING_KEY` (hex seed) or `CATHEDRAL_V2_WALLET` (bittensor wallet name) |
-| Number of miners spawned by `serve` | 3 (echo, heuristic, llm) | `cathedral-v2 serve --miners echo,heuristic,llm` |
-| Jobs per tick | 1 of each task type | `--task-types research,code_patch,...` |
-| Tick interval | 30s | `--tick-interval 30` |
+| Archive dir | `~/.cathedral/v2/` | `CATHEDRAL_V2_HOME` (or `--home` on the CLI) |
+| Signing key | ed25519 keypair auto-generated at first run, persisted to `$CATHEDRAL_V2_HOME/signer.key` | `CATHEDRAL_V2_SIGNING_KEY` (hex seed) |
 | EMA half-life for weights | 50 trajectories | `CATHEDRAL_V2_EMA_HALF_LIFE` |
-| Tool timeout | 30s per tool call | `--tool-timeout 30` |
-| Max trajectory bytes | 10 MiB | `CATHEDRAL_V2_MAX_TRAJECTORY_BYTES` |
-| On-chain weight setting | off | `CATHEDRAL_V2_CHAIN_ENABLED=1` + wallet config |
 | Distillation `gold` threshold | score ≥ 0.85 | `CATHEDRAL_V2_GOLD_THRESHOLD` |
+| On-chain weight push (stubbed, unverified) | off | `CATHEDRAL_V2_CHAIN_ENABLED=1` plus `CATHEDRAL_V2_WALLET`, `CATHEDRAL_V2_NETUID`, `CATHEDRAL_V2_NETWORK` |
+| Miners spawned by `serve` | 3 (echo, heuristic, llm) | `--miners echo,heuristic,llm` |
+| Task types per tick | all five | `--task-types research,code_patch,...` |
+| Tick interval between ticks in `serve` | `0` seconds (back-to-back) | `--interval 30` |
+
+**Planned overrides** (referenced in some places but **not read by code on this branch**):
+
+| Knob | Status | Notes |
+|---|---|---|
+| `CATHEDRAL_V2_DB_URL` | planned | The archive is hardcoded to `$CATHEDRAL_V2_HOME/archive.db` (SQLite WAL). Postgres support is a future toggle. |
+| `CATHEDRAL_V2_ARTIFACTS_DIR` | planned | Artifacts ride inside the trajectory record today; there is no separate artifact dir. |
+| `CATHEDRAL_V2_MAX_TRAJECTORY_BYTES` | planned | No enforcement today. |
+| `--tool-timeout` | planned | The `code_patch` fixture runner has a hardcoded 15s timeout (`_FIXTURE_TIMEOUT_SECONDS` in `validator/tools.py`); other tools are unbounded. |
 
 ## What v2 does NOT assume
 

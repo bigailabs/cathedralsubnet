@@ -7,11 +7,12 @@ signed by the configured ReceiptSigner if one is provided.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+
+import blake3
 
 from cathedral.v2.archive import TrajectoryArchive
 from cathedral.v2.receipt import ReceiptSigner
@@ -196,7 +197,7 @@ def _write_jsonl(
                 break
             line = json.dumps(row, sort_keys=True, default=str)
             f.write(line + "\n")
-            hashes.append(hashlib.blake2b(line.encode(), digest_size=16).hexdigest())
+            hashes.append(blake3.blake3(line.encode()).hexdigest())
             count += 1
     manifest = {
         "format": format,
@@ -205,7 +206,7 @@ def _write_jsonl(
         "exported_at": datetime.now(UTC).isoformat(),
         "row_hashes_count": len(hashes),
         "row_hashes_sample": hashes[:10],
-        "aggregate_hash": hashlib.blake2b(canonical_json(hashes), digest_size=32).hexdigest(),
+        "aggregate_hash": blake3.blake3(canonical_json(hashes)).hexdigest(),
     }
     if signer is not None:
         manifest["signature_scheme"] = "ed25519"

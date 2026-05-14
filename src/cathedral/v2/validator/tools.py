@@ -7,7 +7,12 @@ routes the miner's calls into these handlers.
 
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from cathedral.v2.types import JobSpec, TaskType
@@ -153,26 +158,55 @@ def _block_match(src: list[str], start: int, block: list[str]) -> bool:
     return all(src[start + j] == block[j] for j in range(len(block)))
 
 
-def _run_python_test(source: str, test: str) -> tuple[bool, str | None]:
-    """Run the test against the source by writing both into a temp dir and execing."""
-    import subprocess
-    import sys
-    import tempfile
-    from pathlib import Path
+_MODULE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_FIXTURE_TIMEOUT_SECONDS = 15
 
+
+def _parse_module_name(test_source: str) -> str:
+    """Extract the module-under-test name from the first import line.
+
+    Strict: must be a single bare identifier (must start with a letter, no
+    dunders, no dots, no stdlib shadowing). Anything else falls back to a
+    fixed name. We never let an attacker-controlled string become a
+    filename.
+    """
+    stdlib_block = {"os", "sys", "subprocess", "pathlib", "io", "typing", "tempfile"}
+    for ln in test_source.splitlines():
+        ln = ln.strip()
+        first = None
+        if ln.startswith("from "):
+            parts = ln.split()
+            if len(parts) >= 2:
+                first = parts[1]
+        elif ln.startswith("import "):
+            parts = ln.split()
+            if len(parts) >= 2:
+                first = parts[1].split(",")[0].strip()
+        if first and _MODULE_NAME_RE.match(first) and first not in stdlib_block:
+            return first
+    return "module_under_test"
+
+
+def _run_python_test(source: str, test: str) -> tuple[bool, str | None]:
+    """FIXTURE-ONLY: run a v2 fixture's `failing_test` against a candidate source.
+
+    This handler exists to score the v2 ``code_patch`` task on the curated
+    fixtures in ``cathedral/v2/jobs/fixtures.py``. It is NOT a sandbox; it
+    is NOT a generic code execution service; and it is NOT exposed to
+    arbitrary miner-supplied test source. Both `source` and `test` come
+    from the validator-owned fixture set; only `source` may be modified by
+    the miner (via apply_patch's tolerant unified-diff applier).
+
+    Guardrails:
+      - subprocess.run with a list argv (never shell=True)
+      - written into a fresh tempfile.TemporaryDirectory (cleaned on exit)
+      - hard wall-clock timeout (TimeoutExpired -> failure)
+      - module name parsed strictly (single bare identifier, no path chars,
+        no stdlib shadowing) before being used as a filename
+    """
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        # detect the module name from the test's first import
-        module = None
-        for ln in test.splitlines():
-            if ln.startswith("from "):
-                module = ln.split()[1]
-                break
-            if ln.startswith("import "):
-                module = ln.split()[1]
-                break
-        if module is None:
-            module = "module_under_test"
+        module = _parse_module_name(test)
         (td_path / f"{module}.py").write_text(source)
         (td_path / "_test_runner.py").write_text(test)
         try:
@@ -181,13 +215,15 @@ def _run_python_test(source: str, test: str) -> tuple[bool, str | None]:
                 cwd=td_path,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=_FIXTURE_TIMEOUT_SECONDS,
+                shell=False,
             )
         except subprocess.TimeoutExpired:
             return False, "timeout"
         if r.returncode == 0:
             return True, None
-        return False, (r.stderr or r.stdout or "non-zero exit").strip().splitlines()[-1][:200]
+        tail = (r.stderr or r.stdout or "non-zero exit").strip().splitlines()
+        return False, (tail[-1][:200] if tail else "non-zero exit")
 
 
 # ---------------------------------------------------------------------------

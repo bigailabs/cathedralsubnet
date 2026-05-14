@@ -50,7 +50,7 @@ python -m cathedral.v2.cli export rm  --out /tmp/rm.jsonl
 ```
 
 Each export writes a sibling `.manifest.json` containing the row count,
-filter, per-row hash sample, aggregate BLAKE2b hash, and an ed25519
+filter, per-row hash sample, aggregate BLAKE3 hash, and an ed25519
 signature of the manifest by the Cathedral key.
 
 ## Replay a job against a different miner
@@ -77,10 +77,10 @@ python -m cathedral.v2.cli submit-job --task-type tool_route --miner heuristic -
 ## Run the smoke tests
 
 ```bash
-python -m pytest tests/v2/test_e2e.py -v
+python -m pytest tests/v2/ -v
 ```
 
-Should produce 6 passed in <1 second.
+Phase 0 ships 58 tests: end-to-end smoke (6), cross-process determinism (26), tamper-evidence (5), and code_patch subprocess hardening (21).
 
 ## File map
 
@@ -121,7 +121,7 @@ src/cathedral/v2/
 
 After one `serve --ticks 100`:
 
-- 1000+ structured trajectories, each with: job spec, full tool trace, intermediate artifacts, final output, scored dimensions, failure class, distillation readiness flag, BLAKE2b bundle hash, ed25519 receipt
+- 1000+ structured trajectories, each with: job spec, full tool trace, intermediate artifacts, final output, scored dimensions, failure class, distillation readiness flag, BLAKE3 bundle hash, ed25519 receipt
 - Failure clusters surfaced per task type
 - Preference pairs auto-generated from same-job miner sibling pairs
 - Per-miner EMA weights, normalized

@@ -10,6 +10,29 @@ A subnet is only as valuable as the data it generates. Cathedral v1 generated **
 
 This is not an eval subnet. It is a labour market where the labour is the product.
 
+## Phase 0 capability status
+
+This branch is the **launch candidate for the agentic-workforce trajectory archive**. It is not a drop-in replacement for the v1 subnet.
+
+| Capability | Status | Notes |
+|---|---|---|
+| Five task types end-to-end on fixtures | implemented | research, code_patch, tool_route, multi_step, classify |
+| Echo / heuristic / LLM reference miners | implemented | LLM falls back to heuristic when `CATHEDRAL_V2_LLM_API_KEY` is unset |
+| Tool-bus observation | implemented | in-process, per-job handler set |
+| Per-task rubric scoring | implemented | scores in `[0, 1]`, failure class + readiness enum |
+| ed25519 receipts + BLAKE3 bundle hash | implemented | matches v1 hashing convention |
+| SQLite trajectory archive | implemented | indexed, queryable |
+| SFT / DPO / RM export + signed manifest | implemented | manifest hashes are BLAKE3 |
+| Replay engine | implemented | single-miner, against a stored trajectory |
+| Local EMA weight computation | implemented | normalized across miners present |
+| `code_patch` fixture-only test runner | implemented, fixture-only | `subprocess.run` argv list, no shell, hard timeout, fresh tempdir. NOT a sandbox. |
+| On-chain `set_weights` push | stubbed, unverified | code path exists behind `CATHEDRAL_V2_CHAIN_ENABLED=1`; not exercised on a live netuid in this branch |
+| Per-job `workdir` and file sandboxing | planned | no `workdir` is provisioned today |
+| HTTP recording proxy / egress allowlist | planned | LLM miner calls outbound directly |
+| Container / runtime attestation | planned | Phase 1 alongside `PolarisRunnerMiner` |
+| Validator quorum / inter-validator agreement | planned | Phase 3 |
+| External job submission API | planned | Phase 3 |
+
 ## Components
 
 ```
@@ -90,7 +113,18 @@ v2 ships three reference miners:
 - `HeuristicAgent` — rule-based per task type. Solid floor for code-patch / classify.
 - `LLMAgent` — calls Chutes (or any OpenAI-compatible endpoint) with a ReAct-style tool-using loop. The canonical real miner.
 
-Every tool call routes through the `ToolBus`, which is what makes the trajectory observable. Miners do not get raw network access; they get a `ToolBus` handle that records every (tool_name, args, result, timestamp, latency_ms). This is the trick: by making tools the only side-effect channel, the validator can capture the full trace without instrumenting the model itself. Tools are sandboxed (file ops scoped to `job.workdir`, HTTP routed through a recording proxy, shell disabled by default).
+Every tool call routes through the `ToolBus`, which is what makes the trajectory observable. The `ToolBus` records every (tool_name, args, result, timestamp, latency_ms). By making tools the only side-effect channel the validator wants observed, it captures the full trace without instrumenting the model itself.
+
+**Implemented today (Phase 0):**
+
+- In-process Python handlers per task type (`validator/tools.py`). The miner asks the `ToolBus` for a named handler; the handler runs in the same Python process and returns a value the bus records.
+- The `code_patch` `run_test` handler runs the fixture's `failing_test` against the candidate source via `subprocess.run` (argv list, no shell) inside a fresh `TemporaryDirectory` with a hard wall-clock timeout. This is **fixture-only**, designed against the bundled fixtures in `cathedral/v2/jobs/fixtures.py`; it is not a general code-execution sandbox.
+
+**Planned (not in this branch):**
+
+- File-system sandboxing scoped to a per-job `workdir` (currently no `workdir` is provisioned).
+- HTTP recording proxy and per-tool egress allowlist (LLM miner currently calls outbound directly).
+- Container / runtime attestation for miners that need it (deferred to Phase 1 alongside the Polaris-deploy `MinerAgent`).
 
 ### 3. Validator observation (`cathedral.v2.validator`)
 
@@ -98,9 +132,10 @@ The validator dispatches a job to a miner, hands them a `ToolBus` it owns, and w
 
 - the prompt + full job context
 - every tool call the miner made, with args + results + latencies
-- every intermediate artifact written to `job.workdir`
-- the final output (text + structured fields)
-- runtime metadata (model id, token counts, wall time, container id)
+- the final output (text + structured fields) plus any `AgentResult.artifacts` dict the miner returned
+- runtime metadata that miners populate today: `model_id`, `agent_error`. Token counts, wall time, container id are planned (Phase 1).
+
+There is no per-job `workdir` in this branch; artifacts flow through `AgentResult.artifacts` and the `__sink_*` handler pattern.
 
 This is the **trajectory**. It is the unit of work and the unit of data.
 
@@ -146,11 +181,15 @@ Given a trajectory id, the replay engine reconstructs the exact `ToolBus` state 
 
 ### 9. Weight setting (`cathedral.v2.scoring.weights`)
 
-Per-miner score = EMA over their last N trajectories, with task-type weights configurable. Output is a `Weights` record (uid → normalized weight in `[0, 1]`) emitted both to disk and to the optional `bittensor.subtensor.set_weights` call. In v2 the chain call is gated behind `CATHEDRAL_CHAIN_ENABLED=1`; the default `--local` mode keeps weights in-memory so the loop is testable without a wallet.
+Per-miner score = EMA over their recent trajectories, normalized across miners.
+
+**Implemented today (Phase 0):** `compute_weights(archive)` returns a `Weights` record (hotkey → normalized weight in `[0, 1]`). Local-only — `Weights.on_chain` is always `False`.
+
+**Stubbed but unverified end-to-end:** `WeightLoop._push_to_chain` builds the `bittensor.Subtensor` call when `CATHEDRAL_V2_CHAIN_ENABLED=1` is set. The code path has not been exercised against a live netuid in this branch; treat it as wired-but-untested. Default is off; without the env var weights stay in memory and the loop is testable without a wallet.
 
 ### 10. CLI (`cathedral.v2.cli`)
 
-`cathedral-v2` exposes the whole system. See `docs/v2/CLI.md` and `cathedral-v2 --help`.
+`cathedral-v2` exposes the whole system. The full set of subcommands is documented in `docs/v2/README.md`; the runnable form on this branch is `python -m cathedral.v2.cli <subcommand>`.
 
 ## Wire types
 
