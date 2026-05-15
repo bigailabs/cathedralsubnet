@@ -150,8 +150,12 @@ def build_app(ctx: RuntimeContext) -> FastAPI:
 
 def from_settings(settings_path: str) -> FastAPI:
     """Production builder — used by `cathedral-validator serve`."""
-    from cathedral.config import ValidatorSettings  # local import for CLI speed
+    from cathedral.config import (  # local import for CLI speed
+        ValidatorSettings,
+        resolve_validator_config_path,
+    )
 
+    settings_path = resolve_validator_config_path(settings_path)
     settings = ValidatorSettings.from_toml(settings_path)
     bearer = os.environ.get(settings.http.bearer_token_env)
     if not bearer:
