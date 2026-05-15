@@ -57,17 +57,20 @@ A failed card receives no score; the claim is rejected with `preflight: <reason>
 
 `CardRegistry.baseline()` seeds five cards: `eu-ai-act`, `us-ai-executive-order`, `uk-aisi`, `eu-gdpr-enforcement`, `us-ccpa`. Operators can override via TOML in a future config field; for now, edit `cathedral.cards.registry` directly.
 
-## Verified-runtime multiplier (Polaris attestation)
+## Verified-runtime multiplier (Tier A, gated)
 
-Eval runs that produce a valid Polaris attestation get a `1.10x` quality multiplier applied AFTER the first-mover delta, then capped at `1.0`. The multiplier reflects that the work ran inside a Cathedral-managed runtime image on Polaris compute, not on the miner's own hardware.
+v1 ships the verified-runtime multiplier at `1.00x`. The `1.10x` multiplier described in this section applies only when Tier A is enabled by setting `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; with the flag off (the v1 default) every scored run uses `1.00x`. Code reference: `src/cathedral/eval/scoring_pipeline.py` (~line 264).
+
+When Tier A is enabled and an eval run produces a valid Polaris attestation, the `1.10x` quality multiplier is applied AFTER the first-mover delta, then capped at `1.0`. The multiplier reflects that the work ran inside a Cathedral-managed runtime image on Polaris compute, not on the miner's own hardware.
 
 ### Eligibility tiers
 
-| Tier | Runner | Polaris-verified | Multiplier |
-|---|---|---|---|
-| A — Polaris-hosted | `PolarisRuntimeRunner` | yes (signed attestation verifies) | 1.10x |
-| B — BYO-compute | `BundleCardRunner` | no | 1.00x |
-| Legacy | `HttpPolarisRunner`, stubs | yes when `polaris_agent_id` is non-empty | 1.10x |
+| Tier | Runner | Polaris-verified | Multiplier | Live in v1 |
+|---|---|---|---|---|
+| B, BYO-compute (ssh-probe) | `SshProbeRunner` / `SshHermesRunner` | no | 1.00x | yes |
+| B, BYO-compute (bundle) | `BundleCardRunner` | no | 1.00x | yes |
+| A, Polaris-hosted | `PolarisRuntimeRunner` | yes (signed attestation verifies) | 1.10x when gate is on; 1.00x otherwise | no, gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true` |
+| Legacy | `HttpPolarisRunner`, stubs | yes when `polaris_agent_id` is non-empty | 1.10x when gate is on; 1.00x otherwise | no, gated |
 
 ### Attestation format
 

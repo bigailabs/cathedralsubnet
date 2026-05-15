@@ -110,11 +110,12 @@ Sqlite with WAL mode. The legacy worker is the single writer for `claims`, `evid
 
 ## What this repo deliberately omits
 
-- GPU verification, SSH probing, hardware attestation
+- GPU verification, hardware fingerprinting
 - Rental flow, billing, k8s/k3s, miner prover daemons
 - POM, ModelFactory, cost-collapse marketplace logic
-- IP-first miner proof for Polaris-hosted workers
 - Public ledger, treasury dashboards, blog content
 - Subnet scouting, broad external miner outreach
 
 If a future story crosses into one of those areas, it goes in a sibling repo, not here.
+
+> SSH probing was historically listed as omitted; it landed in v1. The ssh-probe runner (`src/cathedral/eval/ssh_hermes_runner.py`, `src/cathedral/eval/ssh_probe_runner.py`) is the live BYO-compute path, and the submit endpoint requires `ssh_host` + `ssh_user` whenever `attestation_mode='ssh-probe'`. Polaris-hosted Tier A (`PolarisRuntimeRunner`, `PolarisDeployRunner`) remains in the architecture but is gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; with the flag off (the v1 default) the submit boundary rejects Tier A modes with `tier_a_disabled_for_v1`. TEE attestation (Nitro / TDX / SEV-SNP) is spec-only in v1: Nitro verifier is wired but no live TEE miners; TDX and SEV-SNP return 501 from the submit endpoint.

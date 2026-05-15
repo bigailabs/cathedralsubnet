@@ -6,27 +6,37 @@ The operational runbook (systemd unit, log filtering, weight-status table, recov
 
 ## Mechanism
 
-The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) once a miner has submitted a bundle. For each submission with `attestation_mode='polaris'`, status `queued`, the orchestrator (`cathedral.eval.orchestrator.EvalOrchestrator`) does the following:
+The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) once a miner has submitted a bundle. v1 default is `attestation_mode='ssh-probe'` (BYO compute), set in `src/cathedral/publisher/submit.py`. Tier A modes (`polaris`, `polaris-deploy`) are accepted at the submit boundary only when `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; with the flag off (the v1 default) they are rejected with `tier_a_disabled_for_v1`. The remainder of this section first walks the live ssh-probe path, then documents the gated Tier A path as the auditable spec for when it is turned on.
+
+For each submission with status `queued`, the orchestrator (`cathedral.eval.orchestrator.EvalOrchestrator`) does the following:
 
 1. **Promote to `evaluating`.** Single-tick state transition so a separate `run_once()` call observes the new state. Confirms the row is not double-claimed.
 2. **Generate the eval task.** `cathedral.eval.task_generator.generate_task` produces a deterministic `EvalTask` per `(card_id, epoch, round_index)`. The prompt is the card's task template hydrated with the current `source_pool`. `task_hash = BLAKE3(prompt.encode('utf-8'))` is the hash the attestation will bind to.
 3. **Resolve the runner.** Dispatch by `attestation_mode`:
-   - `polaris` -> `PolarisRuntimeRunner` (Tier A, the live path)
-   - legacy `bundle` -> `BundleCardRunner` (BYO-compute, reads `artifacts/last-card.json` from the bundle, no attestation)
+   - `ssh-probe` -> `SshProbeRunner` (v1 default) or `SshHermesRunner` (when `CATHEDRAL_PROBER_VERSION=v2`); BYO-compute, Cathedral SSHs into the miner-declared host and invokes `hermes chat -q "<task>"` against an isolated `cathedral-eval-<round>` profile. This is the live path.
+   - `bundle` -> `BundleCardRunner` (BYO-compute, reads `artifacts/last-card.json` from the bundle, no attestation)
+   - `polaris` -> `PolarisRuntimeRunner` (Tier A; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, off by default in v1)
+   - `polaris-deploy` -> `PolarisDeployRunner` (paid Tier A; same gate as above)
    - test modes (`stub*`) -> in-process stubs
-4. **Dispatch the eval.** `PolarisRuntimeRunner.run` does the following in order:
+4. **Dispatch the eval (live path: ssh-probe).** `SshProbeRunner.run` (or `SshHermesRunner.run` under `CATHEDRAL_PROBER_VERSION=v2`) does the following:
+   - Opens an SSH connection to `ssh_user@ssh_host:ssh_port` declared on the submission, using Cathedral's universal probe key.
+   - Snapshots the miner's primary `~/.hermes/` into an isolated `~/.hermes/profiles/cathedral-eval-<round>/` so the miner's working profile is never modified.
+   - Invokes `hermes chat -q "<task>"` against the eval profile. Hermes runs the full agentic loop (tool calls, skills, memory) against the miner's configured LLM provider.
+   - Captures the trace bundle (state.db slice, sessions JSON, request dumps, skills, memories, logs), SCPs it back, and tears down the eval profile.
+   - Returns the produced Card JSON. No Polaris attestation is produced on this path; `polaris_attestation` is `None`.
+5. **Dispatch the eval (Tier A spec, gated).** When `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, `attestation_mode='polaris'` or `'polaris-deploy'` is accepted at the submit boundary and routes to `PolarisRuntimeRunner` / `PolarisDeployRunner`. This is the auditable spec for the paid Tier A path; it is not running in v1 by default. When enabled, the runner does the following in order:
    - Resolve a presigned URL for the encrypted bundle on the `cathedral-bundles` bucket via `HippiusPresignedUrlResolver` (boto3 `generate_presigned_url`, default 1-hour expiry).
    - `POST /api/marketplace/submissions/{POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID}/runtime-evaluate` to Polaris with `{task: prompt, task_id: "cathedral-{card_id}-e{epoch}r{round_index}", timeout_seconds, env_overrides: {CARD_ID, MINER_BUNDLE_URL, CATHEDRAL_BUNDLE_KEK, CATHEDRAL_BUNDLE_KEY_ID, CHUTES_API_KEY}}`.
    - Polaris deploys `ghcr.io/cathedralai/cathedral-runtime:latest` against the bundle. The runtime fetches the presigned URL, decrypts using `CATHEDRAL_BUNDLE_KEK` plus the per-bundle wrapped data key in `CATHEDRAL_BUNDLE_KEY_ID`, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (default `deepseek-ai/DeepSeek-V3.1`), reconciles citations against real fetches, and returns Card JSON.
    - Polaris signs an Ed25519 attestation `{version: "polaris-v1", payload: {submission_id, task_id, task_hash, output_hash, deployment_id, completed_at}, signature, public_key}` and returns it alongside the runtime output.
-5. **Verify the Polaris attestation.** `PolarisRuntimeRunner._verify_attestation` recomputes:
-   - `expected_task_hash = BLAKE3(task.prompt.encode("utf-8"))`; must equal `payload.task_hash`.
-   - `expected_output_hash = BLAKE3(output_bytes)` where `output_bytes = base64-decode(response.output)`; must equal `payload.output_hash`.
-   - `payload.task_id` equals the id Cathedral sent.
-   - `payload.submission_id` equals the configured `POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID`.
-   - Response `public_key` equals the configured `POLARIS_ATTESTATION_PUBLIC_KEY` (pinned, no rotation via response).
-   - `Ed25519.verify(signature, canonical_json(payload))` against the pinned key.
-   - Any mismatch raises `PolarisAttestationError` and the orchestrator marks the run as a runner failure; no score persisted.
+   - `PolarisRuntimeRunner._verify_attestation` recomputes:
+     - `expected_task_hash = BLAKE3(task.prompt.encode("utf-8"))`; must equal `payload.task_hash`.
+     - `expected_output_hash = BLAKE3(output_bytes)` where `output_bytes = base64-decode(response.output)`; must equal `payload.output_hash`.
+     - `payload.task_id` equals the id Cathedral sent.
+     - `payload.submission_id` equals the configured `POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID`.
+     - Response `public_key` equals the configured `POLARIS_ATTESTATION_PUBLIC_KEY` (pinned, no rotation via response).
+     - `Ed25519.verify(signature, canonical_json(payload))` against the pinned key.
+     - Any mismatch raises `PolarisAttestationError` and the orchestrator marks the run as a runner failure; no score persisted.
 6. **Preflight.** `cathedral.cards.preflight.preflight(card)` (`src/cathedral/cards/preflight.py`):
    - Citations non-empty.
    - `no_legal_advice` is the literal boolean `true`.
@@ -47,7 +57,7 @@ The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) 
    - Late mover beating incumbent by `+0.05` -> multiplier 1.0.
    - Late mover outside the 30-day window -> multiplier 1.0.
    - Otherwise -> multiplier 0.50.
-9. **Verified-runtime multiplier.** `polaris_verified = polaris_attestation is not None or bool(polaris_agent_id)`; multiplier `1.10` if verified else `1.00`. Applied after the first-mover delta, then `weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)`.
+9. **Verified-runtime multiplier (Tier A spec, gated).** `polaris_verified = polaris_attestation is not None or polaris_manifest is not None or bool(polaris_agent_id)`. The multiplier resolves to `1.10` only when `polaris_verified` is true AND `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; otherwise it resolves to `1.00`. In v1 the env flag is off, so every scored run uses `1.00x` and `weighted_final = min(1.0, weighted_after_first_mover)`. Code: `src/cathedral/eval/scoring_pipeline.py` (~line 264).
 10. **Hash the output card.** `output_card_hash = BLAKE3(canonical_json(output_card_json))`. The pipeline hashes the literal dict the publisher both serves and stores, not a Pydantic re-render. This is what downstream verifiers pin.
 11. **Sign the public projection.** `EvalSigner.sign` over `canonical_json` of:
 
@@ -95,7 +105,7 @@ Each row below names a concrete attack and the mechanism that catches it. Citati
 
 | Attack | Mitigation | Where |
 |--------|------------|-------|
-| Hand-written cards posing as agent output | Tier A: Polaris attestation binds `output_hash` to the runtime's actual emission. Tier B+: TEE attestation binds output to a measured runtime. Tier B (`unverified`): never reaches the leaderboard. | `src/cathedral/eval/polaris_runner.py` `_verify_attestation`; `src/cathedral/publisher/submit.py` mode dispatch |
+| Hand-written cards posing as agent output | v1 live (ssh-probe): Cathedral SSHs into the miner-declared host and invokes Hermes itself, so the card was produced by the miner's running agent during the eval window, not pasted in after the fact. Tier A (gated, spec): Polaris attestation binds `output_hash` to the runtime's actual emission. Tier B+ (spec): TEE attestation binds output to a measured runtime. `unverified` submissions never reach the leaderboard. | `src/cathedral/eval/ssh_hermes_runner.py`, `src/cathedral/eval/ssh_probe_runner.py`; `src/cathedral/eval/polaris_runner.py` `_verify_attestation`; `src/cathedral/publisher/submit.py` mode dispatch |
 | Copying another miner's card | Submission-time exact-bundle-hash and fuzzy display-name checks at intake; first-mover delta penalty (0.50x) for late copies that fail to beat the incumbent by 0.05 within 30 days. | `src/cathedral/publisher/similarity.py`; `src/cathedral/eval/scoring.py::first_mover_multiplier` |
 | Citation hallucination | The runtime fetches every citation URL and computes `BLAKE3(bytes)` server-side. Preflight rejects any citation outside HTTP 200-399. | `docker/cathedral-runtime/server.py` (fetch + hash), `src/cathedral/cards/preflight.py::BrokenSourceError` |
 | Legal-advice framing | Preflight scans the concatenated summary, action notes, and why-it-matters for prohibited phrases. | `src/cathedral/cards/preflight.py::LEGAL_ADVICE_PHRASES` |
@@ -123,10 +133,12 @@ A small CPU-only box. No GPU.
 
 ### Prerequisites
 
-- A Bittensor sr25519 hotkey registered on **SN39** (mainnet) or **SN292** (testnet).
+- A Bittensor sr25519 hotkey registered on **SN39** (mainnet, the operator path for v1).
 - A Linux host (any distro, x86_64 or aarch64).
 - **Python 3.11 or 3.12.** Newer Python versions are not yet tested.
 - SQLite (default) or PostgreSQL for the local store. SQLite is fine for v1.
+
+> Testnet (SN292) is retained for protocol development and continues to ship with `config/testnet.toml`. Operators should run against SN39 mainnet; testnet is not the supported operator path.
 
 ### Networking
 
@@ -196,7 +208,7 @@ export CATHEDRAL_BEARER=$(openssl rand -hex 32)
 
 ### 4. Configure
 
-Copy `config/testnet.toml` (SN292) or `config/mainnet.toml` (SN39) and edit:
+Copy `config/mainnet.toml` (SN39, the operator path) and edit:
 
 - `network.validator_hotkey`: your hotkey ss58 (required).
 - `network.wallet_name`: local Bittensor wallet name (defaults to `cathedral-validator`; change if your wallet is named differently).
@@ -211,10 +223,12 @@ Env vars the validator reads at startup:
 ### 5. Bring up
 
 ```bash
-cathedral-validator migrate --config config/testnet.toml
-cathedral chain-check       --config config/testnet.toml  # confirm hotkey + subtensor
-cathedral-validator serve   --config config/testnet.toml
+cathedral-validator migrate --config config/mainnet.toml
+cathedral chain-check       --config config/mainnet.toml  # confirm hotkey + subtensor
+cathedral-validator serve   --config config/mainnet.toml
 ```
+
+(For protocol development against SN292, swap `config/mainnet.toml` for `config/testnet.toml`.)
 
 Operational follow-on (systemd unit, log filtering, weight-status table, recovery): [validator/RUNBOOK.md](validator/RUNBOOK.md).
 
@@ -380,8 +394,9 @@ card = Card.model_validate(eval_run["output_card"])
 entry = CardRegistry.baseline().lookup(eval_run["card_id"])
 parts = score_card(card, entry)
 recomputed = parts.weighted()
-# Apply first-mover delta + 1.10x verified multiplier as in src/cathedral/eval/scoring_pipeline.py
-# to reproduce eval_run["weighted_score"], capped at 1.0.
+# Apply first-mover delta as in src/cathedral/eval/scoring_pipeline.py
+# to reproduce eval_run["weighted_score"], capped at 1.0. In v1 the verified-runtime
+# multiplier is 1.00x (Tier A gated behind CATHEDRAL_ENABLE_POLARIS_DEPLOY=true).
 ```
 
 The first-mover delta requires the submission's `metadata_fingerprint` and the historical incumbent score, which need a DB join; the formulas are in `cathedral.eval.scoring`.

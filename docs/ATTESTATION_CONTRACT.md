@@ -5,6 +5,8 @@ Scope: defines how miners prove that the agent named in a Cathedral submission p
 Audience: Cathedral validator implementers, Polaris attestation service, miners building B+ (self-TEE) compute paths, downstream auditors.
 Companion documents: `cathedral-redesign/CONTRACTS.md` (data contracts), `docs/protocol/CLAIM.md` (legacy `/v1/claim`), `docs/protocol/SCORING.md` (card scoring).
 
+> **v1 live-path note.** The live path in v1 is `attestation_mode='ssh-probe'` (BYO-compute; Cathedral SSHs into the miner-declared host and invokes `hermes chat -q "<task>"`). Tier A (`polaris`, `polaris-deploy`) and Tier B+ (`tee`) are accepted at the submit boundary only when explicitly enabled: Tier A behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, Tier B+ once vendor verifiers are wired live. This contract remains the normative spec for both gated paths; when the gates are flipped on, the validator and publisher behave exactly as described here.
+
 > This spec is the layer that decides which submissions earn TAO emissions and rank on the leaderboard, and which submissions live only on the discovery surface. It does not define how cards are scored. It does not define on-chain weight setting. It defines the *trust statement* that gates entry to those flows.
 
 ---
@@ -45,11 +47,14 @@ A signature alone over the output is not an attestation. A bundle hash alone is 
 
 ## 2. Three tiers overview
 
-| Tier | Verified? | Earns TAO emissions? | Leaderboard rank? | Discovery surface? |
-|------|-----------|----------------------|-------------------|--------------------|
-| **A: Polaris-hosted** | Yes (Polaris Ed25519 attestation) | Yes | Yes | Yes |
-| **B+: Self-TEE** | Yes (hardware attestation: AWS Nitro / Intel TDX / AMD SEV-SNP) | Yes | Yes | Yes |
-| **B: Unverified** | No | NO | NO | Yes (browsable + purchasable, never ranked) |
+| Tier | Verified? | Earns TAO emissions? | Leaderboard rank? | Discovery surface? | Live in v1? |
+|------|-----------|----------------------|-------------------|--------------------|-------------|
+| **B (live): ssh-probe** | Behavioral (Cathedral SSHs in and invokes Hermes during the eval window) | Yes | Yes | Yes | Yes; this is the live v1 path |
+| **A: Polaris-hosted** | Yes (Polaris Ed25519 attestation) | Yes (when gate is on) | Yes (when gate is on) | Yes | No; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true` |
+| **B+: Self-TEE** | Yes (hardware attestation: AWS Nitro / Intel TDX / AMD SEV-SNP) | Yes | Yes | Yes | No; Nitro verifier wired, no live TEE miners |
+| **Unverified (discovery)** | No | NO | NO | Yes (browsable + purchasable, never ranked) | Yes |
+
+> "Tier A is the verified emissions path" was true in the original v1 plan; v1 as shipped runs the ssh-probe path live and keeps Tier A as the gated spec below. The structural verification mechanics (envelope, signing, cross-reference, runtime registry) below are still the normative contract for Tier A; they are simply not the path miners are submitting through in v1.
 
 ### 2.1 Verified vs discovery: the surface split
 

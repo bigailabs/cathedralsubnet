@@ -25,7 +25,9 @@ This installs three console scripts: `cathedral`, `cathedral-validator`, `cathed
 
 ## Configure
 
-Copy `config/testnet.toml` (or `mainnet.toml`), fill in:
+Operators run against SN39 mainnet (`config/mainnet.toml`). The protocol-development copy at `config/testnet.toml` targets SN292 and is retained for that purpose only.
+
+Copy `config/mainnet.toml`, fill in:
 
 - `network.validator_hotkey`: your registered hotkey ss58 (required)
 - `network.wallet_name`: local bittensor wallet name (default `cathedral-validator`; change if your local wallet uses a different name)
@@ -55,7 +57,7 @@ Env vars the validator reads at startup (set in `/etc/cathedral/validator.env` f
 ## Initialize the database
 
 ```bash
-cathedral-validator migrate --config config/testnet.toml
+cathedral-validator migrate --config config/mainnet.toml
 ```
 
 Idempotent. Safe to re-run.
@@ -66,20 +68,20 @@ Before starting the validator for the first time, confirm wallet + Subtensor
 both work:
 
 ```bash
-cathedral chain-check --config config/testnet.toml
+cathedral chain-check --config config/mainnet.toml
 ```
 
 Expected output:
 
 ```json
 {
-  "network": "test",
-  "netuid": 292,
+  "network": "finney",
+  "netuid": 39,
   "wallet_hotkey": "<your-hotkey-name>",
   "current_block": 5123456,
   "registered": true,
   "metagraph_block": 5123456,
-  "metagraph_size": 64
+  "metagraph_size": 256
 }
 ```
 
@@ -93,7 +95,7 @@ this via `health.registered`.
 Foreground (testing):
 
 ```bash
-cathedral-validator serve --config config/testnet.toml
+cathedral-validator serve --config config/mainnet.toml
 ```
 
 Production runs under PM2. The `scripts/provision_validator.sh` script installs everything; this section describes day-2 ops.
@@ -234,7 +236,7 @@ For a clean Polaris CPU box, run `scripts/provision_validator.sh` with the env v
 - Installs Python 3.11, git, nodejs/npm, gpg
 - Creates the `cathedral` user and standard dirs
 - Clones the repo at the requested release tag
-- Renders `/etc/cathedral/testnet.toml` from `config/testnet.toml`
+- Renders `/etc/cathedral/<network>.toml` from `config/<network>.toml` (mainnet by default)
 - Renders `/etc/cathedral/validator.env` with chmod 600
 - Installs PM2 globally, starts the ecosystem, persists across reboots
 - Runs `cathedral-validator migrate` to init the DB
