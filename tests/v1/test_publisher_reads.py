@@ -597,6 +597,7 @@ def test_leaderboard_dedupes_by_hotkey_keeping_best_score():
             "current_score": 0.94,
             "current_rank": 1,
             "submitted_at": "2026-05-13T08:00:00.000Z",
+            "status": "ranked",
         },
         {
             "id": "aaa-2",
@@ -607,6 +608,7 @@ def test_leaderboard_dedupes_by_hotkey_keeping_best_score():
             "current_score": 0.50,
             "current_rank": 2,
             "submitted_at": "2026-05-13T09:00:00.000Z",
+            "status": "ranked",
         },
         # Mason B — 1 submission
         {
@@ -618,6 +620,7 @@ def test_leaderboard_dedupes_by_hotkey_keeping_best_score():
             "current_score": 0.80,
             "current_rank": 2,
             "submitted_at": "2026-05-13T07:00:00.000Z",
+            "status": "ranked",
         },
         {
             "id": "aaa-3",
@@ -628,6 +631,7 @@ def test_leaderboard_dedupes_by_hotkey_keeping_best_score():
             "current_score": 0.0,
             "current_rank": 3,
             "submitted_at": "2026-05-13T13:00:00.000Z",
+            "status": "ranked",
         },
         # Still-evaluating row — must be dropped
         {
@@ -639,6 +643,7 @@ def test_leaderboard_dedupes_by_hotkey_keeping_best_score():
             "current_score": None,
             "current_rank": None,
             "submitted_at": "2026-05-13T14:00:00.000Z",
+            "status": "evaluating",
         },
     ]
 
@@ -671,6 +676,7 @@ def test_leaderboard_dedupe_respects_limit():
             "current_score": 1.0 - i * 0.01,
             "current_rank": i + 1,
             "submitted_at": "2026-05-13T08:00:00.000Z",
+            "status": "ranked",
         }
         for i in range(20)
     ]
@@ -1159,3 +1165,160 @@ def test_health_endpoint_shape(publisher_client):
     assert "status" in body
     assert body["status"] in {"ok", "degraded"}, "§2.12: status must be ok|degraded"
     assert "checks" in body and isinstance(body["checks"], dict)
+
+
+# --------------------------------------------------------------------------
+# Scored-surface state correctness — cadence/refresh + stale-state defense
+# --------------------------------------------------------------------------
+#
+# Anchored on the live regression observed 2026-05-15: agent
+# 497c81fa-... carried status='evaluating' + current_score=0.47 from a
+# prior ranked round, and the leaderboard surfaced it as a scored entry
+# with last_eval_at pointing at submitted_at rather than the most recent
+# eval_runs.ran_at. Cover:
+#
+# 1. dedupe drops status='evaluating' even when current_score is non-null
+# 2. /v1/leaderboard last_eval_at reads MAX(eval_runs.ran_at)
+# 3. repository list helpers default to status='ranked' only
+# 4. orchestrator cadence refresh failure keeps row ranked + score/rank
+
+
+def test_dedupe_drops_evaluating_rows_with_prior_score():
+    """A row carrying status='evaluating' but a non-null current_score
+    from a prior ranked round must not appear on the leaderboard. This
+    is the exact state the live agent (497c81fa-...) was stuck in on
+    2026-05-15: prior 0.94, then a 0.0 cadence eval flipped status to
+    evaluating with current_score=0.47 still on the row.
+    """
+    from cathedral.publisher.reads import _dedupe_leaderboard_by_hotkey
+
+    submissions = [
+        # Ranked mason — must appear
+        {
+            "id": "ranked-1",
+            "display_name": "scored",
+            "logo_url": None,
+            "miner_hotkey": "5RANKED",
+            "card_id": "eu-ai-act",
+            "current_score": 0.80,
+            "current_rank": 1,
+            "submitted_at": "2026-05-13T07:00:00.000Z",
+            "status": "ranked",
+        },
+        # Cadence-refresh-in-flight row with stale score — must be dropped
+        {
+            "id": "iota1-v110-final",
+            "display_name": "iota1",
+            "logo_url": None,
+            "miner_hotkey": "5STALE",
+            "card_id": "eu-ai-act",
+            "current_score": 0.47,
+            "current_rank": 28,
+            "submitted_at": "2026-05-13T08:09:08.269Z",
+            "status": "evaluating",
+        },
+        # First-eval queued row — also dropped
+        {
+            "id": "queued-1",
+            "display_name": "pending",
+            "logo_url": None,
+            "miner_hotkey": "5QUEUED",
+            "card_id": "eu-ai-act",
+            "current_score": None,
+            "current_rank": None,
+            "submitted_at": "2026-05-14T09:00:00.000Z",
+            "status": "queued",
+        },
+    ]
+    items = _dedupe_leaderboard_by_hotkey(submissions, limit=50)
+    hotkeys = [i["miner_hotkey"] for i in items]
+    assert hotkeys == ["5RANKED"], (
+        f"only the ranked row may appear on the leaderboard; got {hotkeys}"
+    )
+
+
+def test_leaderboard_entry_uses_latest_eval_at_when_present():
+    """The wire-shape LeaderboardEntry.last_eval_at must reflect the
+    most recent eval_runs.ran_at, not submitted_at. Without this, the
+    leaderboard 'last seen' timestamp shows the moment of FIRST submit
+    forever, even after dozens of cadence refreshes."""
+    from cathedral.publisher.reads import _submission_to_leaderboard_entry
+
+    sub = {
+        "id": "abc",
+        "display_name": "test",
+        "logo_url": None,
+        "miner_hotkey": "5HK",
+        "card_id": "eu-ai-act",
+        "current_score": 0.7,
+        "current_rank": 1,
+        "submitted_at": "2026-05-01T00:00:00.000Z",
+        "latest_eval_at": "2026-05-14T08:12:54.509Z",
+        "status": "ranked",
+    }
+    entry = _submission_to_leaderboard_entry(sub)
+    assert entry["last_eval_at"] == "2026-05-14T08:12:54.509Z", (
+        "last_eval_at must come from latest_eval_at when set"
+    )
+
+
+def test_leaderboard_entry_falls_back_to_submitted_at_without_eval():
+    """Edge case: a fixture/row without `latest_eval_at` (e.g. dict
+    constructed without the join) should still surface submitted_at
+    so the wire shape is satisfied. The fall-through chain is
+    latest_eval_at → submitted_at → now."""
+    from cathedral.publisher.reads import _submission_to_leaderboard_entry
+
+    sub = {
+        "id": "abc",
+        "display_name": "test",
+        "logo_url": None,
+        "miner_hotkey": "5HK",
+        "card_id": "eu-ai-act",
+        "current_score": 0.7,
+        "current_rank": 1,
+        "submitted_at": "2026-05-01T00:00:00.000Z",
+        "status": "ranked",
+    }
+    entry = _submission_to_leaderboard_entry(sub)
+    assert entry["last_eval_at"] == "2026-05-01T00:00:00.000Z"
+
+
+def test_dedupe_preserves_one_per_hotkey_ranked_only():
+    """Existing one-entry-per-hotkey behavior must still hold once we
+    add the status='ranked' filter — the dedupe still picks the
+    best-scoring ranked row per hotkey, and a same-hotkey 'evaluating'
+    row never wins even if it had a higher score before."""
+    from cathedral.publisher.reads import _dedupe_leaderboard_by_hotkey
+
+    submissions = [
+        # Same hotkey: an evaluating row (stale 0.94) listed first
+        # because score-desc sorting upstream. The dedupe must skip
+        # it and pick the ranked 0.80 row instead.
+        {
+            "id": "stale",
+            "display_name": "agent",
+            "logo_url": None,
+            "miner_hotkey": "5SAME",
+            "card_id": "eu-ai-act",
+            "current_score": 0.94,
+            "current_rank": 1,
+            "submitted_at": "2026-05-10T08:00:00.000Z",
+            "status": "evaluating",
+        },
+        {
+            "id": "fresh",
+            "display_name": "agent",
+            "logo_url": None,
+            "miner_hotkey": "5SAME",
+            "card_id": "eu-ai-act",
+            "current_score": 0.80,
+            "current_rank": 2,
+            "submitted_at": "2026-05-13T08:00:00.000Z",
+            "status": "ranked",
+        },
+    ]
+    items = _dedupe_leaderboard_by_hotkey(submissions, limit=10)
+    assert len(items) == 1, f"one slot per hotkey; got {len(items)}"
+    assert items[0]["agent_id"] == "fresh", "must pick the ranked row, not the stale evaluating one"
+    assert items[0]["current_score"] == 0.80

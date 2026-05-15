@@ -340,3 +340,110 @@ async def test_cadence_limit_bounds_batch_size(db, tmp_path: Path):
 
     due_all = await repo.submissions_due_for_cadence(db, now=now, limit=100)
     assert len(due_all) == 5
+
+
+# --------------------------------------------------------------------------
+# Repository-level scored-surface defense (cadence stale-state regression)
+# --------------------------------------------------------------------------
+#
+# These tests exercise `list_submissions_for_card` + `list_submissions_all`
+# directly (no FastAPI), pinning the new defaults:
+#
+# - `ranked_only=True` filters in-flight rows out of the scored surface
+# - rows carry the synthetic `latest_eval_at = MAX(eval_runs.ran_at)`
+# - a previously ranked + currently 'evaluating' row with prior
+#   current_score is invisible to scored surfaces
+
+
+@pytest.mark.asyncio
+async def test_list_submissions_for_card_excludes_in_flight_rows(db, tmp_path: Path):
+    """A row with status='evaluating' and a prior current_score from a
+    finished round must NOT be returned by the scored-surface helper."""
+    repo = _load_repository()
+    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    now = datetime.now(UTC)
+
+    ranked_id = await _seed_submission(
+        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=2)
+    )
+    await db.execute(
+        "UPDATE agent_submissions SET current_score=0.8, current_rank=1 WHERE id=?",
+        (ranked_id,),
+    )
+    await _seed_eval_run(db, submission_id=ranked_id, ran_at=now - timedelta(hours=2))
+
+    evaluating_id = await _seed_submission(
+        db,
+        card_id="eu-ai-act",
+        status="evaluating",
+        submitted_at=now - timedelta(days=2),
+    )
+    await db.execute(
+        "UPDATE agent_submissions SET current_score=0.47, current_rank=28 WHERE id=?",
+        (evaluating_id,),
+    )
+    await db.commit()
+
+    items = await repo.list_submissions_for_card(db, "eu-ai-act", limit=50)
+    ids = [r["id"] for r in items]
+    assert ranked_id in ids and evaluating_id not in ids, (
+        f"scored surface must include ranked, exclude evaluating; got {ids}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_submissions_for_card_exposes_latest_eval_at(db, tmp_path: Path):
+    """The leaderboard's `last_eval_at` field must reflect the newest
+    eval_runs.ran_at, not submitted_at. The helper exposes this as a
+    synthetic `latest_eval_at` column the reads layer projects out."""
+    repo = _load_repository()
+    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    now = datetime.now(UTC)
+
+    sub_id = await _seed_submission(
+        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=10)
+    )
+    await db.execute(
+        "UPDATE agent_submissions SET current_score=0.7, current_rank=1 WHERE id=?",
+        (sub_id,),
+    )
+    await db.commit()
+    # Two evals: old + fresh. MAX must surface the fresh one.
+    await _seed_eval_run(db, submission_id=sub_id, ran_at=now - timedelta(days=8))
+    await _seed_eval_run(db, submission_id=sub_id, ran_at=now - timedelta(hours=1))
+
+    items = await repo.list_submissions_for_card(db, "eu-ai-act", limit=50)
+    assert len(items) == 1
+    row = items[0]
+    assert "latest_eval_at" in row, "synthetic latest_eval_at column missing"
+    assert row["latest_eval_at"] > row["submitted_at"], (
+        f"latest_eval_at must be newer than submitted_at; "
+        f"got latest={row['latest_eval_at']!r} submitted={row['submitted_at']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_submissions_all_excludes_in_flight_rows(db, tmp_path: Path):
+    """Same ranked-only filter on the cross-card listing helper."""
+    repo = _load_repository()
+    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    now = datetime.now(UTC)
+
+    ranked_id = await _seed_submission(
+        db, card_id="eu-ai-act", status="ranked", submitted_at=now - timedelta(days=2)
+    )
+    await db.execute(
+        "UPDATE agent_submissions SET current_score=0.5, current_rank=1 WHERE id=?",
+        (ranked_id,),
+    )
+    queued_id = await _seed_submission(
+        db, card_id="eu-ai-act", status="queued", submitted_at=now - timedelta(days=1)
+    )
+    await db.commit()
+
+    items, total = await repo.list_submissions_all(db, limit=50)
+    ids = [r["id"] for r in items]
+    assert ranked_id in ids and queued_id not in ids, (
+        f"cross-card list must surface ranked, drop queued; got {ids}"
+    )
+    assert total == 1, f"total must match filtered set; got {total}"

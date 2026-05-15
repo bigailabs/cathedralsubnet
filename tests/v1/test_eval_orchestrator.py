@@ -67,9 +67,7 @@ def _force_stub_mode(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_queued_submission_gets_picked_up(
-    publisher_client, alice_keypair, eval_orchestrator
-):
+def test_queued_submission_gets_picked_up(publisher_client, alice_keypair, eval_orchestrator):
     """§6 step 3 — scheduler picks queued submissions FIFO by submitted_at."""
     bundle = make_valid_bundle(soul_md="# pickup probe\n")
     resp = submit_multipart(
@@ -88,8 +86,7 @@ def test_queued_submission_gets_picked_up(
     # Status should advance past queued (to evaluating, ranked, or rejected).
     profile = publisher_client.get(f"/v1/agents/{agent_id}").json()
     assert profile["status"] in {"evaluating", "ranked", "rejected"}, (
-        f"§6 step 3: queued submission must advance after a tick; "
-        f"got status={profile['status']!r}"
+        f"§6 step 3: queued submission must advance after a tick; got status={profile['status']!r}"
     )
 
 
@@ -175,8 +172,7 @@ def test_status_transitions_only_via_allowed_arrows(
 
     for prev, curr in pairwise(seen):
         assert curr in allowed.get(prev, set()), (
-            f"§6 status machine: illegal transition {prev!r} -> {curr!r}; "
-            f"full sequence={seen}"
+            f"§6 status machine: illegal transition {prev!r} -> {curr!r}; full sequence={seen}"
         )
 
 
@@ -258,9 +254,7 @@ def test_malformed_card_output_records_preflight_rejection(
             "via the read API yet"
         )
     last = prof["recent_evals"][-1]
-    assert last.get("weighted_score") == 0, (
-        f"§6 step 4: malformed card must score 0; got {last}"
-    )
+    assert last.get("weighted_score") == 0, f"§6 step 4: malformed card must score 0; got {last}"
 
 
 # --------------------------------------------------------------------------
@@ -278,8 +272,11 @@ def test_late_submission_within_threshold_gets_penalty_multiplier(
     # Alice submits first (incumbent).
     a_bundle = make_valid_bundle(soul_md="# Alice (incumbent)\n")
     a_resp = submit_multipart(
-        publisher_client, keypair=alice_keypair, card_id="eu-ai-act",
-        bundle=a_bundle, display_name="Incumbent",
+        publisher_client,
+        keypair=alice_keypair,
+        card_id="eu-ai-act",
+        bundle=a_bundle,
+        display_name="Incumbent",
     )
     if a_resp.status_code != 202:
         pytest.skip(f"submit not ready: {a_resp.text}")
@@ -295,8 +292,11 @@ def test_late_submission_within_threshold_gets_penalty_multiplier(
     # Bob submits later with the SAME stub score (0.80) — within 0.05 delta.
     b_bundle = make_valid_bundle(soul_md="# Bob (late copy)\n")
     b_resp = submit_multipart(
-        publisher_client, keypair=bob_keypair, card_id="eu-ai-act",
-        bundle=b_bundle, display_name="Latecomer",
+        publisher_client,
+        keypair=bob_keypair,
+        card_id="eu-ai-act",
+        bundle=b_bundle,
+        display_name="Latecomer",
     )
     if b_resp.status_code != 202:
         pytest.skip(f"second submit blocked by similarity: {b_resp.text}")
@@ -324,6 +324,219 @@ def test_late_submission_within_threshold_gets_penalty_multiplier(
 # --------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Cadence state-machine — preserve ranked on refresh failure
+# --------------------------------------------------------------------------
+#
+# Anchored on the live regression observed 2026-05-15: a ranked agent
+# undergoing cadence refresh got flipped to status='evaluating' by the
+# orchestrator's unconditional pre-eval status write, and a retryable
+# failure then sent it to 'queued' (or 'rejected' after 3 attempts).
+# Result: the leaderboard kept showing the row with a stale score, the
+# state was wrong, and the agent could only recover by flowing through
+# first-eval again.
+
+
+@pytest.mark.asyncio
+async def test_cadence_refresh_retryable_failure_keeps_ranked():
+    """A ranked row hitting a retryable failure mid-cadence-refresh must
+    NOT be flipped to 'queued' or 'rejected'. It stays 'ranked' with its
+    prior score/rank — the cadence loop will retry it next window."""
+    from cathedral.eval.orchestrator import EvalOrchestrator
+    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.storage.hippius import StubHippiusClient
+
+    db = _CapturingDB()
+    orch = EvalOrchestrator(
+        db=db,  # type: ignore[arg-type]
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=_StubSigner(),
+        registry=_StubRegistry(),
+    )
+
+    submission = {
+        "id": "ranked-cadence-row",
+        "card_id": "eu-ai-act",
+        "status": "ranked",
+    }
+
+    # First failure: would have re-queued under the old code. Under the
+    # fix, no status write happens for cadence rows.
+    await orch._on_retryable_failure(
+        submission,
+        _bound_logger(),
+        "hippius unavailable",
+        is_cadence_refresh=True,
+    )
+    assert db.status_writes == [], (
+        f"cadence retryable failure must not flip status; got {db.status_writes}"
+    )
+
+    # Two more failures to hit the >=3 cap. Still no flip — cadence rows
+    # stay 'ranked' even when retries exhaust.
+    await orch._on_retryable_failure(submission, _bound_logger(), "again", is_cadence_refresh=True)
+    await orch._on_retryable_failure(submission, _bound_logger(), "again", is_cadence_refresh=True)
+    assert db.status_writes == [], (
+        f"cadence exhausted retries must not flip status; got {db.status_writes}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_eval_retryable_failure_requeues_then_rejects():
+    """Counterpart: first-eval rows MUST still flow through the existing
+    3-attempt retry policy — re-queue twice, reject on the third."""
+    from cathedral.eval.orchestrator import EvalOrchestrator
+    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.storage.hippius import StubHippiusClient
+
+    db = _CapturingDB()
+    orch = EvalOrchestrator(
+        db=db,  # type: ignore[arg-type]
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=_StubSigner(),
+        registry=_StubRegistry(),
+    )
+    submission = {"id": "first-eval-row", "card_id": "eu-ai-act", "status": "queued"}
+
+    await orch._on_retryable_failure(submission, _bound_logger(), "boom")
+    await orch._on_retryable_failure(submission, _bound_logger(), "boom")
+    statuses = [(sid, st) for sid, st, _ in db.status_writes]
+    assert statuses == [
+        ("first-eval-row", "queued"),
+        ("first-eval-row", "queued"),
+    ], f"first two failures must re-queue; got {statuses}"
+
+    await orch._on_retryable_failure(submission, _bound_logger(), "boom")
+    assert db.status_writes[-1][1] == "rejected", (
+        f"third failure must reject; got {db.status_writes[-1]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_keeps_ranked_for_cadence():
+    """A terminal failure (decryption / structure / missing card_def) on
+    a cadence refresh must not strip the row off the leaderboard."""
+    from cathedral.eval.orchestrator import EvalOrchestrator
+    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.storage.hippius import StubHippiusClient
+
+    db = _CapturingDB()
+    orch = EvalOrchestrator(
+        db=db,  # type: ignore[arg-type]
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=_StubSigner(),
+        registry=_StubRegistry(),
+    )
+    submission = {"id": "ranked-row", "card_id": "eu-ai-act", "status": "ranked"}
+
+    await orch._fail_terminal(
+        submission,
+        _bound_logger(),
+        reason="bundle decryption failed",
+        is_cadence_refresh=True,
+        event="eval_bundle_decrypt_failed",
+        error="bad mac",
+    )
+    assert db.status_writes == [], (
+        f"cadence terminal failure must not flip status; got {db.status_writes}"
+    )
+
+    # First-eval rows MUST still go to 'rejected'.
+    submission2 = {"id": "first-row", "card_id": "eu-ai-act", "status": "queued"}
+    await orch._fail_terminal(
+        submission2,
+        _bound_logger(),
+        reason="bundle decryption failed",
+        is_cadence_refresh=False,
+        event="eval_bundle_decrypt_failed",
+        error="bad mac",
+    )
+    assert db.status_writes == [("first-row", "rejected", "bundle decryption failed")]
+
+
+@pytest.mark.asyncio
+async def test_crashed_first_eval_does_not_strand_evaluating():
+    """An uncaught exception inside `evaluate_one` for a first-time
+    queued row must route through the retry policy rather than leaving
+    the row in 'evaluating' forever. Three crashes in a row reject."""
+    from cathedral.eval.orchestrator import EvalOrchestrator
+    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.storage.hippius import StubHippiusClient
+
+    db = _CapturingDB()
+    orch = EvalOrchestrator(
+        db=db,  # type: ignore[arg-type]
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=_StubSigner(),
+        registry=_StubRegistry(),
+    )
+
+    # Simulate the recovery the loop does on `eval_one_crashed` for
+    # first-eval rows.
+    sub = {"id": "crash-row", "card_id": "eu-ai-act", "status": "queued"}
+    for _ in range(3):
+        await orch._on_retryable_failure(sub, _bound_logger(), "evaluate_one crash: x")
+    final = db.status_writes[-1]
+    assert final[1] == "rejected", (
+        f"third crash must reject so the row doesn't sit in evaluating; got {final}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Unit-test helpers — no DB, no Polaris, no signer.
+# --------------------------------------------------------------------------
+
+
+class _CapturingDB:
+    """Captures `update_submission_status` calls without a real DB."""
+
+    def __init__(self) -> None:
+        self.status_writes: list[tuple[str, str, str | None]] = []
+
+    async def execute(self, sql: str, params: tuple[Any, ...] = ()):  # type: ignore[override]
+        # Only the update_submission_status query is exercised by the
+        # state-machine helpers under test. Capture (status, reason, id).
+        if sql.startswith("UPDATE agent_submissions SET status="):
+            status, reason, sub_id = params
+            self.status_writes.append((str(sub_id), str(status), reason))
+        return _NoopCursor()
+
+    async def commit(self) -> None:  # pragma: no cover
+        return None
+
+
+class _NoopCursor:
+    async def fetchall(self) -> list[Any]:  # pragma: no cover
+        return []
+
+    async def fetchone(self) -> Any:  # pragma: no cover
+        return None
+
+    @property
+    def description(self) -> list[Any]:  # pragma: no cover
+        return []
+
+
+class _StubSigner:
+    def sign(self, _: bytes) -> str:  # pragma: no cover
+        return "stub-sig"
+
+
+class _StubRegistry:
+    def get(self, _: str) -> Any:  # pragma: no cover
+        return None
+
+
+def _bound_logger():
+    import structlog
+
+    return structlog.get_logger(__name__).bind(submission_id="test")
 
 
 def _drive_one_tick(orchestrator) -> None:

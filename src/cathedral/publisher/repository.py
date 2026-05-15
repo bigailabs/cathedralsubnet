@@ -272,42 +272,60 @@ async def list_submissions_for_card(
     limit: int = 50,
     offset: int = 0,
     verified_only: bool = True,
+    ranked_only: bool = True,
 ) -> list[dict[str, Any]]:
     """List submissions for a card.
 
-    `verified_only=True` (default) restricts to the leaderboard surface:
-    attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle'), status NOT 'discovery',
-    discovery_only=0. The public read endpoints all rely on this filter
-    so unverified submissions never appear on the leaderboard, card
-    overview, or recent-eval feeds.
+    `verified_only=True` (default) restricts to attested attestation
+    modes and excludes discovery rows. The public read endpoints all
+    rely on this filter so unverified submissions never appear on the
+    leaderboard, card overview, or recent-eval feeds.
 
-    Pass `verified_only=False` only from internal callers that need the
-    full set (e.g. discovery-counting helpers, miner-profile fan-out).
+    `ranked_only=True` (default) further restricts to ``status='ranked'``
+    so cadence-refresh rows that briefly transition (or used to transition
+    pre-state-machine-fix) cannot leak onto scored surfaces with stale
+    scores. Pre-fix, a cadence row would flip to 'evaluating' on the
+    refresh tick while still carrying its prior `current_score`; the
+    leaderboard would surface that score with no fresh eval underneath
+    it. With ``ranked_only=True`` the row is only surfaced once
+    `score_and_sign` has committed a fresh value (which re-asserts
+    status='ranked').
+
+    Each returned row carries a synthetic `latest_eval_at` column —
+    ``MAX(eval_runs.ran_at)`` for the submission, falling back to
+    ``NULL`` when no eval_runs row exists yet. Scored surfaces should
+    prefer this over `submitted_at` for the leaderboard's last-active
+    field.
     """
     if sort == "score":
-        order = "current_score DESC NULLS LAST, submitted_at DESC"
+        order = "sub.current_score DESC NULLS LAST, sub.submitted_at DESC"
     elif sort == "recent":
-        order = "submitted_at DESC"
+        order = "sub.submitted_at DESC"
     elif sort == "oldest":
-        order = "submitted_at ASC"
+        order = "sub.submitted_at ASC"
     else:
         raise ValueError(f"invalid sort: {sort}")
+    status_clause = (
+        "sub.status = 'ranked'" if ranked_only else "sub.status IN ('queued','evaluating','ranked')"
+    )
     if verified_only:
-        cur = await conn.execute(
-            f"SELECT * FROM agent_submissions WHERE card_id = ? "
-            f"AND status IN ('queued','evaluating','ranked') "
-            f"AND attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle') "
-            f"AND discovery_only = 0 "
-            f"ORDER BY {order} LIMIT ? OFFSET ?",
-            (card_id, limit, offset),
+        where = (
+            f"WHERE sub.card_id = ? AND {status_clause} "
+            f"AND sub.attestation_mode IN "
+            f"('polaris','polaris-deploy','ssh-probe','tee','bundle') "
+            f"AND sub.discovery_only = 0"
         )
     else:
-        cur = await conn.execute(
-            f"SELECT * FROM agent_submissions WHERE card_id = ? "
-            f"AND status IN ('queued','evaluating','ranked') "
-            f"ORDER BY {order} LIMIT ? OFFSET ?",
-            (card_id, limit, offset),
-        )
+        where = f"WHERE sub.card_id = ? AND {status_clause}"
+    cur = await conn.execute(
+        f"SELECT sub.*, MAX(er.ran_at) AS latest_eval_at "
+        f"FROM agent_submissions sub "
+        f"LEFT JOIN eval_runs er ON er.submission_id = sub.id "
+        f"{where} "
+        f"GROUP BY sub.id "
+        f"ORDER BY {order} LIMIT ? OFFSET ?",
+        (card_id, limit, offset),
+    )
     rows = await cur.fetchall()
     return [_row_to_submission(r, cur.description) for r in rows]
 
@@ -319,35 +337,51 @@ async def list_submissions_all(
     limit: int = 50,
     offset: int = 0,
     verified_only: bool = True,
+    ranked_only: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
     """List all submissions across cards (paginated, with total).
 
-    Same verified_only semantics as `list_submissions_for_card`: defaults
-    to the leaderboard surface; callers that want the full table must
-    explicitly opt out.
+    Same verified_only + ranked_only semantics as
+    `list_submissions_for_card`: defaults to the public scored surface
+    (attested + ranked). Each row carries a synthetic `latest_eval_at`
+    column from ``MAX(eval_runs.ran_at)``.
     """
     if sort == "score":
-        order = "current_score DESC NULLS LAST, submitted_at DESC"
+        order = "sub.current_score DESC NULLS LAST, sub.submitted_at DESC"
     elif sort == "recent":
-        order = "submitted_at DESC"
+        order = "sub.submitted_at DESC"
     elif sort == "oldest":
-        order = "submitted_at ASC"
+        order = "sub.submitted_at ASC"
     else:
         raise ValueError(f"invalid sort: {sort}")
+    status_clause = (
+        "sub.status = 'ranked'" if ranked_only else "sub.status IN ('queued','evaluating','ranked')"
+    )
     if verified_only:
         where = (
-            "WHERE status IN ('queued','evaluating','ranked') "
-            "AND attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle') "
-            "AND discovery_only = 0"
+            f"WHERE {status_clause} "
+            "AND sub.attestation_mode IN "
+            "('polaris','polaris-deploy','ssh-probe','tee','bundle') "
+            "AND sub.discovery_only = 0"
         )
     else:
-        where = "WHERE status IN ('queued','evaluating','ranked')"
+        where = f"WHERE {status_clause}"
     cur = await conn.execute(
-        f"SELECT * FROM agent_submissions {where} ORDER BY {order} LIMIT ? OFFSET ?",
+        f"SELECT sub.*, MAX(er.ran_at) AS latest_eval_at "
+        f"FROM agent_submissions sub "
+        f"LEFT JOIN eval_runs er ON er.submission_id = sub.id "
+        f"{where} "
+        f"GROUP BY sub.id "
+        f"ORDER BY {order} LIMIT ? OFFSET ?",
         (limit, offset),
     )
     rows = await cur.fetchall()
-    cur2 = await conn.execute(f"SELECT COUNT(*) FROM agent_submissions {where}")
+    # COUNT(*) needs the same WHERE as the SELECT but no join — distinct
+    # submissions only, since the join would multiply rows.
+    # Rewrite ``sub.``-prefixed where to the plain-table form for the
+    # COUNT, which does not join.
+    where_no_alias = where.replace("sub.", "")
+    cur2 = await conn.execute(f"SELECT COUNT(*) FROM agent_submissions {where_no_alias}")
     total_row = await cur2.fetchone()
     total = int(total_row[0]) if total_row else 0
     return [_row_to_submission(r, cur.description) for r in rows], total
