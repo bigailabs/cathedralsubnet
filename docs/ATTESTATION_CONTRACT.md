@@ -137,9 +137,9 @@ Note that the publisher does NOT trust the field values inside the attestation e
 
 ### 3.1 Submission carriage
 
-Tier-A and Tier-B+ submissions go to `POST /v1/agents/submit` (CONTRACTS.md §2.1) and attach an additional multipart form field `attestation` containing the attestation JSON as a UTF-8 string. The form field is required for any submission that wants `attestation_tier != 'B'`. If `attestation` is absent or empty, the submission is automatically classified as Tier B (unverified) and routed to the discovery surface. The submission still completes; it just does not earn emissions.
+Cryptographic Tier A and Tier B+ submissions go to `POST /v1/agents/submit` (CONTRACTS.md §2.1) and attach an additional multipart form field `attestation` containing the attestation JSON as a UTF-8 string. The form field is required only when `attestation_mode` selects a cryptographic verifier (`polaris`, `polaris-deploy`, or `tee`). The v1 live `ssh-probe` mode does not attach this field; it is verified behaviorally from `ssh_host`, `ssh_port`, and `ssh_user`, enters the eval queue, and earns emissions. `attestation_mode='unverified'` is the discovery-only path and also does not attach this field. For backward compatibility, omitting `attestation_mode` defaults to `ssh-probe`, not discovery.
 
-The existing `X-Cathedral-Signature` header continues to carry the miner's sr25519 hotkey signature over the canonical submission payload (CONTRACTS.md §4.1). The attestation is a *separate* signed object, signed by a different party (Polaris or a hardware vendor), and bound to the miner's hotkey through the `miner_hotkey` field inside the envelope. Both signatures must verify or the submission is downgraded to Tier B.
+The existing `X-Cathedral-Signature` header continues to carry the miner's sr25519 hotkey signature over the canonical submission payload (CONTRACTS.md §4.1). For cryptographic modes, the attestation is a *separate* signed object, signed by a different party (Polaris or a hardware vendor), and bound to the miner's hotkey through the `miner_hotkey` field inside the envelope. Both signatures must verify before the submission can enter that cryptographic tier.
 
 ---
 
@@ -440,10 +440,11 @@ The publisher MUST perform validation in this exact order. The order matters bec
 5. `card_definitions[card_id]` lookup; must be `active` (→ 404).
 6. Clock-skew window on client-supplied `submitted_at` (→ 400 if > 5 min).
 7. Hotkey signature verification (`X-Cathedral-Signature`; → 401 on failure).
-8. **Attestation handling** (NEW, this spec):
-   - If `attestation` form field is absent or empty: `attestation_tier = 'B'`; skip to step 9.
-   - Else: parse attestation, dispatch on `version`, run tier-specific verification (Section 4 or 5). On failure: respond with HTTP 422 + the specific error code listed below. The bundle is NOT stored. The miner can retry with a corrected attestation or omit it to land on the discovery surface.
-9. Similarity check (CONTRACTS.md §7.1).
+8. **Verification mode handling** (NEW, this spec):
+   - If `attestation_mode` is absent or equals `ssh-probe`: require `ssh_host` and `ssh_user`, default `ssh_port` to 22, and continue as the live behavioral-verification path. The `attestation` form field may be absent.
+   - If `attestation_mode='unverified'`: mark the submission as discovery-only; it skips eval, leaderboard, emissions, and the similarity gate below.
+   - If `attestation_mode` selects a cryptographic verifier (`polaris`, `polaris-deploy`, or `tee`): parse `attestation`, dispatch on `version`, run tier-specific verification (Section 4 or 5). On failure: respond with HTTP 422 + the specific error code listed below. The bundle is NOT stored. The miner can retry with a corrected attestation or explicitly choose `attestation_mode='unverified'` to land on the discovery surface.
+9. Similarity check (CONTRACTS.md §7.1), skipped for `unverified`.
 10. Bundle encryption + Hippius upload.
 11. INSERT into `agent_submissions` with the resolved `attestation_tier`.
 12. Respond 202 with `{id, bundle_hash, status, attestation_tier, submitted_at}`.
@@ -473,7 +474,7 @@ The publisher MUST perform validation in this exact order. The order matters bec
 | 409 | `duplicate_submission` / `exact_bundle_duplicate` | Already-submitted bundle (CONTRACTS.md L7). |
 | 503 | `bundle_storage_unavailable` | Hippius unreachable. |
 
-A submission can never be rejected for "lacking an attestation." An empty attestation field always succeeds at Tier B. The 422 attestation errors only fire when an attestation is *attempted* and *fails*. The miner's choice is binary: attempt verified entry (and accept the risk of 422), or skip the attestation and land on discovery.
+A submission can never be rejected merely for lacking a cryptographic attestation. Omitted `attestation` means one of two explicit modes: `ssh-probe`, the default live path that requires SSH fields and enters eval, or `unverified`, the discovery-only path. The 422 attestation errors only fire when a cryptographic attestation is attempted and fails. The miner can retry with corrected cryptographic evidence, use `ssh-probe`, or explicitly choose discovery.
 
 ### 8.4 Nonce endpoint
 
