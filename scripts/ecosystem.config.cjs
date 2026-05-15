@@ -22,13 +22,19 @@ function loadEnvFile(path) {
 
 const validatorEnv = loadEnvFile("/etc/cathedral/validator.env");
 
+// Resolve which config file the validator should run against.
+// Default: mainnet (SN39 finney). Override via CATHEDRAL_CONFIG_PATH in
+// /etc/cathedral/validator.env (set by scripts/provision_validator.sh).
+const validatorConfigPath =
+  validatorEnv.CATHEDRAL_CONFIG_PATH || "/etc/cathedral/mainnet.toml";
+
 module.exports = {
   apps: [
     {
       name: "cathedral-validator",
       cwd: "/opt/cathedral/source",
       script: "/opt/cathedral/.venv/bin/cathedral-validator",
-      args: "serve --config /etc/cathedral/testnet.toml --no-json-logs",
+      args: `serve --config ${validatorConfigPath} --no-json-logs`,
       interpreter: "none",
       env: validatorEnv,
       autorestart: true,

@@ -6,27 +6,37 @@ The operational runbook (systemd unit, log filtering, weight-status table, recov
 
 ## Mechanism
 
-The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) once a miner has submitted a bundle. For each submission with `attestation_mode='polaris'`, status `queued`, the orchestrator (`cathedral.eval.orchestrator.EvalOrchestrator`) does the following:
+The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) once a miner has submitted a bundle. v1 default is `attestation_mode='ssh-probe'` (BYO compute), set in `src/cathedral/publisher/submit.py`. Tier A modes (`polaris`, `polaris-deploy`) are accepted at the submit boundary only when `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; with the flag off (the v1 default) they are rejected with `tier_a_disabled_for_v1`. The remainder of this section first walks the live ssh-probe path, then documents the gated Tier A path as the auditable spec for when it is turned on.
+
+For each submission with status `queued`, the orchestrator (`cathedral.eval.orchestrator.EvalOrchestrator`) does the following:
 
 1. **Promote to `evaluating`.** Single-tick state transition so a separate `run_once()` call observes the new state. Confirms the row is not double-claimed.
 2. **Generate the eval task.** `cathedral.eval.task_generator.generate_task` produces a deterministic `EvalTask` per `(card_id, epoch, round_index)`. The prompt is the card's task template hydrated with the current `source_pool`. `task_hash = BLAKE3(prompt.encode('utf-8'))` is the hash the attestation will bind to.
 3. **Resolve the runner.** Dispatch by `attestation_mode`:
-   - `polaris` -> `PolarisRuntimeRunner` (Tier A, the live path)
-   - legacy `bundle` -> `BundleCardRunner` (BYO-compute, reads `artifacts/last-card.json` from the bundle, no attestation)
+   - `ssh-probe` -> `SshProbeRunner` (v1 default) or `SshHermesRunner` (when `CATHEDRAL_PROBER_VERSION=v2`); BYO-compute, Cathedral SSHs into the miner-declared host and invokes `hermes chat -q "<task>"` against an isolated `cathedral-eval-<round>` profile. This is the live path.
+   - `bundle` -> `BundleCardRunner` (BYO-compute, reads `artifacts/last-card.json` from the bundle, no attestation)
+   - `polaris` -> `PolarisRuntimeRunner` (Tier A; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, off by default in v1)
+   - `polaris-deploy` -> `PolarisDeployRunner` (paid Tier A; same gate as above)
    - test modes (`stub*`) -> in-process stubs
-4. **Dispatch the eval.** `PolarisRuntimeRunner.run` does the following in order:
+4. **Dispatch the eval (live path: ssh-probe).** `SshProbeRunner.run` (or `SshHermesRunner.run` under `CATHEDRAL_PROBER_VERSION=v2`) does the following:
+   - Opens an SSH connection to `ssh_user@ssh_host:ssh_port` declared on the submission, using Cathedral's universal probe key.
+   - Snapshots the miner's primary `~/.hermes/` into an isolated `~/.hermes/profiles/cathedral-eval-<round>/` so the miner's working profile is never modified.
+   - Invokes `hermes chat -q "<task>"` against the eval profile. Hermes runs the full agentic loop (tool calls, skills, memory) against the miner's configured LLM provider.
+   - Captures the trace bundle (state.db slice, sessions JSON, request dumps, skills, memories, logs), SCPs it back, and tears down the eval profile.
+   - Returns the produced Card JSON. No Polaris attestation is produced on this path; `polaris_attestation` is `None`.
+5. **Dispatch the eval (Tier A spec, gated).** When `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, `attestation_mode='polaris'` or `'polaris-deploy'` is accepted at the submit boundary and routes to `PolarisRuntimeRunner` / `PolarisDeployRunner`. This is the auditable spec for the paid Tier A path; it is not running in v1 by default. When enabled, the runner does the following in order:
    - Resolve a presigned URL for the encrypted bundle on the `cathedral-bundles` bucket via `HippiusPresignedUrlResolver` (boto3 `generate_presigned_url`, default 1-hour expiry).
    - `POST /api/marketplace/submissions/{POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID}/runtime-evaluate` to Polaris with `{task: prompt, task_id: "cathedral-{card_id}-e{epoch}r{round_index}", timeout_seconds, env_overrides: {CARD_ID, MINER_BUNDLE_URL, CATHEDRAL_BUNDLE_KEK, CATHEDRAL_BUNDLE_KEY_ID, CHUTES_API_KEY}}`.
    - Polaris deploys `ghcr.io/cathedralai/cathedral-runtime:latest` against the bundle. The runtime fetches the presigned URL, decrypts using `CATHEDRAL_BUNDLE_KEK` plus the per-bundle wrapped data key in `CATHEDRAL_BUNDLE_KEY_ID`, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (default `deepseek-ai/DeepSeek-V3.1`), reconciles citations against real fetches, and returns Card JSON.
    - Polaris signs an Ed25519 attestation `{version: "polaris-v1", payload: {submission_id, task_id, task_hash, output_hash, deployment_id, completed_at}, signature, public_key}` and returns it alongside the runtime output.
-5. **Verify the Polaris attestation.** `PolarisRuntimeRunner._verify_attestation` recomputes:
-   - `expected_task_hash = BLAKE3(task.prompt.encode("utf-8"))`; must equal `payload.task_hash`.
-   - `expected_output_hash = BLAKE3(output_bytes)` where `output_bytes = base64-decode(response.output)`; must equal `payload.output_hash`.
-   - `payload.task_id` equals the id Cathedral sent.
-   - `payload.submission_id` equals the configured `POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID`.
-   - Response `public_key` equals the configured `POLARIS_ATTESTATION_PUBLIC_KEY` (pinned, no rotation via response).
-   - `Ed25519.verify(signature, canonical_json(payload))` against the pinned key.
-   - Any mismatch raises `PolarisAttestationError` and the orchestrator marks the run as a runner failure; no score persisted.
+   - `PolarisRuntimeRunner._verify_attestation` recomputes:
+     - `expected_task_hash = BLAKE3(task.prompt.encode("utf-8"))`; must equal `payload.task_hash`.
+     - `expected_output_hash = BLAKE3(output_bytes)` where `output_bytes = base64-decode(response.output)`; must equal `payload.output_hash`.
+     - `payload.task_id` equals the id Cathedral sent.
+     - `payload.submission_id` equals the configured `POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID`.
+     - Response `public_key` equals the configured `POLARIS_ATTESTATION_PUBLIC_KEY` (pinned, no rotation via response).
+     - `Ed25519.verify(signature, canonical_json(payload))` against the pinned key.
+     - Any mismatch raises `PolarisAttestationError` and the orchestrator marks the run as a runner failure; no score persisted.
 6. **Preflight.** `cathedral.cards.preflight.preflight(card)` (`src/cathedral/cards/preflight.py`):
    - Citations non-empty.
    - `no_legal_advice` is the literal boolean `true`.
@@ -47,7 +57,7 @@ The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) 
    - Late mover beating incumbent by `+0.05` -> multiplier 1.0.
    - Late mover outside the 30-day window -> multiplier 1.0.
    - Otherwise -> multiplier 0.50.
-9. **Verified-runtime multiplier.** `polaris_verified = polaris_attestation is not None or bool(polaris_agent_id)`; multiplier `1.10` if verified else `1.00`. Applied after the first-mover delta, then `weighted_final = min(1.0, weighted_after_first_mover * verified_multiplier)`.
+9. **Verified-runtime multiplier (Tier A spec, gated).** `polaris_verified = polaris_attestation is not None or polaris_manifest is not None or bool(polaris_agent_id)`. The multiplier resolves to `1.10` only when `polaris_verified` is true AND `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; otherwise it resolves to `1.00`. In v1 the env flag is off, so every scored run uses `1.00x` and `weighted_final = min(1.0, weighted_after_first_mover)`. Code: `src/cathedral/eval/scoring_pipeline.py` (~line 264).
 10. **Hash the output card.** `output_card_hash = BLAKE3(canonical_json(output_card_json))`. The pipeline hashes the literal dict the publisher both serves and stores, not a Pydantic re-render. This is what downstream verifiers pin.
 11. **Sign the public projection.** `EvalSigner.sign` over `canonical_json` of:
 
@@ -87,7 +97,7 @@ Fields and rules:
 
 The canonical bytes for verification are `json.dumps(dict_minus_excluded, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")`. Exact reference in `cathedral.v1_types.canonical_json`. The validator implementation that does this is `cathedral.validator.pull_loop.verify_eval_output_signature`.
 
-The Cathedral public key is not yet served at a JWKS endpoint. For v1, set `CATHEDRAL_PUBLIC_KEY_HEX` in the validator environment; pin it from the publisher operator out of band. A `GET /.well-known/cathedral-jwks.json` endpoint is on the roadmap.
+The Cathedral signing pubkey is published at `GET /.well-known/cathedral-jwks.json` on the publisher. Validators should fetch it once during setup, then pin it locally as `CATHEDRAL_PUBLIC_KEY_HEX`. The validator binary reads only the pinned env var at startup; it does not auto-rotate from the same publisher it then trusts (key handoff must happen out of band).
 
 ## Anti-cheating
 
@@ -95,7 +105,7 @@ Each row below names a concrete attack and the mechanism that catches it. Citati
 
 | Attack | Mitigation | Where |
 |--------|------------|-------|
-| Hand-written cards posing as agent output | Tier A: Polaris attestation binds `output_hash` to the runtime's actual emission. Tier B+: TEE attestation binds output to a measured runtime. Tier B (`unverified`): never reaches the leaderboard. | `src/cathedral/eval/polaris_runner.py` `_verify_attestation`; `src/cathedral/publisher/submit.py` mode dispatch |
+| Hand-written cards posing as agent output | v1 live (ssh-probe): Cathedral SSHs into the miner-declared host and invokes Hermes itself, so the card was produced by the miner's running agent during the eval window, not pasted in after the fact. Tier A (gated, spec): Polaris attestation binds `output_hash` to the runtime's actual emission. Tier B+ (spec): TEE attestation binds output to a measured runtime. `unverified` submissions never reach the leaderboard. | `src/cathedral/eval/ssh_hermes_runner.py`, `src/cathedral/eval/ssh_probe_runner.py`; `src/cathedral/eval/polaris_runner.py` `_verify_attestation`; `src/cathedral/publisher/submit.py` mode dispatch |
 | Copying another miner's card | Submission-time exact-bundle-hash and fuzzy display-name checks at intake; first-mover delta penalty (0.50x) for late copies that fail to beat the incumbent by 0.05 within 30 days. | `src/cathedral/publisher/similarity.py`; `src/cathedral/eval/scoring.py::first_mover_multiplier` |
 | Citation hallucination | The runtime fetches every citation URL and computes `BLAKE3(bytes)` server-side. Preflight rejects any citation outside HTTP 200-399. | `docker/cathedral-runtime/server.py` (fetch + hash), `src/cathedral/cards/preflight.py::BrokenSourceError` |
 | Legal-advice framing | Preflight scans the concatenated summary, action notes, and why-it-matters for prohibited phrases. | `src/cathedral/cards/preflight.py::LEGAL_ADVICE_PHRASES` |
@@ -119,18 +129,20 @@ A small CPU-only box. No GPU.
 - **RAM:** 4 GB minimum, 8 GB recommended
 - **Disk:** 50 GB SSD
 - **CPU:** 2 vCPU minimum, 4 vCPU comfortable
-- **Network:** stable outbound HTTPS. The validator polls every 12s and pulls ~10 KB per round.
+- **Network:** stable outbound HTTPS. The pull loop polls `/v1/leaderboard/recent` every 30s by default (`publisher.pull_interval_secs`) and pulls a few KB per round.
 
 ### Prerequisites
 
-- A Bittensor sr25519 hotkey registered on **SN39** (mainnet) or **SN292** (testnet).
+- A Bittensor sr25519 hotkey registered on **SN39** (mainnet, the operator path for v1).
 - A Linux host (any distro, x86_64 or aarch64).
 - **Python 3.11 or 3.12.** Newer Python versions are not yet tested.
 - SQLite (default) or PostgreSQL for the local store. SQLite is fine for v1.
 
+> Testnet (SN292) is retained for protocol development and continues to ship with `config/testnet.toml`. Operators should run against SN39 mainnet; testnet is not the supported operator path.
+
 ### Networking
 
-- **Inbound: nothing public required.** The validator binds an HTTP admin/health server on `0.0.0.0:9333` by default (configurable via `http.listen_host` / `http.listen_port`). Bind it to `127.0.0.1` if you only want local access, or leave on `0.0.0.0` and firewall it. You do not need this port reachable from the public internet — Cathedral never connects to you. The bearer-protected admin endpoints are for your own ops tooling.
+- **Inbound: nothing public required.** The validator binds an HTTP admin/health server on `0.0.0.0:9333` by default (configurable via `http.listen_host` / `http.listen_port`). Bind it to `127.0.0.1` if you only want local access, or leave on `0.0.0.0` and firewall it. You do not need this port reachable from the public internet, since Cathedral never connects to you. The bearer-protected admin endpoints are for your own ops tooling.
 - **Outbound: HTTPS 443 only.** The validator initiates outbound connections to `api.cathedral.computer` (publisher) and your configured subtensor endpoint. No other outbound dependencies.
 - **No NAT / port-forwarding required.** Unlike miner-style subnets, Cathedral validators don't receive inbound traffic from miners or other validators. Pull-only.
 
@@ -157,47 +169,66 @@ This installs four console scripts: `cathedral`, `cathedral-validator`, `cathedr
 
 ### 2. Fetch the public keys
 
-Cathedral and Polaris pubkeys are published at the publisher's JWKS endpoint. Pin them as env vars on your validator host so all signature verification runs locally:
+The publisher serves a JWKS document at `GET /.well-known/cathedral-jwks.json`. Fetch it once during setup, then pin the values locally so all signature verification runs against your pinned copy and never auto-rotates from the same publisher you then trust.
 
 ```bash
-curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json
+curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json | jq
 ```
 
-Today's values (May 2026 — refresh from the URL above before pinning so you catch any rotation):
+The document carries two keys:
+
+- `kid: cathedral-eval-signing`: Cathedral signs every `EvalRun` projection with this key. Pin as `CATHEDRAL_PUBLIC_KEY_HEX` in the validator's env.
+- `kid: polaris-runtime-attestation`: Polaris signs runtime attestations with this key. Pin as `polaris.public_key_hex` in your TOML config (used by the legacy `/v1/claim` worker that still boots when `cathedral-validator serve` starts up).
+
+Today's values (May 2026; always re-fetch from the URL above before pinning so you catch any rotation):
 
 ```bash
-# Cathedral's signing key (verifies every EvalRun projection)
+# CATHEDRAL_PUBLIC_KEY_HEX  (kid: cathedral-eval-signing)
+# Gates the pull loop. If absent, startup logs `pull_loop_disabled` and
+# the validator falls back to legacy-only operation.
 export CATHEDRAL_PUBLIC_KEY_HEX=10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26
 
-# Polaris attestation pubkey (pinned for context; validators do not
-# verify Polaris signatures themselves — the publisher does that)
-export POLARIS_ATTESTATION_PUBLIC_KEY=50b8a077ab857c91a9b4f2b94295e81f0f01e4ec1fa5b3e9fd4073ea00def24c
+# polaris.public_key_hex     (kid: polaris-runtime-attestation)
+# Goes in the TOML config, not env. Required because `cathedral-validator serve`
+# still constructs the legacy `/v1/claim` worker which verifies Polaris evidence.
+# Value: 50b8a077ab857c91a9b4f2b94295e81f0f01e4ec1fa5b3e9fd4073ea00def24c
 ```
+
+Validators do not need to export `POLARIS_ATTESTATION_PUBLIC_KEY` themselves. That env var is publisher-side: the publisher uses it to verify Polaris attestations before signing the `EvalRun` projection. Validators verify the publisher's signature (the Cathedral one), not Polaris's.
 
 ### 3. Set the bearer token
 
-Set `CATHEDRAL_BEARER` to any non-empty string. The validator uses it to build the `Authorization` header for publisher reads. The publisher does not enforce authentication on `/v1/leaderboard/recent` yet, so the value does not matter today; it must just be non-empty so the validator boots cleanly. Server-side enforcement will land in a later release and tokens will be re-issued then — there is no token to request from anyone right now.
+Set `CATHEDRAL_BEARER` to any non-empty string. This is the local validator's bearer token for its own `/v1/claim` endpoint (the legacy miner-claim intake path). It is not publisher-read auth and you do not send it to anyone; the publisher does not read it. The validator binary requires it at startup so the `make_bearer_dep` dependency builds cleanly.
 
 ```bash
 export CATHEDRAL_BEARER=$(openssl rand -hex 32)
 ```
 
+`CATHEDRAL_PUBLISHER_TOKEN` is optional and future-facing. If you set it, the pull loop sends it as `Authorization: Bearer <token>` to the publisher. The publisher does not currently enforce auth on `/v1/leaderboard/recent`, so leaving it unset is the right default today; the env var is wired so a later release can flip on server-side enforcement without a validator code change.
+
 ### 4. Configure
 
-Copy `config/testnet.toml` or `config/mainnet.toml` and fill in:
+Copy `config/mainnet.toml` (SN39, the operator path) and edit:
 
-- `network.validator_hotkey` — your hotkey ss58.
-- `network.wallet_name` — local Bittensor wallet name (default `default`).
+- `network.validator_hotkey`: your local Bittensor wallet hotkey NAME (the value you pass to `btcli` as `--wallet.hotkey`, e.g. `default`). Not the ss58 address. The bittensor SDK opens the wallet by name and reads the ss58 off the on-disk key file; `cathedral chain-check` then verifies that ss58 is registered on the subnet's metagraph.
+- `network.wallet_name`: local Bittensor wallet (coldkey) name (defaults to `cathedral-validator`; change if your wallet is named differently).
+- `polaris.public_key_hex`: the Polaris runtime-attestation pubkey from the JWKS document above (required; the legacy worker is constructed even when only the pull loop is doing real work).
 
-The bearer env-var name and Polaris key hex are read from env, not config, so no further edits are required.
+Env vars the validator reads at startup:
+
+- `CATHEDRAL_BEARER`: required. Local validator bearer for `/v1/claim`.
+- `CATHEDRAL_PUBLIC_KEY_HEX`: required to enable the pull loop. If unset, the pull loop is disabled and the validator logs `pull_loop_disabled`.
+- `CATHEDRAL_PUBLISHER_TOKEN`: optional. Forwarded to the publisher only when `[publisher].api_token_env` is configured in the TOML.
 
 ### 5. Bring up
 
 ```bash
-cathedral-validator migrate --config config/testnet.toml
-cathedral chain-check       --config config/testnet.toml  # confirm hotkey + subtensor
-cathedral-validator serve   --config config/testnet.toml
+cathedral-validator migrate --config config/mainnet.toml
+cathedral chain-check       --config config/mainnet.toml  # confirm hotkey + subtensor
+cathedral-validator serve   --config config/mainnet.toml
 ```
+
+(For protocol development against SN292, swap `config/mainnet.toml` for `config/testnet.toml`.)
 
 Operational follow-on (systemd unit, log filtering, weight-status table, recovery): [validator/RUNBOOK.md](validator/RUNBOOK.md).
 
@@ -205,7 +236,7 @@ Operational follow-on (systemd unit, log filtering, weight-status table, recover
 
 ### Do I need any port open to the public internet?
 
-No. Cathedral never connects back to your validator. The validator binds an HTTP admin/health server on `0.0.0.0:9333` by default (configurable via `http.listen_host` / `http.listen_port`) but that's for your own local ops tooling. Bind it to `127.0.0.1` or firewall it from the public internet. Outbound HTTPS 443 to `api.cathedral.computer` and your subtensor endpoint is the only network requirement.
+No. Cathedral never connects back to your validator. The validator binds an HTTP admin/health server on `0.0.0.0:9333` by default (configurable via `http.listen_host` / `http.listen_port`) but that's for your own local ops tooling. Bind it to `127.0.0.1` or firewall it from the public internet. Outbound HTTPS 443 to `api.cathedral.computer` (publisher) and your subtensor endpoint is the only network requirement.
 
 ### Do I need a GPU?
 
@@ -219,17 +250,19 @@ You generate it yourself, locally:
 export CATHEDRAL_BEARER=$(openssl rand -hex 32)
 ```
 
-You don't send it to anyone. The publisher doesn't enforce authentication on `/v1/leaderboard/recent` today — the validator binary just needs the env var set to a non-empty string so the `Authorization` header builds without crashing. Server-side enforcement and per-validator tokens are a later release; tokens will be re-issued then.
+You don't send it to anyone. `CATHEDRAL_BEARER` is the local validator's bearer for its own `/v1/claim` endpoint (the legacy intake path the worker still drains). It is not publisher-read auth. The pull loop reads from the publisher without bearer auth today; if a future release adds publisher-side enforcement, that token is `CATHEDRAL_PUBLISHER_TOKEN` (optional, wired via `[publisher].api_token_env`).
 
 ### Where do I get the Cathedral and Polaris public keys?
 
-From the JWKS endpoint, served by the publisher:
+From the JWKS endpoint, served live by the publisher:
 
 ```bash
-curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json
+curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json | jq
 ```
 
-Use `kid: cathedral-eval-signing` for `CATHEDRAL_PUBLIC_KEY_HEX`. The Polaris key is published in the same document as `kid: polaris-runtime-attestation`. Both are 64-character lowercase hex strings — exactly 64 chars, no leading-zero padding, no whitespace, no quotes. If your copy is a different length, recopy from the URL above; Ed25519 pubkeys cannot be padded.
+Use `kid: cathedral-eval-signing` for the `CATHEDRAL_PUBLIC_KEY_HEX` env var. Use `kid: polaris-runtime-attestation` for `polaris.public_key_hex` in your TOML config. Both are 64-character lowercase hex strings, exactly 64 chars, no leading-zero padding, no whitespace, no quotes. If your copy is a different length, recopy from the URL above; Ed25519 pubkeys cannot be padded.
+
+Fetch the JWKS once during setup and pin it locally. Do not configure the validator to re-fetch at runtime from the same publisher whose signatures it then trusts. That defeats the purpose of pinning.
 
 ### What if my pubkey is the wrong length?
 
@@ -237,7 +270,14 @@ You miscopied. Ed25519 pubkeys are 32 random bytes encoded as 64 lowercase hex c
 
 ### What does the validator actually do?
 
-Polls `https://api.cathedral.computer/v1/leaderboard/recent` every 12s, fetches signed `EvalRun` projections produced by the publisher, verifies the Ed25519 Cathedral signature locally, persists scored evals to a local SQLite store, and sets weights on chain. That's it. No miner connections, no model inference, no decrypting bundles.
+`cathedral-validator serve` wires four asyncio loops inside the FastAPI lifespan:
+
+- **worker**: drains the legacy `/v1/claim` queue, fetches Polaris evidence, verifies it, scores it. This is the pre-bundle intake path; the worker is still constructed by `serve` today, which is why `polaris.public_key_hex` remains required in the TOML.
+- **pull loop**: polls `GET /v1/leaderboard/recent` on the publisher every 30s by default, verifies each `EvalRun` projection with `CATHEDRAL_PUBLIC_KEY_HEX`, and upserts `pulled_eval_runs` rows. Only spawned when `CATHEDRAL_PUBLIC_KEY_HEX` is set; otherwise startup logs `pull_loop_disabled`.
+- **weight loop**: joins the latest score per hotkey to the metagraph uids, normalizes, and calls `subtensor.set_weights` on the configured interval.
+- **stall watchdog**: flips `health.stalled` true if heartbeats stop landing.
+
+No miner connections, no model inference, no decrypting bundles.
 
 ### Why doesn't the validator need to verify Polaris attestations directly?
 
@@ -255,10 +295,8 @@ Yes — different `[network]` sections in separate config files, different `list
 
 Listed in the order most likely to ship:
 
-- **Validator pull-loop in production.** `cathedral.validator.pull_loop` already verifies signatures and upserts to the local `scores` table; the live binary just needs to point at `https://api.cathedral.computer/v1/leaderboard/recent` with a `since` cursor.
 - **On-chain weekly Merkle anchoring.** `cathedral.publisher.merkle.epoch_for` and `cathedral.chain.anchor` exist; the missing piece is a scheduler that calls `system.remarkWithEvent` once per epoch with the Merkle root over the epoch's `EvalRun`s.
 - **TEE attestation verifiers wired live.** `cathedral.attestation.nitro` is implemented; TDX and SEV-SNP return 501 from the submit endpoint. The contract is in [ATTESTATION_CONTRACT.md](ATTESTATION_CONTRACT.md).
-- **JWKS endpoint.** `GET /.well-known/cathedral-jwks.json` on the publisher so validators don't need an out-of-band key handoff.
 - **Layer-2 audit replay.** Validators randomly sample a bundle, re-run the miner's `soul.md` on a different task, and compare structural similarity (citation overlap, source-class profile, summary length) against the submitted card. Catches a miner who passes attestation by running an approved runtime but feeds it cherry-picked sources.
 - **Per-domain rubric profiles.** Different weights for legal vs. finance vs. science cards. The publisher already carries `scoring_rubric` per `card_definition`; the in-process registry needs to read from there instead of `ScoreParts.weighted`.
 - **Approved-runtime registry on-chain.** Currently a git JSON file (see [ATTESTATION_CONTRACT.md](ATTESTATION_CONTRACT.md) §6.2); will move to a multi-sig-controlled chain extrinsic when the Hermes release cadence stabilizes.
@@ -274,7 +312,7 @@ These are the rough edges a validator operator should understand before dependin
 - **Marketplace TTL.** The Polaris marketplace eval has a 30-day TTL (env var `POLARIS_MARKETPLACE_EVAL_TTL_MINUTES` configurable). After expiry, a forced re-eval reprovisions the runtime container, charged to the operator's Verda balance. A small known cost line.
 - **`polaris-v1` does not directly sign `bundle_hash`.** The Tier A attestation binds `output_hash`, `task_hash`, `submission_id`, and `deployment_id`; the bundle-to-submission binding is via Polaris's internal marketplace record (cross-referenced at verification time). A future `polaris-v2` will sign `bundle_hash` directly. Documented in [ATTESTATION_CONTRACT.md](ATTESTATION_CONTRACT.md) §9.1.
 - **No live TEE miners.** Nitro verifier is wired; TDX and SEV-SNP return 501. Tier B+ is spec-only today.
-- **On-chain weights from the new signature stream are not yet running.** The legacy `/v1/claim` weight loop still drives chain weights. The new producer pipeline ships signed projections; the validator just isn't pulling them into the live weight set yet.
+- **Legacy `/v1/claim` worker still boots alongside the pull loop.** `cathedral-validator serve` constructs the worker even though most miners now flow through the bundle pipeline. The worker stays in place because some operators still post to `/v1/claim`, and because the worker is the writer of the legacy `scores` rows that the weight loop blends with `pulled_eval_runs`. Both paths feed the same weight vector via `latest_score_per_hotkey`.
 - **Served projection includes fields outside the signed payload.** The publisher signs over nine fields (`id, agent_id, agent_display_name, card_id, output_card, output_card_hash, weighted_score, polaris_verified, ran_at`; see `src/cathedral/eval/scoring_pipeline.py::score_and_sign`). The `_eval_run_to_output` projection served at `/v1/leaderboard/recent` and `/v1/agents/{id}` additionally carries `polaris_attestation`, `cathedral_signature`, and `merkle_epoch`. `cathedral_signature` and `merkle_epoch` are excluded from the canonical bytes (`cathedral.v1_types.canonical_json`), so they are safe; `polaris_attestation` is not, and a naive pass of the served dict through `verify_eval_output_signature` will fail. A validator must strip `polaris_attestation` (and any other non-signed fields) before canonicalizing. The eval-verification walkthrough below does this explicitly. Tracked for the next ship: either move `polaris_attestation` into the signed payload, or extend the excluded-keys set so the served and signed dicts canonicalize to the same bytes.
 
 ## How to verify a specific eval
@@ -313,12 +351,13 @@ Reference for the publisher-side signing payload: `cathedral.eval.scoring_pipeli
 
 **2. Polaris attestation.**
 
-If the eval row carries `polaris_attestation`, verify its signature with the pinned Polaris attestation public key:
+If the eval row carries `polaris_attestation`, you can verify its signature directly with the Polaris attestation public key (`kid: polaris-runtime-attestation` from the JWKS document). This is the same verification the publisher already runs before signing the projection in step 1; reproducing it locally is a one-off audit step, not something the validator binary does at runtime.
 
 ```python
 attestation = eval_run["polaris_attestation"]
 payload = json.dumps(attestation["payload"], sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-polaris_pk = Ed25519PublicKey.from_public_bytes(bytes.fromhex(POLARIS_ATTESTATION_PUBLIC_KEY))
+polaris_pubkey_hex = "..."  # paste from JWKS kid=polaris-runtime-attestation
+polaris_pk = Ed25519PublicKey.from_public_bytes(bytes.fromhex(polaris_pubkey_hex))
 polaris_pk.verify(base64.b64decode(attestation["signature"]), payload)
 ```
 
@@ -355,8 +394,9 @@ card = Card.model_validate(eval_run["output_card"])
 entry = CardRegistry.baseline().lookup(eval_run["card_id"])
 parts = score_card(card, entry)
 recomputed = parts.weighted()
-# Apply first-mover delta + 1.10x verified multiplier as in src/cathedral/eval/scoring_pipeline.py
-# to reproduce eval_run["weighted_score"], capped at 1.0.
+# Apply first-mover delta as in src/cathedral/eval/scoring_pipeline.py
+# to reproduce eval_run["weighted_score"], capped at 1.0. In v1 the verified-runtime
+# multiplier is 1.00x (Tier A gated behind CATHEDRAL_ENABLE_POLARIS_DEPLOY=true).
 ```
 
 The first-mover delta requires the submission's `metadata_fingerprint` and the historical incumbent score, which need a DB join; the formulas are in `cathedral.eval.scoring`.

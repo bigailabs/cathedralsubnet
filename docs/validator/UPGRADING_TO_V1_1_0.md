@@ -133,17 +133,16 @@ indexes, so a downgrade is a no-op for the local DB.
 ## Verification after deploy
 
 After upgrading, the publisher response should carry both cursor
-shapes. From any host with network access to the publisher:
+shapes. `/v1/leaderboard/recent` requires a cursor parameter, so seed
+one well before any real eval was written:
 
 ```bash
-curl -s https://api.cathedral.computer/api/cathedral/v1/leaderboard/recent?limit=1 \
+curl -s "https://api.cathedral.computer/v1/leaderboard/recent?since=1970-01-01T00:00:00Z&limit=1" \
   | jq '{next_since, next_since_ran_at, next_since_id}'
 ```
 
-A v1.1.0 publisher returns all three fields (the first two are
-typically null when the page is short, the last is null too — they're
-populated when the page is full and there's more behind it). A v1.0.x
-publisher returns only `next_since`.
+A v1.1.0 publisher returns all three fields populated (it has at least
+one row to point at). A v1.0.x publisher returns only `next_since`.
 
 On the validator side, the structured logs at the `INFO` level will
 show `pull_loop_tick` with an `inner_pulls` field. v1.0.7 emitted only
