@@ -96,7 +96,9 @@ Cathedral identifies you by your sr25519 hotkey. There are no accounts, no API k
 2. Serialize to canonical JSON: `json.dumps(payload, sort_keys=True, separators=(",", ":"))`
 3. Sign the UTF-8 bytes with your hotkey: `keypair.sign(canonical_bytes)`
 4. Base64-encode the 64-byte signature.
-5. Send the signature in the `X-Cathedral-Signature` HTTP header.
+5. Send both headers:
+   - `X-Cathedral-Hotkey: <your ss58 address>`
+   - `X-Cathedral-Signature: <base64 sr25519 sig>`
 
 The publisher rejects submissions with bad signatures (HTTP 401), missing bundles (HTTP 400), oversized bundles >10 MiB (HTTP 413), schema-invalid card payloads (HTTP 422), bad `attestation_mode` values (HTTP 400), invalid TEE attestations (HTTP 401, with `tee attestation invalid: <reason>` in `detail`), or unsupported TEE types (HTTP 501).
 
@@ -118,7 +120,10 @@ The publisher rejects submissions with bad signatures (HTTP 401), missing bundle
 | `ssh_port` | int | optional when `ssh-probe` (default 22) |
 | `ssh_user` | string | required when `attestation_mode=ssh-probe` |
 
-Header `X-Cathedral-Signature: <base64 sr25519 sig>` — required.
+Headers:
+
+- `X-Cathedral-Hotkey: <your ss58 address>` - required; must match `miner_hotkey` in the signed payload.
+- `X-Cathedral-Signature: <base64 sr25519 sig>` - required.
 
 Response is HTTP 202 with `{{ "id", "bundle_hash", "status" }}`. Status `pending_check` means queued for similarity check + eval; `discovery` means accepted as discovery-only (no eval will run); `rejected` means similarity collision or schema rejection (see `rejection_reason` in the response body).
 
