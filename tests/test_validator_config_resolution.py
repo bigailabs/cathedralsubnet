@@ -4,7 +4,6 @@ from pathlib import Path
 
 from cathedral.config import ValidatorSettings, resolve_validator_config_path
 
-
 POLARIS_KEY = "11" * 32
 
 
@@ -54,6 +53,7 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     assert settings.polaris.public_key_hex == POLARIS_KEY
     assert settings.weights.interval_secs == 1500
     assert settings.weights.burn_uid == 204
+    assert settings.weights.forced_burn_percentage == 0.0
 
     env_text = (etc / "validator.env").read_text()
     assert f"CATHEDRAL_CONFIG_PATH={etc / 'mainnet.toml'}" in env_text
@@ -75,6 +75,46 @@ def test_explicit_config_path_is_respected(tmp_path: Path) -> None:
 
     assert resolved == str(legacy)
     assert not (etc / "mainnet.toml").exists()
+
+
+def test_managed_mainnet_config_syncs_current_burn_policy(tmp_path: Path) -> None:
+    etc = tmp_path / "etc" / "cathedral"
+    etc.mkdir(parents=True)
+    mainnet = etc / "mainnet.toml"
+    mainnet.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                'wallet_name = "operator-wallet"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[weights]",
+                "interval_secs = 1500",
+                "disabled = false",
+                "burn_uid = 204",
+                "forced_burn_percentage = 98.0",
+            ]
+        )
+        + "\n"
+    )
+
+    resolved = resolve_validator_config_path(
+        mainnet,
+        env={"CATHEDRAL_CONFIG_PATH": str(mainnet)},
+        repo_root=Path.cwd(),
+        etc_dir=etc,
+    )
+
+    assert resolved == str(mainnet)
+    settings = ValidatorSettings.from_toml(resolved)
+    assert settings.weights.forced_burn_percentage == 0.0
+    assert "forced_burn_percentage = 0.0" in mainnet.read_text()
 
 
 def test_explicit_testnet_network_is_respected(tmp_path: Path) -> None:

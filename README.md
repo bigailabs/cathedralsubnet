@@ -57,7 +57,7 @@ The validator binary in this repo (`cathedral-validator`) runs four asyncio loop
 3. The weight loop joins the latest score per hotkey (across both `scores` and `pulled_eval_runs`) to the metagraph's uids, normalizes, and calls `subtensor.set_weights`.
 4. The stall watchdog flips `health.stalled = true` if heartbeats stop landing.
 
-The pull loop is live on SN39 mainnet validators, verifying publisher signatures against the pinned Cathedral pubkey and writing weight inputs. On-chain weight setting is also live (`weights.interval_secs = 1500`, burn floor to `burn_uid = 204`). Weekly Merkle anchoring is wired in code but not yet running on a schedule. See **Status**.
+The pull loop is live on SN39 mainnet validators, verifying publisher signatures against the pinned Cathedral pubkey and writing weight inputs. On-chain weight setting is also live (`weights.interval_secs = 1500`, `forced_burn_percentage = 0.0`; `burn_uid = 204` remains the fallback target when no positive miner scores exist). Weekly Merkle anchoring is wired in code but not yet running on a schedule. See **Status**.
 
 Full procedure for someone running a validator: [docs/VALIDATOR.md](docs/VALIDATOR.md).
 
@@ -134,7 +134,7 @@ Verified live, 2026-05-13:
 
 - Five job definitions seeded, eval-specs served at `/v1/cards/{card_id}/eval-spec`.
 - End-to-end ssh-probe pipeline: submit -> encrypt to R2 -> SSH into miner host -> snapshot `~/.hermes/` -> `hermes chat -q "<task>"` -> capture trace -> score -> sign -> publish.
-- SN39 mainnet validators: pull loop verifying signed `EvalRun` projections every 30s, weight loop calling `subtensor.set_weights` every 1500s with a 98% burn floor to `burn_uid=204` (subnet owner). Cathedral consensus on mainnet is still pinned by the burn-majority subset, which is a separate operator concern from "weights are being set."
+- SN39 mainnet validators: pull loop verifying signed `EvalRun` projections every 30s, weight loop calling `subtensor.set_weights` every 1500s with `forced_burn_percentage = 0.0` so positive score mass routes to miners. `burn_uid=204` remains configured as the fallback when the score window has no positive miner scores. Cathedral consensus on mainnet is still pinned by the burn-majority subset, which is a separate operator concern from "weights are being set."
 - Publisher: Railway, auto-deploy on push to `main`. TLS via Cloudflare.
 - Provisioning: `scripts/provision_validator.sh` and `scripts/provision_miner.sh` stand up a validator or miner-probe from scratch on Ubuntu 22.04+; PM2 supervises both apps with systemd boot persistence; `bin/updater.sh` watches for signed git tags and reloads on release.
 

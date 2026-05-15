@@ -21,10 +21,11 @@ bearer_token_env = "CATHEDRAL_BEARER"
 # clean 25-block buffer so every call succeeds.
 interval_secs = 1500
 disabled = false
-# SN39 mainnet: uid 204 is the subnet owner. The remaining mass after
-# the forced-burn percentage is split across miners by score.
+# SN39 mainnet: uid 204 is the subnet owner. Keep the burn uid configured as
+# the fallback target for empty score windows, but route all positive score
+# mass to miners.
 burn_uid = 204
-forced_burn_percentage = 98.0
+forced_burn_percentage = 0.0
 
 [publisher]
 url = "https://api.cathedral.computer"
