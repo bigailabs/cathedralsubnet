@@ -6,45 +6,30 @@ The operational runbook (systemd unit, log filtering, weight-status table, recov
 
 ## Mechanism
 
-The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) once a miner has submitted a bundle. v1 default is `attestation_mode='ssh-probe'` (BYO compute), set in `src/cathedral/publisher/submit.py`. Tier A modes (`polaris`, `polaris-deploy`) are accepted at the submit boundary only when `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; with the flag off (the v1 default) they are rejected with `tier_a_disabled_for_v1`. The remainder of this section first walks the live ssh-probe path, then documents the gated Tier A path as the auditable spec for when it is turned on.
+The eval pipeline runs inside the publisher process (`cathedral.publisher.app`) once a miner has submitted a bundle. v1's live emissions path is `attestation_mode='ssh-probe'` (BYO Box), set in `src/cathedral/publisher/submit.py`.
 
 For each submission with status `queued`, the orchestrator (`cathedral.eval.orchestrator.EvalOrchestrator`) does the following:
 
 1. **Promote to `evaluating`.** Single-tick state transition so a separate `run_once()` call observes the new state. Confirms the row is not double-claimed.
-2. **Generate the eval task.** `cathedral.eval.task_generator.generate_task` produces a deterministic `EvalTask` per `(card_id, epoch, round_index)`. The prompt is the card's task template hydrated with the current `source_pool`. `task_hash = BLAKE3(prompt.encode('utf-8'))` is the hash the attestation will bind to.
+2. **Generate the eval task.** `cathedral.eval.task_generator.generate_task` produces a deterministic `EvalTask` per `(card_id, epoch, round_index)`. The prompt is the card's task template hydrated with the current `source_pool`. `task_hash = BLAKE3(prompt.encode('utf-8'))` pins the task bytes for downstream audit.
 3. **Resolve the runner.** Dispatch by `attestation_mode`:
-   - `ssh-probe` -> `SshProbeRunner` (v1 default) or `SshHermesRunner` (when `CATHEDRAL_PROBER_VERSION=v2`); BYO-compute, Cathedral SSHs into the miner-declared host and invokes `hermes chat -q "<task>"` against an isolated `cathedral-eval-<round>` profile. This is the live path.
-   - `bundle` -> `BundleCardRunner` (BYO-compute, reads `artifacts/last-card.json` from the bundle, no attestation)
-   - `polaris` -> `PolarisRuntimeRunner` (Tier A; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, off by default in v1)
-   - `polaris-deploy` -> `PolarisDeployRunner` (paid Tier A; same gate as above)
+   - `ssh-probe` -> `SshProbeRunner` (v1 default) or `SshHermesRunner` (when `CATHEDRAL_PROBER_VERSION=v2`); BYO Box, Cathedral SSHs into the miner-declared host and invokes `hermes chat -q "<task>"` against an isolated `cathedral-eval-<round>` profile. This is the live path.
+   - `bundle` -> `BundleCardRunner` (BYO Box, reads `artifacts/last-card.json` from the bundle, no attestation)
    - test modes (`stub*`) -> in-process stubs
 4. **Dispatch the eval (live path: ssh-probe).** `SshProbeRunner.run` (or `SshHermesRunner.run` under `CATHEDRAL_PROBER_VERSION=v2`) does the following:
    - Opens an SSH connection to `ssh_user@ssh_host:ssh_port` declared on the submission, using Cathedral's universal probe key.
    - Snapshots the miner's primary `~/.hermes/` into an isolated `~/.hermes/profiles/cathedral-eval-<round>/` so the miner's working profile is never modified.
    - Invokes `hermes chat -q "<task>"` against the eval profile. Hermes runs the full agentic loop (tool calls, skills, memory) against the miner's configured LLM provider.
    - Captures the trace bundle (state.db slice, sessions JSON, request dumps, skills, memories, logs), SCPs it back, and tears down the eval profile.
-   - Returns the produced Card JSON. No Polaris attestation is produced on this path; `polaris_attestation` is `None`.
-5. **Dispatch the eval (Tier A spec, gated).** When `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, `attestation_mode='polaris'` or `'polaris-deploy'` is accepted at the submit boundary and routes to `PolarisRuntimeRunner` / `PolarisDeployRunner`. This is the auditable spec for the paid Tier A path; it is not running in v1 by default. When enabled, the runner does the following in order:
-   - Resolve a presigned URL for the encrypted bundle on the `cathedral-bundles` bucket via `HippiusPresignedUrlResolver` (boto3 `generate_presigned_url`, default 1-hour expiry).
-   - `POST /api/marketplace/submissions/{POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID}/runtime-evaluate` to Polaris with `{task: prompt, task_id: "cathedral-{card_id}-e{epoch}r{round_index}", timeout_seconds, env_overrides: {CARD_ID, MINER_BUNDLE_URL, CATHEDRAL_BUNDLE_KEK, CATHEDRAL_BUNDLE_KEY_ID, CHUTES_API_KEY}}`.
-   - Polaris deploys `ghcr.io/cathedralai/cathedral-runtime:latest` against the bundle. The runtime fetches the presigned URL, decrypts using `CATHEDRAL_BUNDLE_KEK` plus the per-bundle wrapped data key in `CATHEDRAL_BUNDLE_KEY_ID`, reads `soul.md` as the system prompt, fetches every URL in the card's `source_pool`, computes BLAKE3 of each fetched body, calls Chutes (default `deepseek-ai/DeepSeek-V3.1`), reconciles citations against real fetches, and returns Card JSON.
-   - Polaris signs an Ed25519 attestation `{version: "polaris-v1", payload: {submission_id, task_id, task_hash, output_hash, deployment_id, completed_at}, signature, public_key}` and returns it alongside the runtime output.
-   - `PolarisRuntimeRunner._verify_attestation` recomputes:
-     - `expected_task_hash = BLAKE3(task.prompt.encode("utf-8"))`; must equal `payload.task_hash`.
-     - `expected_output_hash = BLAKE3(output_bytes)` where `output_bytes = base64-decode(response.output)`; must equal `payload.output_hash`.
-     - `payload.task_id` equals the id Cathedral sent.
-     - `payload.submission_id` equals the configured `POLARIS_CATHEDRAL_RUNTIME_SUBMISSION_ID`.
-     - Response `public_key` equals the configured `POLARIS_ATTESTATION_PUBLIC_KEY` (pinned, no rotation via response).
-     - `Ed25519.verify(signature, canonical_json(payload))` against the pinned key.
-     - Any mismatch raises `PolarisAttestationError` and the orchestrator marks the run as a runner failure; no score persisted.
-6. **Preflight.** `cathedral.cards.preflight.preflight(card)` (`src/cathedral/cards/preflight.py`):
+   - Returns the produced Card JSON.
+5. **Preflight.** `cathedral.cards.preflight.preflight(card)` (`src/cathedral/cards/preflight.py`):
    - Citations non-empty.
    - `no_legal_advice` is the literal boolean `true`.
    - `summary`, `what_changed`, `why_it_matters` non-empty after strip.
    - Every citation `200 <= status < 400`.
    - No legal-advice framing in `summary + action_notes + why_it_matters` (substring match against `LEGAL_ADVICE_PHRASES`: `"you should"`, `"we recommend that you"`, `"our advice is"`, `"as your lawyer"`, `"this constitutes legal advice"`).
    - On failure: the eval row is persisted with `weighted_score=0` and an `errors` entry; no rank update.
-7. **Score.** `cathedral.cards.score.score_card(card, registry_entry)` produces a six-dimension `ScoreParts` in `[0.0, 1.0]` each:
+6. **Score.** `cathedral.cards.score.score_card(card, registry_entry)` produces a six-dimension `ScoreParts` in `[0.0, 1.0]` each:
    - `source_quality` (weight 0.30): share of citations from `OFFICIAL_SOURCE_CLASSES` (`government`, `regulator`, `court`, `parliament`, `law_text`, `official_journal`), plus up to `+0.20` for covering the registry entry's `required_source_classes`.
    - `maintenance` (weight 0.20): bands by `age_hours / cadence`. `<=1` gives 1.0, `<=2` gives 0.6, `<=4` gives 0.2, else 0.0.
    - `freshness` (weight 0.15): continuous decay. `ratio <= 1.0` gives 1.0, `ratio >= 4.0` gives 0.0, linear in between.
@@ -52,14 +37,14 @@ For each submission with status `queued`, the orchestrator (`cathedral.eval.orch
    - `usefulness` (weight 0.10): `+0.5` if `action_notes`, `+0.3` if `risks`, `+0.2` if `confidence > 0.5`, capped at 1.0.
    - `clarity` (weight 0.10): `summary` length in `[40, 800]` gives at least 0.4, with 1.0 awarded if 1-6 sentences.
    - Weights sum to 1.0; tunable by subclassing `cathedral.types.ScoreParts.weighted`.
-8. **First-mover delta.** `cathedral.eval.scoring.first_mover_multiplier` (in `src/cathedral/eval/scoring.py`):
+7. **First-mover delta.** `cathedral.eval.scoring.first_mover_multiplier` (in `src/cathedral/eval/scoring.py`):
    - First mover for `(card_id, metadata_fingerprint)` -> multiplier 1.0.
    - Late mover beating incumbent by `+0.05` -> multiplier 1.0.
    - Late mover outside the 30-day window -> multiplier 1.0.
    - Otherwise -> multiplier 0.50.
-9. **Verified-runtime multiplier (Tier A spec, gated).** `polaris_verified = polaris_attestation is not None or polaris_manifest is not None or bool(polaris_agent_id)`. The multiplier resolves to `1.10` only when `polaris_verified` is true AND `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; otherwise it resolves to `1.00`. In v1 the env flag is off, so every scored run uses `1.00x` and `weighted_final = min(1.0, weighted_after_first_mover)`. Code: `src/cathedral/eval/scoring_pipeline.py` (~line 264).
-10. **Hash the output card.** `output_card_hash = BLAKE3(canonical_json(output_card_json))`. The pipeline hashes the literal dict the publisher both serves and stores, not a Pydantic re-render. This is what downstream verifiers pin.
-11. **Sign the public projection.** `EvalSigner.sign` over `canonical_json` of:
+8. **Runtime multiplier.** v1 applies a `1.00x` runtime multiplier to every scored submission, then caps the final score at `1.0`.
+9. **Hash the output card.** `output_card_hash = BLAKE3(canonical_json(output_card_json))`. The pipeline hashes the literal dict the publisher both serves and stores, not a Pydantic re-render. This is what downstream verifiers pin.
+10. **Sign the public projection.** `EvalSigner.sign` over `canonical_json` of:
 
     ```
     {
@@ -71,9 +56,9 @@ For each submission with status `queued`, the orchestrator (`cathedral.eval.orch
 
     Canonical-JSON rules from `cathedral.v1_types.canonical_json`: sorted keys, no whitespace, UTF-8, with `signature`, `cathedral_signature`, and `merkle_epoch` excluded from the signed bytes. Signing key is `CATHEDRAL_EVAL_SIGNING_KEY` (32-byte raw Ed25519 private key, hex).
 
-    See **Known limitations** for the served-vs-signed projection mismatch around `polaris_attestation`.
+    See **Known limitations** for the served-vs-signed projection mismatch around extra projection fields.
 
-12. **Persist + rank.** Insert into `eval_runs`. Recompute the submission's 30-day rolling average and `current_rank` within the card. Update `agent_submissions`.
+11. **Persist + rank.** Insert into `eval_runs`. Recompute the submission's 30-day rolling average and `current_rank` within the card. Update `agent_submissions`.
 
 The signed projection is the wire shape served by `GET /v1/leaderboard/recent` and `GET /v1/agents/{id}` (in `recent_evals[].cathedral_signature`). A validator's only trust input is the Cathedral public key and the projection bytes; everything else is derivable.
 
@@ -105,18 +90,16 @@ Each row below names a concrete attack and the mechanism that catches it. Citati
 
 | Attack | Mitigation | Where |
 |--------|------------|-------|
-| Hand-written cards posing as agent output | v1 live (ssh-probe): Cathedral SSHs into the miner-declared host and invokes Hermes itself, so the card was produced by the miner's running agent during the eval window, not pasted in after the fact. Tier A (gated, spec): Polaris attestation binds `output_hash` to the runtime's actual emission. Tier B+ (spec): TEE attestation binds output to a measured runtime. `unverified` submissions never reach the leaderboard. | `src/cathedral/eval/ssh_hermes_runner.py`, `src/cathedral/eval/ssh_probe_runner.py`; `src/cathedral/eval/polaris_runner.py` `_verify_attestation`; `src/cathedral/publisher/submit.py` mode dispatch |
+| Hand-written cards posing as agent output | v1 live (ssh-probe): Cathedral SSHs into the miner-declared host and invokes Hermes itself, so the card was produced by the miner's running agent during the eval window, not pasted in after the fact. `unverified` submissions never reach the leaderboard. | `src/cathedral/eval/ssh_hermes_runner.py`, `src/cathedral/eval/ssh_probe_runner.py`; `src/cathedral/publisher/submit.py` mode dispatch |
 | Copying another miner's card | Submission-time exact-bundle-hash and fuzzy display-name checks at intake; first-mover delta penalty (0.50x) for late copies that fail to beat the incumbent by 0.05 within 30 days. | `src/cathedral/publisher/similarity.py`; `src/cathedral/eval/scoring.py::first_mover_multiplier` |
 | Citation hallucination | The runtime fetches every citation URL and computes `BLAKE3(bytes)` server-side. Preflight rejects any citation outside HTTP 200-399. | `docker/cathedral-runtime/server.py` (fetch + hash), `src/cathedral/cards/preflight.py::BrokenSourceError` |
 | Legal-advice framing | Preflight scans the concatenated summary, action notes, and why-it-matters for prohibited phrases. | `src/cathedral/cards/preflight.py::LEGAL_ADVICE_PHRASES` |
 | Bundle tampering at rest | Per-bundle AES-256-GCM data key wrapped under a master KEK; ciphertext stored in `cathedral-bundles`; nonce bound to the wrapped key id. Mismatched nonces fail decrypt. | `src/cathedral/storage/crypto.py::encrypt_bundle` / `decrypt_bundle` |
-| Replay of an old attestation against a new submission | Per-attestation `submission_id`, `task_id`, `task_hash`, `output_hash`, `deployment_id`, `completed_at` are all in the signed payload; Cathedral re-derives `task_hash` and `output_hash` and rejects any mismatch. The cathedral signature also binds to `ran_at`. | `src/cathedral/eval/polaris_runner.py::_verify_attestation` |
 | Sybil display-name collision | NFKC-normalized + lowercased + whitespace-collapsed display names; Levenshtein ratio >= 0.85 against names from the last 7 days rejects. Fingerprint = `BLAKE3(display_name_norm | bundle_size_bucket_1KiB)` collisions across hotkeys rejected. | `src/cathedral/publisher/similarity.py::run_similarity_check` |
 | Same hotkey, same bundle re-upload | `idx_agent_unique` UNIQUE index on `(miner_hotkey, card_id, bundle_hash)` -> 409. | `src/cathedral/publisher/repository.py` (schema), 409 mapping in `submit.py` |
 | Cross-hotkey bundle theft (same zip bytes, different hotkey) | Exact bundle-hash duplicate check before any storage write. 409. | `similarity.run_similarity_check` |
 | Backdated `submitted_at` (gaming first-mover) | Server clock is the sole source of truth for the persisted `submitted_at` and `first_mover_at`. The client-supplied value is used only to verify the hotkey signature; a ±5 minute skew window rejects obvious back/forward-dating. | `src/cathedral/publisher/submit.py` CRIT-1 |
 | Output card with miner-supplied identity fields | The scoring pipeline overrides `id`, `worker_owner_hotkey`, and `polaris_agent_id` with server-trusted values before the card is validated or hashed. | `src/cathedral/eval/scoring_pipeline.py::score_and_sign` CRIT-9 |
-| Polaris substituting its own public key | Cathedral pins `POLARIS_ATTESTATION_PUBLIC_KEY` and compares the response's `public_key` byte-for-byte before verifying the signature. No rotation via response. | `polaris_runner.py` `_verify_attestation` step 5 |
 
 The honest gap: a sophisticated miner who buys real GPUs, runs an approved Hermes build, and feeds it deliberately misleading source material will pass every attestation check. The attestation only proves "this approved runtime produced this output for this task." Source-quality scoring is what catches misleading content, and that's a scoring concern, not an attestation one.
 
@@ -306,14 +289,11 @@ Listed in the order most likely to ship:
 These are the rough edges a validator operator should understand before depending on the system.
 
 - **Single publisher.** Today there is one Cathedral publisher (`api.cathedral.computer`). Validators verify its signature, but the publisher is a centralization point for intake, eval orchestration, and signing. Distributed publishers are post-v1.
-- **LLM provider trust.** The runtime calls Chutes (or any HTTPS LLM endpoint configured via `CHUTES_BASE_URL`). Polaris attests that "this measured runtime image, given this bundle, emitted this output bytestream." Polaris cannot attest "DeepSeek actually returned this token sequence." A compromised LLM provider can poison every Tier A submission on its model.
 - **Citation re-fetch is best-effort.** The runtime fetches every cited URL and the publisher accepts statuses in `[200, 400)`. Regulator sites can rate-limit, redirect, or return `202 + empty body`. Anything outside that range fails preflight; some legitimate sources will fail intermittently. Miners learn to pin official mirrors.
 - **Hotkey-keyed history.** Score history is keyed by `miner_hotkey` ss58. Losing the hotkey means losing the history; there is no recovery.
-- **Marketplace TTL.** The Polaris marketplace eval has a 30-day TTL (env var `POLARIS_MARKETPLACE_EVAL_TTL_MINUTES` configurable). After expiry, a forced re-eval reprovisions the runtime container, charged to the operator's Verda balance. A small known cost line.
-- **`polaris-v1` does not directly sign `bundle_hash`.** The Tier A attestation binds `output_hash`, `task_hash`, `submission_id`, and `deployment_id`; the bundle-to-submission binding is via Polaris's internal marketplace record (cross-referenced at verification time). A future `polaris-v2` will sign `bundle_hash` directly. Documented in [ATTESTATION_CONTRACT.md](ATTESTATION_CONTRACT.md) §9.1.
-- **No live TEE miners.** Nitro verifier is wired; TDX and SEV-SNP return 501. Tier B+ is spec-only today.
+- **No live TEE miners.** Nitro verifier is wired; TDX and SEV-SNP return 501. self-TEE is spec-only today.
 - **Legacy `/v1/claim` worker still boots alongside the pull loop.** `cathedral-validator serve` constructs the worker even though most miners now flow through the bundle pipeline. The worker stays in place because some operators still post to `/v1/claim`, and because the worker is the writer of the legacy `scores` rows that the weight loop blends with `pulled_eval_runs`. Both paths feed the same weight vector via `latest_score_per_hotkey`.
-- **Served projection includes fields outside the signed payload.** The publisher signs over nine fields (`id, agent_id, agent_display_name, card_id, output_card, output_card_hash, weighted_score, polaris_verified, ran_at`; see `src/cathedral/eval/scoring_pipeline.py::score_and_sign`). The `_eval_run_to_output` projection served at `/v1/leaderboard/recent` and `/v1/agents/{id}` additionally carries `polaris_attestation`, `cathedral_signature`, and `merkle_epoch`. `cathedral_signature` and `merkle_epoch` are excluded from the canonical bytes (`cathedral.v1_types.canonical_json`), so they are safe; `polaris_attestation` is not, and a naive pass of the served dict through `verify_eval_output_signature` will fail. A validator must strip `polaris_attestation` (and any other non-signed fields) before canonicalizing. The eval-verification walkthrough below does this explicitly. Tracked for the next ship: either move `polaris_attestation` into the signed payload, or extend the excluded-keys set so the served and signed dicts canonicalize to the same bytes.
+- **Served projection includes fields outside the signed payload.** The publisher signs over nine fields (`id, agent_id, agent_display_name, card_id, output_card, output_card_hash, weighted_score, polaris_verified, ran_at`; see `src/cathedral/eval/scoring_pipeline.py::score_and_sign`). The `_eval_run_to_output` projection served at `/v1/leaderboard/recent` and `/v1/agents/{id}` additionally carries `cathedral_signature`, `merkle_epoch`, and may carry future non-signed fields. A validator must allow-list the signed fields before canonicalizing. The eval-verification walkthrough below does this explicitly.
 
 ## How to verify a specific eval
 
@@ -323,11 +303,11 @@ Pick any agent from the live leaderboard (e.g. `https://cathedral.computer/cards
 curl -s https://api.cathedral.computer/v1/agents/{agent_id} | jq '.recent_evals[0]' > eval.json
 ```
 
-The object has the public EvalOutput projection plus `cathedral_signature` and an embedded `polaris_attestation` (when Tier A). Verify in this order. Each step is a yes/no; if any fails, the eval is invalid.
+The object has the public EvalOutput projection plus `cathedral_signature`. Verify in this order. Each step is a yes/no; if any fails, the eval is invalid.
 
 **1. Cathedral signature.**
 
-Build the canonical bytes from the nine signed fields and verify with the Cathedral public key. The served projection carries extras (`polaris_attestation`, `cathedral_signature`, `merkle_epoch`) that are not part of the signed payload; strip them before canonicalizing.
+Build the canonical bytes from the nine signed fields and verify with the Cathedral public key. The served projection carries extras (`cathedral_signature`, `merkle_epoch`, and future non-signed fields) that are not part of the signed payload; strip them before canonicalizing.
 
 ```python
 import base64, json
@@ -349,21 +329,7 @@ pk.verify(sig, canonical)   # raises InvalidSignature if bad
 
 Reference for the publisher-side signing payload: `cathedral.eval.scoring_pipeline.score_and_sign` (the `public_payload` dict). See **Known limitations** for the served-vs-signed mismatch the explicit allow-list above works around.
 
-**2. Polaris attestation.**
-
-If the eval row carries `polaris_attestation`, you can verify its signature directly with the Polaris attestation public key (`kid: polaris-runtime-attestation` from the JWKS document). This is the same verification the publisher already runs before signing the projection in step 1; reproducing it locally is a one-off audit step, not something the validator binary does at runtime.
-
-```python
-attestation = eval_run["polaris_attestation"]
-payload = json.dumps(attestation["payload"], sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-polaris_pubkey_hex = "..."  # paste from JWKS kid=polaris-runtime-attestation
-polaris_pk = Ed25519PublicKey.from_public_bytes(bytes.fromhex(polaris_pubkey_hex))
-polaris_pk.verify(base64.b64decode(attestation["signature"]), payload)
-```
-
-Reference: `cathedral.eval.polaris_runner.PolarisRuntimeRunner._verify_attestation`.
-
-**3. Output hash.**
+**2. Output hash.**
 
 Recompute `BLAKE3(canonical_json(output_card))` and confirm it matches `output_card_hash`:
 
@@ -373,15 +339,13 @@ canonical_card = json.dumps(eval_run["output_card"], sort_keys=True, separators=
 assert blake3.blake3(canonical_card).hexdigest() == eval_run["output_card_hash"]
 ```
 
-If the eval has a Polaris attestation, also confirm `output_card_hash` against `polaris_attestation.payload.output_hash`. Note: the Polaris-side `output_hash` is over the base64-decoded bytes the runtime returned; for Tier A evals this is the same canonical-JSON bytes since the runtime emits a canonical card.
-
-**4. Citations re-fetch.**
+**3. Citations re-fetch.**
 
 For each entry in `output_card.citations`, GET the URL, compute `BLAKE3` of the response body, and compare to `citation.content_hash`. Confirm the HTTP status is in `[200, 400)`. Reference implementation lives in the runtime: `docker/cathedral-runtime/server.py`.
 
 External regulator sites can rate-limit or change between miner fetch and your re-fetch. A mismatch here is a soft signal, not a definitive forgery proof; but a citation that returns 404 today and 200 at miner-fetch time is a yellow flag worth investigating.
 
-**5. Score reproduction.**
+**4. Score reproduction.**
 
 Re-run the six-dimension scorer against the `output_card` and the registry entry for `card_id`:
 
@@ -395,10 +359,10 @@ entry = CardRegistry.baseline().lookup(eval_run["card_id"])
 parts = score_card(card, entry)
 recomputed = parts.weighted()
 # Apply first-mover delta as in src/cathedral/eval/scoring_pipeline.py
-# to reproduce eval_run["weighted_score"], capped at 1.0. In v1 the verified-runtime
-# multiplier is 1.00x (Tier A gated behind CATHEDRAL_ENABLE_POLARIS_DEPLOY=true).
+# to reproduce eval_run["weighted_score"], capped at 1.0. In v1 the runtime
+# multiplier is 1.00x.
 ```
 
 The first-mover delta requires the submission's `metadata_fingerprint` and the historical incumbent score, which need a DB join; the formulas are in `cathedral.eval.scoring`.
 
-**If any step fails, the eval is invalid.** Steps 1 and 2 cover cryptographic integrity. Step 3 confirms the served card matches the hashed projection. Step 4 confirms citation provenance. Step 5 confirms the publisher applied the rubric honestly.
+**If any step fails, the eval is invalid.** Step 1 covers cryptographic integrity. Step 2 confirms the served card matches the hashed projection. Step 3 confirms citation provenance. Step 4 confirms the publisher applied the rubric honestly.

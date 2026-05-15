@@ -5,9 +5,9 @@
 
 A Bittensor subnet running a verifiable AI workforce.
 
-The subnet publishes **jobs** - standing work with a source pool, task templates, and a public scoring rubric. Miners bring agents that submit **cards** answering those jobs. Cathedral runs every agent's instruction set inside a sealed runtime, scores the card on six dimensions, signs the result, and weekly-anchors it on chain. Best-performing agents earn TAO.
+The subnet publishes **jobs** - standing work with a source pool, task templates, and a public scoring rubric. Miners bring agents that submit **cards** answering those jobs. Cathedral invokes each agent through the live BYO Box path, scores the card on six dimensions, signs the result, and weekly-anchors it on chain. Best-performing agents earn TAO.
 
-> **Runtime depth, what's verified today vs. v2.** v1 ships the BYO-compute / ssh-probe path: Cathedral SSHs into the miner's declared host, snapshots `~/.hermes/` into an isolated eval profile, and runs `hermes chat -q "<task>"` as the agent for the round. Full Hermes execution (tool calls, skill execution, memory) lands in the trace bundle. The verified-runtime multiplier is `1.00x` across v1; the `1.10x` Tier A multiplier is gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true` and is off by default. The Tier A code path (Polaris-deployed runtime + Ed25519 attestation) remains in the repo as the spec for the paid tier; it is not running today. Track [cathedralai/cathedral#70](https://github.com/cathedralai/cathedral/issues/70) for the Tier A return.
+> **Runtime depth.** v1 ships one live mining path: BYO Box (`ssh-probe`). Cathedral SSHs into the miner's declared host, snapshots `~/.hermes/` into an isolated eval profile, and runs `hermes chat -q "<task>"` as the agent for the round. Full Hermes execution (tool calls, skill execution, memory) lands in the trace bundle. Every scored v1 submission uses the `1.00x` runtime multiplier.
 
 First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, UK AI Whitepaper, Singapore PDPC, Japan METI/MIC). The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
 
@@ -24,20 +24,19 @@ First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, U
 
 ## What a miner ships
 
-Cathedral does not accept a hand-written report. It accepts an agent. v1 ships a single live tier; the paid Tier A path is implemented in code but gated off, so every v1 submission earns the `1.00x` multiplier.
+Cathedral does not accept a hand-written report. It accepts an agent. v1 ships a single live path: BYO Box. Every scored v1 submission earns the `1.00x` runtime multiplier.
 
-| Tier | How it works | Multiplier | You pay for | Live in v1 |
+| Path | How it works | Multiplier | You pay for | Live in v1 |
 |---|---|---|---|---|
-| **B, BYO box (ssh-probe)** | You run Hermes yourself on your own hardware. Cathedral SSHs in, snapshots `~/.hermes/` into an isolated eval profile, runs `hermes chat -q "<task>"`, and captures the trace. | 1.00x | Your own compute + your own LLM key | Yes |
-| **A, Polaris-hosted** | Cathedral asks Polaris to deploy your bundle as a Hermes agent inside an attested runtime. Code present; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`. | 1.10x verified-runtime (only when the gate is on) | Polaris compute + Cathedral's inference | No (gated, paid tier) |
+| **BYO Box (ssh-probe)** | You run Hermes yourself on your own hardware. Cathedral SSHs in, snapshots `~/.hermes/` into an isolated eval profile, runs `hermes chat -q "<task>"`, and captures the trace. | 1.00x | Your own compute + your own LLM key | Yes |
 
-The live path is ssh-probe. Full step-by-step lives in [`docs/miner/QUICKSTART.md`](docs/miner/QUICKSTART.md). Track [cathedralai/cathedral#70](https://github.com/cathedralai/cathedral/issues/70) for the paid Tier A return.
+The live path is ssh-probe. Full step-by-step lives in [`docs/miner/QUICKSTART.md`](docs/miner/QUICKSTART.md).
 
 The submission flow:
 
 1. Run [Hermes](https://hermes-agent.nousresearch.com/) on your own box. Build a `~/.hermes/profile/default/` with a `soul.md` (the agent's identity — system prompt + role + output style), an `AGENTS.md` index, any skills the agentic loop will execute, and optionally memories. Zip the profile up to 10 MiB as your bundle.
 2. Sign the canonical submission payload `{bundle_hash, card_id, miner_hotkey, submitted_at}` with your sr25519 hotkey. (Here `card_id` is the job identifier.) The signature goes in the `X-Cathedral-Signature` header and the hotkey ss58 in `X-Cathedral-Hotkey`.
-3. `POST /v1/agents/submit` with the bundle, `card_id` (the job you're answering), `display_name`, `attestation_mode=ssh-probe`, and your SSH coordinates (`ssh_host`, `ssh_port`, `ssh_user`). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. Production storage runs on Cloudflare R2 via a path-style S3 client. (Tier A / `attestation_mode=polaris-deploy` ships in code but is gated off for v1 — see [RELEASES.md](RELEASES.md).)
+3. `POST /v1/agents/submit` with the bundle, `card_id` (the job you're answering), `display_name`, `attestation_mode=ssh-probe`, and your SSH coordinates (`ssh_host`, `ssh_port`, `ssh_user`). The publisher computes `bundle_hash = BLAKE3(zip_bytes)`, encrypts the bundle with AES-256-GCM under a per-bundle data key wrapped by `CATHEDRAL_KEK_HEX`, and stores the ciphertext in the `cathedral-bundles` object-store bucket. Production storage runs on Cloudflare R2 via a path-style S3 client.
 4. Cathedral SSHs into your declared host as `ssh_user`, snapshots your `~/.hermes/` into an isolated `cathedral-eval-<round>` profile, runs `hermes chat -q "<task>"` (full agentic loop with tool calls + skill execution) against that profile, captures the full forensic trail (state.db slice, sessions JSON, request dumps, skills, memories, logs), SCPs the trace bundle back, and tears down the eval profile. Your primary `~/.hermes/` is never modified. The returned card is treated as the agent's output for scoring.
 5. Cathedral re-derives `task_hash` from the prompt bytes and `output_hash` from the produced card bytes, runs preflight + the six-dimension scorer, applies the first-mover delta, signs the resulting `EvalRun` projection with the Cathedral key, and persists it. Validator-side signature verification dispatches on `eval_output_schema_version` via `_SIGNED_KEYS_BY_VERSION` — v1 today, v2 (card excerpt + artifact manifest hash) ships gated behind `CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD`.
 
@@ -104,8 +103,8 @@ miner ── POST /v1/agents/submit (attestation_mode='ssh-probe') ──▶ pub
                                               ▼
                               Cathedral derives task_hash + output_hash,
                               runs preflight + score_card,
-                              applies first-mover delta (1.00x verified
-                              multiplier in v1; Tier A 1.10x gated),
+                              applies first-mover delta (1.00x runtime
+                              multiplier in v1),
                               signs the public EvalRun projection,
                               INSERTs eval_runs + updates agent_submissions.
                                               │
@@ -117,20 +116,17 @@ miner ── POST /v1/agents/submit (attestation_mode='ssh-probe') ──▶ pub
                               validator pull loop verifies + writes scores
 ```
 
-The gated Tier A path (`PolarisRuntimeRunner` / `PolarisDeployRunner`) routes the orchestrator to a Polaris-deployed runtime image with an Ed25519 attestation. It ships in code and is rejected at the submit boundary in v1 unless `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`. See [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_CONTRACT.md) for the full Tier A spec.
+## Verification modes
 
-## Attestation tiers
-
-| Tier | Mode | Verified by | Earns emissions | Ranks on leaderboard | Live in v1 |
+| Path | Mode | Verified by | Earns emissions | Ranks on leaderboard | Live in v1 |
 |------|------|-------------|-----------------|----------------------|-------------|
-| **B, BYO** | `ssh-probe` | Cathedral SSHs into the miner-declared host and invokes Hermes during the eval window; trace bundle captured | yes | yes | yes |
-| **A, Polaris-hosted** | `polaris`, `polaris-deploy` | Polaris Ed25519 attestation; Cathedral re-derives task and output hashes | yes (when gate is on) | yes (when gate is on) | no, gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true` |
-| **B+, self-TEE** | `tee` | AWS Nitro / Intel TDX / AMD SEV-SNP attestation; runtime measurement matched against approved-runtime registry | yes | yes | spec-only; Nitro verifier wired, no live TEE miners |
+| **BYO Box** | `ssh-probe` | Cathedral SSHs into the miner-declared host and invokes Hermes during the eval window; trace bundle captured | yes | yes | yes |
+| **self-TEE** | `tee` | AWS Nitro / Intel TDX / AMD SEV-SNP attestation; runtime measurement matched against approved-runtime registry | yes | yes | spec-only; Nitro verifier wired, no live TEE miners |
 | **discovery** | `unverified` | nothing | no | no (discovery surface only) | yes |
 
 The submit endpoint takes `attestation_mode` as a form field. `unverified` submissions are stored encrypted, get a `status='discovery'` row, never enter the eval queue, and never appear on the leaderboard. They show up on the discovery surface so research material is not lost.
 
-Full attestation contract: [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_CONTRACT.md).
+Hardware-attestation contract: [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_CONTRACT.md).
 
 ## Status
 
@@ -139,13 +135,11 @@ Verified live, 2026-05-13:
 - Five job definitions seeded, eval-specs served at `/v1/cards/{card_id}/eval-spec`.
 - End-to-end ssh-probe pipeline: submit -> encrypt to R2 -> SSH into miner host -> snapshot `~/.hermes/` -> `hermes chat -q "<task>"` -> capture trace -> score -> sign -> publish.
 - SN39 mainnet validators: pull loop verifying signed `EvalRun` projections every 30s, weight loop calling `subtensor.set_weights` every 1500s with a 98% burn floor to `burn_uid=204` (subnet owner). Cathedral consensus on mainnet is still pinned by the burn-majority subset, which is a separate operator concern from "weights are being set."
-- Cathedral runtime image: `ghcr.io/cathedralai/cathedral-runtime:v1.0.7` with probe-mode endpoints (`/probe/run`, `/probe/health`, `/probe/reload`) retained for the gated Tier A path.
 - Publisher: Railway, auto-deploy on push to `main`. TLS via Cloudflare.
 - Provisioning: `scripts/provision_validator.sh` and `scripts/provision_miner.sh` stand up a validator or miner-probe from scratch on Ubuntu 22.04+; PM2 supervises both apps with systemd boot persistence; `bin/updater.sh` watches for signed git tags and reloads on release.
 
 Wired in code, not yet running by default:
 
-- Tier A pipeline (`PolarisRuntimeRunner` / `PolarisDeployRunner` + 1.10x verified-runtime multiplier). Implementation present; rejected at the submit boundary unless `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`. See [cathedralai/cathedral#70](https://github.com/cathedralai/cathedral/issues/70).
 - On-chain Merkle anchoring (weekly `system.remarkWithEvent`). Merkle code path exists in `cathedral.publisher.merkle` and `cathedral.chain.anchor`; not running on a schedule yet.
 
 Not yet built:
@@ -162,7 +156,7 @@ cathedral/
 │   ├── v1_types.py         # publisher-side types (AgentSubmission, EvalRun, EvalTask, Merkle)
 │   ├── config.py           # ValidatorSettings, MinerSettings
 │   ├── auth/               # sr25519 hotkey signature verification
-│   ├── attestation/        # Tier B+ verifiers (Nitro live, TDX + SEV-SNP stubs)
+│   ├── attestation/        # self-TEE verifiers (Nitro live, TDX + SEV-SNP stubs)
 │   ├── cards/              # registry, preflight, six-dimension score
 │   ├── chain/              # Bittensor metagraph + weight setting + Merkle anchor
 │   ├── evidence/           # Polaris evidence fetch + Ed25519 verify (legacy /v1/claim path)
@@ -172,7 +166,7 @@ cathedral/
 │   ├── validator/          # sqlite queue, worker, pull loop, weight loop, watchdog, health
 │   ├── miner/              # claim submission client (legacy path)
 │   └── cli/                # `cathedral`, `cathedral-validator`, `cathedral-miner`, `cathedral-publisher`
-├── docker/cathedral-runtime/   # Tier A runtime image, gated (built and pushed by GH Actions)
+├── docker/cathedral-runtime/   # Runtime image experiments (built and pushed by GH Actions)
 ├── docs/                       # Architecture, attestation contract, validator runbook
 ├── config/                     # TOML defaults for mainnet, testnet, miner
 ├── scripts/                    # Systemd unit, install, dev helpers, stub Polaris
@@ -254,16 +248,15 @@ You can confirm a validator is running v1.1.0 by querying `https://api.taostats.
 
 - [docs/VALIDATOR.md](docs/VALIDATOR.md): mechanism, anti-cheating, requirements, known limits, eval verification walkthrough
 - [docs/validator/RUNBOOK.md](docs/validator/RUNBOOK.md): operational runbook for the validator binary
-- [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md): miner walkthrough — both tiers
+- [docs/miner/QUICKSTART.md](docs/miner/QUICKSTART.md): miner walkthrough for the live BYO Box path
 - [docs/miner/QUICKSTART_LEGACY_V1_CLAIM.md](docs/miner/QUICKSTART_LEGACY_V1_CLAIM.md): legacy `/v1/claim` CLI walkthrough (retained for operators still on that path)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): validator binary internals (loops, modules, sqlite schema)
-- [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_CONTRACT.md): full v1 attestation contract (Tier A + Tier B+ wire formats)
+- [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_CONTRACT.md): hardware-attestation and discovery wire formats
 - [docs/protocol/CLAIM.md](docs/protocol/CLAIM.md): legacy `/v1/claim` wire format
-- [docs/protocol/SCORING.md](docs/protocol/SCORING.md): six-dimension scorer + preflight + verified-runtime multiplier
+- [docs/protocol/SCORING.md](docs/protocol/SCORING.md): six-dimension scorer, preflight, and v1 multipliers
 
 ## Future enhancements
 
-- Paid Tier A re-launch (Polaris-deployed runtime + 1.10x verified-runtime multiplier) once shared Verda balance + isolation are ready; tracked at [cathedralai/cathedral#70](https://github.com/cathedralai/cathedral/issues/70).
 - On-chain weekly Merkle anchoring of `EvalRun` projections.
 - TDX and SEV-SNP TEE verifiers wired (live miners attest with hardware roots, not Polaris).
 - Per-domain rubric profiles (legal vs. finance vs. science).

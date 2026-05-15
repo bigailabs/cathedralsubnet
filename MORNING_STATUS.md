@@ -57,7 +57,7 @@ miner ─sign+POST─▶ cathedral publisher (Railway)
                             └─ Scoring pipeline:
                                   preflight → score_card →
                                   first_mover_delta →
-                                  1.10x verified multiplier →
+                                  live v1 multiplier →
                                   persist eval_run + sign
 ```
 

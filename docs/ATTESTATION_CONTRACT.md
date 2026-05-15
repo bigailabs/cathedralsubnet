@@ -2,10 +2,10 @@
 
 Status: v1 draft, 2026-05-10.
 Scope: defines how miners prove that the agent named in a Cathedral submission produced the output card the submission carries.
-Audience: Cathedral validator implementers, Polaris attestation service, miners building B+ (self-TEE) compute paths, downstream auditors.
+Audience: Cathedral validator implementers, miners building self-TEE compute paths, downstream auditors.
 Companion documents: `cathedral-redesign/CONTRACTS.md` (data contracts), `docs/protocol/CLAIM.md` (legacy `/v1/claim`), `docs/protocol/SCORING.md` (card scoring).
 
-> **v1 live-path note.** The live path in v1 is `attestation_mode='ssh-probe'` (BYO-compute; Cathedral SSHs into the miner-declared host and invokes `hermes chat -q "<task>"`). Tier A (`polaris`, `polaris-deploy`) and Tier B+ (`tee`) are accepted at the submit boundary only when explicitly enabled: Tier A behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`, Tier B+ once vendor verifiers are wired live. This contract remains the normative spec for both gated paths; when the gates are flipped on, the validator and publisher behave exactly as described here.
+> **v1 live-path note.** The live path in v1 is `attestation_mode='ssh-probe'` (BYO Box; Cathedral SSHs into the miner-declared host and invokes `hermes chat -q "<task>"`). Future cryptographic-attestation paths are specified below for implementers, but they are not part of the live miner/operator path.
 
 > This spec is the layer that decides which submissions earn TAO emissions and rank on the leaderboard, and which submissions live only on the discovery surface. It does not define how cards are scored. It does not define on-chain weight setting. It defines the *trust statement* that gates entry to those flows.
 
@@ -17,7 +17,7 @@ Companion documents: `cathedral-redesign/CONTRACTS.md` (data contracts), `docs/p
 
 Cathedral is a regulatory-intelligence subnet. Miners submit Hermes-compatible bundles that consume a card task, produce a card JSON, and ship the resulting artifact to the Cathedral publisher. The publisher must answer one question before that submission can earn emissions or rank on the leaderboard: *did the bundle named in this submission actually produce this output?*
 
-There are three operationally distinct ways to answer that question, each with a different trust root, and this document specifies the wire format, verification procedure, and threat model for each. The three paths are not interchangeable. A submission verified by Polaris is not "as good as" a submission verified by AWS Nitro; they protect against different failure modes and ride different revocation calendars. The validator must track which path each submission used and which root of trust applied.
+There are operationally distinct ways to answer that question, each with a different trust root, and this document specifies the wire format, verification procedure, and threat model for the paths that are documented for v1. The paths are not interchangeable. A submission verified behaviorally by ssh-probe is not the same as a submission verified by AWS Nitro; they protect against different failure modes and ride different revocation calendars. The validator must track which path each submission used and which root of trust applied.
 
 The document is written as an RFC. It is normative for any validator that emits Cathedral weights and for any miner that wants their submission to count for emissions. The HTTP endpoint behavior in Section 8 is enforced by the publisher; everything else is enforced by the validator's worker loop and the leaderboard publisher.
 
@@ -30,7 +30,6 @@ This document does NOT cover:
 - On-chain weight setting or Merkle anchoring. See `CONTRACTS.md` §4.5 and §4.6.
 - zkML or SNARK-based proof of inference. Noted in Section 11 as v2 future work.
 - Cross-tier challenge governance (one miner disputing another's verified tier). Noted in Section 11.
-- Polaris's internal signing infrastructure. Treated as an external dependency; this document references the Polaris-side spec where relevant.
 
 ### 1.3 What "attestation" means here
 
@@ -45,39 +44,38 @@ A signature alone over the output is not an attestation. A bundle hash alone is 
 
 ---
 
-## 2. Three tiers overview
+## 2. Verification overview
 
-> **Terminology note for v1.** This contract uses the word "attestation" narrowly, for cryptographic attestation documents (Polaris Ed25519, AWS Nitro / Intel TDX / AMD SEV-SNP). The v1 live path, `ssh-probe`, is a separate mechanism: behavioral verification by Cathedral SSHing into the miner-declared host and invoking Hermes itself during the eval window. Wherever this document says "attestation," it means the cryptographic kind. Wherever it says "ssh-probe" or "behavioral verification," it means the live v1 path. Both produce leaderboard-eligible, emissions-earning submissions; only the verification mechanism differs.
+> **Terminology note for v1.** This contract uses the word "attestation" narrowly, for cryptographic attestation documents (AWS Nitro / Intel TDX / AMD SEV-SNP). The v1 live path, `ssh-probe`, is a separate mechanism: behavioral verification by Cathedral SSHing into the miner-declared host and invoking Hermes itself during the eval window. Wherever this document says "attestation," it means the cryptographic kind. Wherever it says "ssh-probe" or "behavioral verification," it means the live v1 path. Both produce leaderboard-eligible, emissions-earning submissions; only the verification mechanism differs.
 
-| Tier | How verified | Earns TAO emissions? | Leaderboard rank? | Discovery surface? | Live in v1? |
+| Path | How verified | Earns TAO emissions? | Leaderboard rank? | Discovery surface? | Live in v1? |
 |------|--------------|----------------------|-------------------|--------------------|-------------|
-| **B, BYO (ssh-probe)** | Behavioral verification (Cathedral SSHs in and invokes Hermes during the eval window; trace bundle captured) | Yes | Yes | Yes | Yes; this is the live v1 path |
-| **A: Polaris-hosted** | Cryptographic attestation (Polaris Ed25519 over output_hash, task_hash) | Yes (when gate is on) | Yes (when gate is on) | Yes | No; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true` |
-| **B+: Self-TEE** | Cryptographic attestation (hardware: AWS Nitro / Intel TDX / AMD SEV-SNP) | Yes | Yes | Yes | No; Nitro verifier wired, no live TEE miners |
+| **BYO Box (ssh-probe)** | Behavioral verification (Cathedral SSHs in and invokes Hermes during the eval window; trace bundle captured) | Yes | Yes | Yes | Yes; this is the live v1 path |
+| **self-TEE** | Cryptographic attestation (hardware: AWS Nitro / Intel TDX / AMD SEV-SNP) | Yes | Yes | Yes | No; Nitro verifier wired, no live TEE miners |
 | **Unverified (discovery)** | Nothing | NO | NO | Yes (browsable + purchasable, never ranked) | Yes |
 
-> "Tier A is the verified emissions path" was true in the original v1 plan; v1 as shipped runs the ssh-probe path live, with behavioral verification as the trust mechanism, and keeps Tier A as the gated cryptographic-attestation spec below. The structural verification mechanics (envelope, signing, cross-reference, runtime registry) below are still the normative contract for Tier A; they are simply not the path miners are submitting through in v1. ssh-probe submissions never produce a Tier A or Tier B+ attestation, and they are not required to.
+ssh-probe submissions do not produce a cryptographic attestation, and they are not required to. Cathedral verifies them behaviorally by invoking Hermes itself during the eval window.
 
 ### 2.1 Verified vs discovery: the surface split
 
 The leaderboard is verified-only, but "verified" in v1 covers two distinct mechanisms:
 
 - **Behavioral verification** via `ssh-probe`: Cathedral SSHs into the miner-declared host and invokes Hermes itself during the eval window. The runner captures the trace bundle and treats the produced card as the agent's output. ssh-probe submissions earn TAO emissions and rank on the leaderboard. This is the live v1 path; it does not produce a cryptographic attestation (`polaris_attestation` is `None`).
-- **Cryptographic attestation** via Tier A (`polaris`, `polaris-deploy`) or Tier B+ (`tee`): a signed structured statement that validates under the rules in Sections 4 and 5. Both are gated off in v1 (Tier A behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; Tier B+ until vendor verifiers are wired live). When enabled, attestations are required for that submission to enter the eval queue at the gated mode and receive a weight.
+- **Cryptographic attestation** via future or spec-only modes: a signed structured statement that validates under the rules below. Those paths are not the live miner/operator path in v1.
 
 Unverified (`unverified`) submissions never enter the eval queue, never rank on the leaderboard, and never earn TAO emissions. They are persisted with `status='discovery'`, encrypted at rest like every other bundle, and surfaced on the discovery / research marketplace, which is a separate product. The discovery surface is browsable, search-indexed, and the bundles can be purchased per-card or per-bundle, but they are never ranked against verified submissions.
 
-This is a deliberate product split, not a soft filter. The publisher persists every submission with an `attestation_mode` (`ssh-probe`, `polaris`, `polaris-deploy`, `tee`, `unverified`) and the leaderboard / weight-loop pipeline filters out `unverified` via the standard repository filters that include `ssh-probe`. The discovery API reads the full table. The historical text below describing a strict `attestation_tier IN ('A', 'B+')` filter at the weight loop is retained only as the spec for the cryptographic-attestation path; the current weight loop reads from `pulled_eval_runs`, which is populated from the publisher's signed `EvalRun` projections regardless of whether the underlying submission was ssh-probe, Tier A, or Tier B+, and excludes `unverified` because those rows never produce an `EvalRun`.
+This is a deliberate product split, not a soft filter. The publisher persists every submission with an `attestation_mode` (`ssh-probe`, `tee`, `unverified`, plus historical modes retained in the schema) and the leaderboard / weight-loop pipeline filters out `unverified` via the standard repository filters that include `ssh-probe`. The discovery API reads the full table. The current weight loop reads from `pulled_eval_runs`, which is populated from the publisher's signed `EvalRun` projections and excludes `unverified` because those rows never produce an `EvalRun`.
 
-### 2.2 Why three tiers and not two
+### 2.2 Why keep discovery separate
 
-The honest reason for three tiers is that the eligible Cathedral mining population is broader than either "trusts Polaris" or "owns a TEE-capable bare-metal host." Tier A is the easy on-ramp for miners who run Hermes inside Polaris's managed environment. Tier B+ is for miners who want sovereignty over their compute but can produce hardware attestations. Tier B exists because *some* of the most valuable regulatory intelligence will come from researchers and analysts who do not run agents at all; they assemble cards by hand or with home-grown tooling, and the only useful product surface for them is discovery.
+The eligible Cathedral mining population is broader than live agents alone. Some useful regulatory intelligence will come from researchers and analysts who do not run agents at all; they assemble cards by hand or with home-grown tooling, and the useful product surface for them is discovery.
 
-Collapsing Tier B into "rejected" would lose this material. Collapsing Tier B+ into Tier A would force everyone through Polaris, which is a single point of failure and a business hostage. The split is durable. It is encoded in the database, the API, the validator weight loop, and the on-chain anchor.
+Collapsing discovery into "rejected" would lose this material. The split is durable. It is encoded in the database, the API, the validator weight loop, and the on-chain anchor.
 
 ### 2.3 Tier promotion and demotion
 
-A submission's `attestation_tier` is fixed at submission time. There is no in-place promotion (e.g. a Tier B miner cannot later "upgrade" the same submission to Tier A by attaching a Polaris attestation after the fact). To change tiers, the miner re-submits the bundle through the appropriate endpoint and receives a new submission id. The original submission remains on the discovery surface unless the miner explicitly retires it.
+A submission's verification path is fixed at submission time. There is no in-place promotion from discovery to a verified path. To change paths, the miner re-submits the bundle through the appropriate endpoint and receives a new submission id. The original submission remains on the discovery surface unless the miner explicitly retires it.
 
 This rule is non-negotiable. Allowing post-hoc tier promotion would require the publisher to recompute the first-mover anchor (CONTRACTS.md §7.2), the Merkle root (§4.5), and the leaderboard ranks across epochs that have already been published and anchored on-chain. The cost is not worth the convenience.
 
@@ -89,7 +87,7 @@ Every attestation, regardless of tier, MUST carry the seven core fields below. T
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `attestation_version` | string | Per-tier version tag (e.g. `polaris-v1`, `nitro-v1`, `tdx-v1`, `sevsnp-v1`). |
+| `attestation_version` | string | Per-attestation version tag (e.g. `nitro-v1`, `tdx-v1`, `sevsnp-v1`). |
 | `bundle_hash` | string | BLAKE3 lowercase hex (64 chars) of the plaintext bundle zip bytes. |
 | `card_id` | string | The Cathedral `card_definitions.id` the bundle was run against. |
 | `miner_hotkey` | string | Bittensor sr25519 ss58 address. Must equal the `X-Cathedral-Hotkey` header on submission. |
@@ -116,17 +114,16 @@ The envelope is wrapped in a tier-specific outer structure (see Sections 4 and 5
                                                         v
                               +-------------------------------------------+
                               | dispatch on attestation_version:          |
-                              |   polaris-v1  -> Section 4                |
-                              |   nitro-v1    -> Section 5.1              |
-                              |   tdx-v1      -> Section 5.2              |
-                              |   sevsnp-v1   -> Section 5.3              |
+                              |   nitro-v1    -> Section 4.1              |
+                              |   tdx-v1      -> Section 4.2              |
+                              |   sevsnp-v1   -> Section 4.3              |
                               | anything else -> 422 unsupported_version  |
                               +-------------------------+-----------------+
                                                         |
                                                         v
                               +-------------------------------------------+
-                              | tier-specific signature + measurement     |
-                              | check; on pass -> attestation_tier        |
+                              | path-specific signature + measurement     |
+                              | check; on pass -> verified self-TEE path  |
                               | set; on fail -> 422 with reason           |
                               +-------------------------------------------+
 ```
@@ -137,88 +134,19 @@ Note that the publisher does NOT trust the field values inside the attestation e
 
 ### 3.1 Submission carriage
 
-Cryptographic Tier A and Tier B+ submissions go to `POST /v1/agents/submit` (CONTRACTS.md §2.1) and attach an additional multipart form field `attestation` containing the attestation JSON as a UTF-8 string. The form field is required only when `attestation_mode` selects a cryptographic verifier (`polaris`, `polaris-deploy`, or `tee`). The v1 live `ssh-probe` mode does not attach this field; it is verified behaviorally from `ssh_host`, `ssh_port`, and `ssh_user`, enters the eval queue, and earns emissions. `attestation_mode='unverified'` is the discovery-only path and also does not attach this field. For backward compatibility, omitting `attestation_mode` defaults to `ssh-probe`, not discovery.
+Cryptographic self-TEE submissions go to `POST /v1/agents/submit` (CONTRACTS.md §2.1) and attach an additional multipart form field `attestation` containing the attestation JSON as a UTF-8 string. The form field is required only when `attestation_mode` selects a cryptographic verifier (`tee`). The v1 live `ssh-probe` mode does not attach this field; it is verified behaviorally from `ssh_host`, `ssh_port`, and `ssh_user`, enters the eval queue, and earns emissions. `attestation_mode='unverified'` is the discovery-only path and also does not attach this field. For backward compatibility, omitting `attestation_mode` defaults to `ssh-probe`, not discovery.
 
-The existing `X-Cathedral-Signature` header continues to carry the miner's sr25519 hotkey signature over the canonical submission payload (CONTRACTS.md §4.1). For cryptographic modes, the attestation is a *separate* signed object, signed by a different party (Polaris or a hardware vendor), and bound to the miner's hotkey through the `miner_hotkey` field inside the envelope. Both signatures must verify before the submission can enter that cryptographic tier.
-
----
-
-## 4. Tier A: Polaris attestation
-
-### 4.1 Format
-
-Polaris runs the miner-supplied Hermes bundle on Polaris compute. After the run terminates, Polaris's attestation service produces the following structure and returns it to the miner alongside the produced card JSON:
-
-```json
-{
-  "version": "polaris-v1",
-  "payload": {
-    "submission_id": "sub_01JABCDXYZ...",
-    "task_id": "task_eu-ai-act_2026w19",
-    "task_hash": "<blake3 lowercase hex of task bytes>",
-    "output_hash": "<blake3 lowercase hex of output bytes>",
-    "deployment_id": "dep_01H7XJ2K8N3Y0M6S9P4QV",
-    "completed_at": "2026-05-10T18:00:00.123Z"
-  },
-  "signature": "<base64 Ed25519 over canonical_json(payload)>",
-  "public_key": "<hex Ed25519, 64 chars>"
-}
-```
-
-The Polaris attestation is signed using the same canonicalization rules as the rest of the Polaris-Cathedral signing contract (CONTRACTS.md §4.3): `json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)`, no whitespace, UTF-8 bytes. The `signature` field is dropped before signing. Polaris's signing key is the same Ed25519 key already in production for manifest/run/artifact records (`POLARIS_CATHEDRAL_SIGNING_KEY`), published at `GET /.well-known/polaris/cathedral-jwks.json`.
-
-### 4.2 Cathedral-side envelope mapping
-
-The publisher transforms the Polaris-native structure above into the common envelope from Section 3 by adding three Cathedral-side fields and persisting both. The mapping is:
-
-| Common envelope | Source |
-|-----------------|--------|
-| `attestation_version` | `"polaris-v1"` (literal) |
-| `bundle_hash` | Server-computed from uploaded zip bytes; must match what Polaris ran. |
-| `card_id` | Form field on the submission; must match Polaris `task_id` after Cathedral's task-id-to-card-id mapping (see 4.4). |
-| `miner_hotkey` | `X-Cathedral-Hotkey`; bound to the Polaris `submission_id` via the marketplace record. |
-| `output_hash` | From `payload.output_hash`; server recomputes from the produced card and requires byte-equality. |
-| `task_hash` | From `payload.task_hash`; server recomputes from current `card_definitions[card_id].task_spec` and requires equality. |
-| `timestamp` | From `payload.completed_at`. |
-
-The Polaris-native fields (`submission_id`, `deployment_id`) are preserved in the persisted attestation record but are not part of the common envelope.
-
-### 4.3 Verification steps
-
-The publisher performs the following steps, in order, and short-circuits on the first failure:
-
-1. **Shape check.** Parse the attestation as JSON. Require keys `version`, `payload`, `signature`, `public_key`. Require `version == "polaris-v1"`. Require `payload` to be a JSON object containing the six fields above. Anything else → 422 `attestation_shape`.
-2. **Public-key pinning.** Compare `public_key` to the configured Polaris attestation key (`POLARIS_ATTESTATION_PUBLIC_KEY` env var, hex Ed25519, 64 chars). If they differ AND the supplied key is not in the historical key list (see 4.5), reject. → 422 `attestation_unknown_signer`.
-3. **Signature verification.** Build `canonical_json(payload)` per the rule above. Verify the base64-decoded `signature` against the pinned (or historically valid) Polaris public key. → 422 `attestation_signature_invalid` on failure.
-4. **Envelope binding.** Compare `payload.task_hash`, `payload.output_hash`, `payload.completed_at` against server-computed values. The output_hash check is the load-bearing one: the publisher computes BLAKE3 of the canonical-JSON serialization of the output card and requires byte-equality. → 422 `attestation_binding_mismatch` (with field name) on failure.
-5. **Polaris cross-reference.** Look up `payload.submission_id` against Polaris's marketplace record. The miner's claimed hotkey MUST equal the marketplace record's `worker_hotkey`. The deployment id must match. → 422 `attestation_marketplace_mismatch` on failure. (In v1, this step uses the existing Polaris contract endpoints; see CONTRACTS.md §2.13.)
-6. **Freshness.** Reject if `payload.completed_at` is more than 48 hours older than server clock, or more than 5 minutes in the future. → 422 `attestation_stale` or `attestation_future`.
-
-On all six steps passing: persist the attestation, set `attestation_tier = 'A'`, proceed to similarity check and bundle storage as normal.
-
-### 4.4 Task-id-to-card-id mapping
-
-Polaris speaks `task_id`; Cathedral speaks `card_id`. The mapping is one-to-one and lives in `card_definitions.polaris_task_id` (added to the schema as part of this contract). The publisher resolves the Polaris `task_id` to a Cathedral `card_id` and requires the submission's form field `card_id` to match. If the Polaris task is unknown to Cathedral, the submission is downgraded to Tier B with reason `attestation_unknown_task`; the bundle and card are still preserved on the discovery surface.
-
-### 4.5 Polaris key rotation
-
-The pinned `POLARIS_ATTESTATION_PUBLIC_KEY` is the *currently active* Polaris attestation signing key. To support rotation without downtime, the validator also reads `POLARIS_ATTESTATION_PUBLIC_KEYS_HISTORICAL` (comma-separated hex keys, optional) and accepts signatures from any key on the combined list. Rotation procedure:
-
-1. Polaris generates a new key, publishes it at the JWKS endpoint, and notifies Cathedral operators (out of band).
-2. Cathedral operators append the new key to `POLARIS_ATTESTATION_PUBLIC_KEYS_HISTORICAL`, keep the old key in `POLARIS_ATTESTATION_PUBLIC_KEY` for one publication epoch (one week), then promote the new key to `POLARIS_ATTESTATION_PUBLIC_KEY` and move the old key into the historical list.
-3. The old key remains in the historical list for at least 90 days to allow late-arriving submissions referencing recent runs to verify.
-
-The historical list is bounded at five keys. Older keys are removed by operations, not by code. There is no on-chain key registry in v1; the env var is the source of truth. v2 will move this to a JWKS endpoint that the validator pulls on a heartbeat.
+The existing `X-Cathedral-Signature` header continues to carry the miner's sr25519 hotkey signature over the canonical submission payload (CONTRACTS.md §4.1). For cryptographic modes, the attestation is a *separate* signed object, signed by a hardware vendor, and bound to the miner's hotkey through the `miner_hotkey` field inside the envelope. Both signatures must verify before the submission can enter that cryptographic path.
 
 ---
 
-## 5. Tier B+: TEE attestations
+## 4. self-TEE attestations
 
-Tier B+ accepts hardware-vendor attestations from three platforms. The structural pattern is the same in all three cases: the vendor's attestation document contains (a) a measurement of the runtime image, (b) a vendor signature chain back to the vendor's published root certificate, and (c) a "user data" or "report data" field into which the runtime binds a hash of the workload-specific data (here: the common envelope from Section 3). Cathedral verifies the signature chain, checks the measurement against the approved runtime registry (Section 6), and confirms the user-data binding.
+self-TEE accepts hardware-vendor attestations from three platforms. The structural pattern is the same in all three cases: the vendor's attestation document contains (a) a measurement of the runtime image, (b) a vendor signature chain back to the vendor's published root certificate, and (c) a "user data" or "report data" field into which the runtime binds a hash of the workload-specific data (here: the common envelope from Section 3). Cathedral verifies the signature chain, checks the measurement against the approved runtime registry (Section 6), and confirms the user-data binding.
 
 The three subsections below state what Cathedral validates. They do NOT restate the full attestation document format; that is documented by the vendors. Implementers MUST read the vendor docs cited in each subsection.
 
-### 5.1 AWS Nitro Enclaves
+### 4.1 AWS Nitro Enclaves
 
 **Wire format reference:** AWS Nitro Enclaves Attestation Document spec ([https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html](https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html)). CBOR-serialized COSE_Sign1 document. The miner submits the base64-encoded attestation document as the `attestation` form field. Cathedral wraps it in a thin Cathedral-side envelope:
 
@@ -249,9 +177,9 @@ The `envelope` field contains the seven common-envelope fields from Section 3. T
 5. Confirm `timestamp` from the attestation document (the enclave's wall-clock value) is within 48 hours of server clock and within 5 minutes of the future.
 6. Confirm `nonce` from the attestation document equals the nonce Cathedral previously issued to this miner via `GET /v1/attestation/nonce` (see Section 8.4). Nonces are single-use and expire after 1 hour.
 
-On all six steps passing: persist the attestation, set `attestation_tier = 'B+'`.
+On all six steps passing: persist the attestation and mark the submission as verified under the self-TEE path.
 
-### 5.2 Intel TDX
+### 4.2 Intel TDX
 
 **Wire format reference:** Intel TDX Quote ([https://download.01.org/intel-sgx/latest/dcap-latest/linux/docs/Intel\_TDX\_DCAP\_Quoting\_Library\_API.pdf](https://download.01.org/intel-sgx/latest/dcap-latest/linux/docs/Intel_TDX_DCAP_Quoting_Library_API.pdf)). A TDX quote is a binary blob signed by an Intel-issued attestation key whose certificate chain terminates at Intel's Provisioning Certification Service (PCS) root. Cathedral envelope:
 
@@ -278,9 +206,9 @@ On all six steps passing: persist the attestation, set `attestation_tier = 'B+'`
 6. Confirm the nonce in bytes 32 through 63 of `report_data` matches a previously issued, unexpired nonce.
 7. Confirm the quote's signing time (`tcb_date` from collateral) is within 48 hours of server clock, future-skew 5 minutes.
 
-On all seven steps passing: `attestation_tier = 'B+'`.
+On all seven steps passing: persist the attestation and mark the submission as verified under the self-TEE path.
 
-### 5.3 AMD SEV-SNP
+### 4.3 AMD SEV-SNP
 
 **Wire format reference:** AMD SEV-SNP Attestation Report spec ([https://www.amd.com/system/files/TechDocs/56860.pdf](https://www.amd.com/system/files/TechDocs/56860.pdf), Appendix A). A 1184-byte binary report signed by the VCEK (Versioned Chip Endorsement Key). The VCEK certificate chain terminates at AMD's SEV-SNP root (the ARK/ASK certificates). Cathedral envelope:
 
@@ -303,9 +231,9 @@ On all seven steps passing: `attestation_tier = 'B+'`.
 6. Confirm `tcb_version.snp_fw` and `tcb_version.microcode` meet the platform minimums in `AMD_SEVSNP_MIN_TCB`.
 7. Confirm the report is fresh per the issued-nonce check (Section 8.4).
 
-On all seven steps passing: `attestation_tier = 'B+'`.
+On all seven steps passing: persist the attestation and mark the submission as verified under the self-TEE path.
 
-### 5.4 Common TEE concerns
+### 4.4 Common TEE concerns
 
 All three subsections share three properties that Cathedral relies on:
 
@@ -313,7 +241,7 @@ All three subsections share three properties that Cathedral relies on:
 - **Measurement match against the registry.** A signed attestation document from AWS Nitro is not sufficient on its own; it only proves an enclave ran. The PCR0 / MRTD / measurement field must match an entry in Cathedral's approved runtime image hash list (Section 6) or the attestation is rejected. This is what makes the TEE attest specifically to "running an approved Hermes runtime" and not "running anything I want."
 - **Freshness via issued nonce + timestamp.** Replay protection requires both. The nonce closes replay of an older valid attestation; the timestamp closes the case where a valid nonce was issued but the report was generated outside the freshness window for some other reason (clock skew, slow CI, etc.).
 
-The publisher MAY accept any one of the three TEE platforms; it MUST NOT accept attestations from unknown TEE platforms in v1. A `version` value outside the set `{nitro-v1, tdx-v1, sevsnp-v1, polaris-v1}` → 422 `attestation_unsupported_platform`.
+The publisher MAY accept any one of the three TEE platforms; it MUST NOT accept attestations from unknown TEE platforms in v1. A `version` value outside the set `{nitro-v1, tdx-v1, sevsnp-v1}` -> 422 `attestation_unsupported_platform`.
 
 ---
 
@@ -321,7 +249,7 @@ The publisher MAY accept any one of the three TEE platforms; it MUST NOT accept 
 
 ### 6.1 Format and storage
 
-Cathedral maintains a list of approved Hermes container image hashes. Only attestations whose runtime measurement matches an entry on this list are accepted for Tier A or Tier B+.
+Cathedral maintains a list of approved Hermes container image hashes. Only attestations whose runtime measurement matches an entry on this list are accepted for self-TEE.
 
 The list lives as **a JSON file at `config/approved_runtimes.json` in this repo, version-controlled in git, loaded by the validator at startup, and reloadable on `SIGHUP`**. Shape:
 
@@ -443,7 +371,7 @@ The publisher MUST perform validation in this exact order. The order matters bec
 8. **Verification mode handling** (NEW, this spec):
    - If `attestation_mode` is absent or equals `ssh-probe`: require `ssh_host` and `ssh_user`, default `ssh_port` to 22, and continue as the live behavioral-verification path. The `attestation` form field may be absent.
    - If `attestation_mode='unverified'`: mark the submission as discovery-only; it skips eval, leaderboard, emissions, and the similarity gate below.
-   - If `attestation_mode` selects a cryptographic verifier (`polaris`, `polaris-deploy`, or `tee`): parse `attestation`, dispatch on `version`, run tier-specific verification (Section 4 or 5). On failure: respond with HTTP 422 + the specific error code listed below. The bundle is NOT stored. The miner can retry with a corrected attestation or explicitly choose `attestation_mode='unverified'` to land on the discovery surface.
+   - If `attestation_mode='tee'`: parse `attestation`, dispatch on `version`, run self-TEE verification (Section 4). On failure: respond with HTTP 422 + the specific error code listed below. The bundle is NOT stored. The miner can retry with a corrected attestation or explicitly choose `attestation_mode='unverified'` to land on the discovery surface.
 9. Similarity check (CONTRACTS.md §7.1), skipped for `unverified`.
 10. Bundle encryption + Hippius upload.
 11. INSERT into `agent_submissions` with the resolved `attestation_tier`.
@@ -458,19 +386,16 @@ The publisher MUST perform validation in this exact order. The order matters bec
 | 404 | `card_not_found` / `card_not_active` | Card unknown or retired. |
 | 413 | `bundle_too_large` | Bundle > 10 MiB. |
 | 422 | `attestation_shape` | Attestation JSON malformed or required keys missing. |
-| 422 | `attestation_unsupported_version` | `version` not in `{polaris-v1, nitro-v1, tdx-v1, sevsnp-v1}`. |
+| 422 | `attestation_unsupported_version` | `version` not in `{nitro-v1, tdx-v1, sevsnp-v1}`. |
 | 422 | `attestation_unsupported_platform` | TEE platform not enabled at this publisher. |
-| 422 | `attestation_unknown_signer` | Polaris key not in active or historical set. |
 | 422 | `attestation_signature_invalid` | Signature does not verify against the trust root. |
 | 422 | `attestation_binding_mismatch` | Server-computed envelope field does not match attestation envelope. Body carries the differing field name. |
-| 422 | `attestation_marketplace_mismatch` | Tier A: Polaris marketplace record does not corroborate the claim. |
 | 422 | `attestation_unknown_runtime` | Measurement does not match any entry in the approved runtime registry. |
 | 422 | `attestation_deprecated_runtime` | Measurement matches a runtime past its deprecation date. |
 | 422 | `attestation_removed_runtime` | Measurement matches a removed runtime. |
 | 422 | `attestation_stale` | `timestamp` > 48 hours older than server clock. |
 | 422 | `attestation_future` | `timestamp` > 5 minutes in the future. |
-| 422 | `attestation_nonce_invalid` | Tier B+: nonce unknown, already used, or expired. |
-| 422 | `attestation_unknown_task` | Tier A: Polaris `task_id` does not resolve to a Cathedral `card_id`. |
+| 422 | `attestation_nonce_invalid` | self-TEE nonce unknown, already used, or expired. |
 | 409 | `duplicate_submission` / `exact_bundle_duplicate` | Already-submitted bundle (CONTRACTS.md L7). |
 | 503 | `bundle_storage_unavailable` | Hippius unreachable. |
 
@@ -488,35 +413,17 @@ A submission can never be rejected merely for lacking a cryptographic attestatio
 }
 ```
 
-The nonce is generated from `secrets.token_bytes(32)` and persisted in `attestation_nonces (hotkey, nonce_hex, issued_at, expires_at, consumed_at)`. The publisher consumes the nonce on successful Tier B+ verification by setting `consumed_at`. Re-use of a consumed nonce → 422 `attestation_nonce_invalid`. Nonces older than 1 hour are rejected at consumption time.
+The nonce is generated from `secrets.token_bytes(32)` and persisted in `attestation_nonces (hotkey, nonce_hex, issued_at, expires_at, consumed_at)`. The publisher consumes the nonce on successful self-TEE verification by setting `consumed_at`. Re-use of a consumed nonce -> 422 `attestation_nonce_invalid`. Nonces older than 1 hour are rejected at consumption time.
 
-This endpoint is unauthenticated but rate-limited per IP (60/hour) and per hotkey (10/hour). Tier A submissions do NOT use this endpoint; Polaris attestations carry their own freshness signal via `payload.completed_at` plus the Polaris marketplace cross-reference.
+This endpoint is unauthenticated but rate-limited per IP (60/hour) and per hotkey (10/hour).
 
 ---
 
 ## 9. Threat model
 
-Each tier protects against a different set of attacks. The validator MUST treat the three tiers as carrying different residual risks even though they receive the same `verified=true` flag in the database. Forwarding "the leaderboard is verified" as a single unqualified claim is a category error.
+Each path protects against a different set of attacks. The validator MUST treat ssh-probe, self-TEE, and discovery as carrying different residual risks even when multiple paths are leaderboard-eligible. Forwarding "the leaderboard is verified" as a single unqualified claim is a category error.
 
-### 9.1 Tier A: Polaris-hosted
-
-**Trust assumption:** Polaris's operational integrity, including their key management, their attestation service correctness, and the integrity of their internal marketplace record.
-
-**Protected against:**
-
-- Miner forging an output card the bundle didn't actually produce. The output_hash is part of the Polaris signature; Polaris signs over what its own run actually emitted.
-- Miner attributing another miner's bundle to their hotkey. The marketplace cross-reference (4.3 step 5) binds the submission_id to the worker_hotkey.
-- Replay of an older Polaris attestation against a current submission. The bundle_hash + task_hash binding means the attestation cannot apply to a different bundle or a different task.
-
-**NOT protected against:**
-
-- Compromise of Polaris's signing key. If the `POLARIS_CATHEDRAL_SIGNING_KEY` is leaked, an attacker can mint arbitrary Tier A attestations until the key is rotated and the old key is removed from the historical list. Mitigation: short rotation cadence (90 days) and the historical-list bound (5 keys).
-- Collusion between a miner and a Polaris operator with key access. There is no in-band signal Cathedral can use to detect this. Mitigation: this is a known property of any single-trust-root system; Tier B+ exists partly to give miners and downstream consumers a non-Polaris path.
-- Polaris running a different bundle than the one the miner uploaded. The Polaris attestation signs the output_hash AND the task_hash but does NOT directly sign the bundle_hash in v1's polaris-v1 format (it signs `submission_id` which references the bundle internally on Polaris's side). This is a known v1 gap; the marketplace cross-reference partially closes it by tying submission_id to worker_hotkey, but a fully byte-bound bundle_hash would require an extension to polaris-v1. Tracked for v1.1.
-
-**Failure mode summary:** Polaris compromise or collusion. Acceptable for v1 because Polaris is Cathedral's biz partner and the failure is at least detectable (key rotation, cross-reference checks).
-
-### 9.2 Tier B+: Self-TEE
+### 9.1 self-TEE
 
 **Trust assumption:** The hardware vendor's certificate chain (AWS / Intel / AMD) is valid and the vendor is not maliciously issuing certificates to attackers; the TEE primitive's user-data binding works as specified; the approved runtime registry correctly enumerates valid Hermes builds.
 
@@ -536,7 +443,7 @@ Each tier protects against a different set of attacks. The validator MUST treat 
 
 **Failure mode summary:** Vendor cert chain compromise, side-channel attacks, or a sophisticated attacker with hardware-level access. Acceptable for v1 because these are public-knowledge TEE limits and the residual risk is shared with every cloud platform.
 
-### 9.3 Unverified (discovery)
+### 9.2 Unverified (discovery)
 
 This is `attestation_mode='unverified'`. It is the discovery / research-marketplace path and never earns emissions or ranks on the leaderboard. The v1 live earning path is ssh-probe (covered in §9.4 below); ssh-probe is not "unverified" and should not be conflated with this section.
 
@@ -553,7 +460,7 @@ This is `attestation_mode='unverified'`. It is the discovery / research-marketpl
 
 **Failure mode summary:** No trust assumption is made; the discovery surface treats `unverified` as research material. Buyers of unverified cards know they are buying unverified work.
 
-### 9.4 ssh-probe (the v1 live emissions path)
+### 9.3 ssh-probe (the v1 live emissions path)
 
 This is `attestation_mode='ssh-probe'` and is the live v1 path. It earns emissions and ranks on the leaderboard. The trust mechanism is behavioral, not cryptographic: Cathedral SSHs into the miner-declared host as the universal probe user, snapshots `~/.hermes/` into an isolated `cathedral-eval-<round>` profile, invokes `hermes chat -q "<task>"` against that profile, captures the trace bundle, and treats the produced Card JSON as the agent's output for the round. No Polaris attestation is produced (`polaris_attestation` is `None` for ssh-probe submissions).
 
@@ -566,15 +473,15 @@ This is `attestation_mode='ssh-probe'` and is the live v1 path. It earns emissio
 
 **NOT protected against:**
 
-- A miner who runs a heavily customised Hermes build that the runtime registry would not approve in Tier A or B+. Behavioral verification is mechanism-agnostic; it does not measure the runtime image.
+- A miner who runs a heavily customised Hermes build that the runtime registry would not approve for self-TEE. Behavioral verification is mechanism-agnostic; it does not measure the runtime image.
 - A miner who runs an approved Hermes build but feeds it deliberately misleading source material. Source-quality scoring (SCORING.md) catches that on the content axis, not the attestation axis.
 - A miner who proxies the SSH session to a different machine than they advertised. Detectable only via behavioral telemetry, not via attestation.
 
-**Failure mode summary:** No cryptographic claim about the runtime image; the trust comes from Cathedral being the invoker. This is the gap Tier A and Tier B+ close when their gates are flipped on. ssh-probe is sufficient for v1 because Cathedral mediates every eval directly.
+**Failure mode summary:** No cryptographic claim about the runtime image; the trust comes from Cathedral being the invoker. ssh-probe is sufficient for v1 because Cathedral mediates every eval directly.
 
-### 9.5 Cross-tier interactions
+### 9.4 Cross-path interactions
 
-The leaderboard MUST display the verification mechanism alongside the rank: ssh-probe (live v1 path, behavioral), Tier A (Polaris attestation, gated), or Tier B+ (hardware attestation, spec-only). An ssh-probe entry, a Tier A entry, and a Tier B+ entry each carry different residual risks, and downstream consumers (regulatory teams, journalists, researchers) need that information. The same is true for the first-mover anchor (CONTRACTS.md §7.2): an ssh-probe first mover is a different signal than a Tier A first mover. Cathedral's UI MUST surface this; the API MUST include the verification mechanism in every leaderboard and submission response.
+The leaderboard MUST display the verification mechanism alongside the rank: ssh-probe (live v1 path, behavioral) or self-TEE (hardware attestation, spec-only). Each mechanism carries different residual risks, and downstream consumers need that information. Cathedral's UI MUST surface this; the API MUST include the verification mechanism in every leaderboard and submission response.
 
 ---
 
@@ -604,58 +511,7 @@ def validate_envelope(env: dict, *, server_bundle_hash: str,
     _check_freshness(env["timestamp"])
 ```
 
-### 10.2 Tier A (Polaris)
-
-```python
-def verify_polaris_v1(attestation: dict, envelope: dict) -> None:
-    # Shape
-    if attestation.get("version") != "polaris-v1":
-        raise AttestationError("attestation_unsupported_version")
-    payload = attestation["payload"]
-    sig_b64 = attestation["signature"]
-    pubkey_hex = attestation["public_key"]
-
-    # Pinning
-    active = bytes.fromhex(os.environ["POLARIS_ATTESTATION_PUBLIC_KEY"])
-    historical = [bytes.fromhex(k) for k in
-                  os.environ.get("POLARIS_ATTESTATION_PUBLIC_KEYS_HISTORICAL", "").split(",") if k]
-    supplied = bytes.fromhex(pubkey_hex)
-    if supplied not in {active, *historical}:
-        raise AttestationError("attestation_unknown_signer")
-
-    # Signature
-    pk = Ed25519PublicKey.from_public_bytes(supplied)
-    blob = canonical_json(payload)
-    try:
-        pk.verify(base64.b64decode(sig_b64), blob)
-    except InvalidSignature:
-        raise AttestationError("attestation_signature_invalid")
-
-    # Envelope mapping → common envelope
-    common = {
-        "attestation_version": "polaris-v1",
-        "bundle_hash": envelope["bundle_hash"],     # server-trusted
-        "card_id": envelope["card_id"],
-        "miner_hotkey": envelope["miner_hotkey"],
-        "output_hash": payload["output_hash"],
-        "task_hash": payload["task_hash"],
-        "timestamp": payload["completed_at"],
-    }
-    validate_envelope(common, ...)
-
-    # Polaris marketplace cross-reference
-    record = polaris_client.get_submission(payload["submission_id"])
-    if record["worker_hotkey"] != envelope["miner_hotkey"]:
-        raise AttestationError("attestation_marketplace_mismatch")
-    if record["deployment_id"] != payload["deployment_id"]:
-        raise AttestationError("attestation_marketplace_mismatch")
-
-    # Task-id → card-id check
-    if polaris_task_to_card(payload["task_id"]) != envelope["card_id"]:
-        raise AttestationError("attestation_unknown_task")
-```
-
-### 10.3 Tier B+ (Nitro example)
+### 10.2 self-TEE (Nitro example)
 
 ```python
 def verify_nitro_v1(attestation: dict, envelope: dict) -> None:
@@ -699,7 +555,7 @@ def verify_nitro_v1(attestation: dict, envelope: dict) -> None:
     validate_envelope({**envelope, "attestation_version": "nitro-v1"}, ...)
 ```
 
-### 10.4 Pseudocode for TDX and SEV-SNP
+### 10.3 Pseudocode for TDX and SEV-SNP
 
 Follow the same skeleton as 10.3, substituting:
 
@@ -708,17 +564,7 @@ Follow the same skeleton as 10.3, substituting:
 
 The vendor SDK provides the parsing primitives in all three cases. Cathedral's verification code is a thin shim that wires the vendor SDK into the common envelope check.
 
-### 10.5 Example: Tier A polaris-v1 payload (illustrative)
-
-The bytes that get signed for a representative Polaris attestation:
-
-```
-{"completed_at":"2026-05-10T18:00:00.123Z","deployment_id":"dep_01H7XJ2K8N3Y0M6S9P4QV","output_hash":"3f0a2b4c8e1d6f5a9c3b2e1d4f7a8c9b6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b","submission_id":"sub_01JABCDXYZQRSTUVWXYZ","task_hash":"a9b8c7d6e5f4030201f0e9d8c7b6a5f4e3d2c1b0a9b8c7d6e5f4030201f0e9d8","task_id":"task_eu-ai-act_2026w19"}
-```
-
-(Single line, sorted keys, no whitespace, UTF-8.) The base64 Ed25519 signature over those bytes goes in the `signature` field of the outer attestation envelope. Both Polaris and Cathedral MUST produce identical bytes when they canonicalize the payload, or verification fails.
-
-### 10.6 Example: Common envelope (Tier B+ Nitro)
+### 10.4 Example: Common envelope (self-TEE Nitro)
 
 ```
 {"attestation_version":"nitro-v1","bundle_hash":"7c8d9e0f1a2b3c4d5e6f70819203a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5","card_id":"eu-ai-act","miner_hotkey":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","output_hash":"3f0a2b4c8e1d6f5a9c3b2e1d4f7a8c9b6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b","task_hash":"a9b8c7d6e5f4030201f0e9d8c7b6a5f4e3d2c1b0a9b8c7d6e5f4030201f0e9d8","timestamp":"2026-05-10T18:00:00.123Z"}
@@ -732,13 +578,13 @@ The bytes that get signed for a representative Polaris attestation:
 
 ### 11.1 zkML / SNARK attestation
 
-A future Tier B++ would accept zero-knowledge proofs of inference, allowing a miner to prove a card was produced by an approved model on inputs whose hash matches the task spec, without revealing the input or the model weights to Cathedral. Current state of the art (Halo2, EZKL, etc.) is roughly 1000 to 10000 times slower than native inference for models in the Hermes size class and would impose a card-production budget that doesn't match Cathedral's epoch cadence. Tracked for v2.
+A future zero-knowledge path would accept proofs of inference, allowing a miner to prove a card was produced by an approved model on inputs whose hash matches the task spec, without revealing the input or the model weights to Cathedral. Current state of the art (Halo2, EZKL, etc.) is roughly 1000 to 10000 times slower than native inference for models in the Hermes size class and would impose a card-production budget that doesn't match Cathedral's epoch cadence. Tracked for v2.
 
 The envelope and verification flow generalize: a `zkml-v1` attestation would carry a SNARK proof and a verifying key, the verification step would call the SNARK verifier instead of an Ed25519 / COSE signature check, and the runtime registry would carry circuit hashes instead of (or in addition to) image measurements.
 
 ### 11.2 Cross-tier challenges
 
-Today, the leaderboard is a single ordering. A v2 governance feature would allow holders of a verified submission (or external auditors with standing) to formally challenge a rank by producing evidence that the attestation, while cryptographically valid, was not behaviorally honest. Example: a Polaris-attested run on a forked Hermes that was later removed from the registry, or a TEE attestation from a known-revoked VCEK.
+Today, the leaderboard is a single ordering. A v2 governance feature would allow holders of a verified submission (or external auditors with standing) to formally challenge a rank by producing evidence that the attestation, while cryptographically valid, was not behaviorally honest. Example: a TEE attestation from a known-revoked VCEK.
 
 The structure would be:
 
@@ -749,15 +595,11 @@ The structure would be:
 
 This is governance work, not protocol work. The cryptographic attestation already provides what it can; the rest is human + economic adjudication. Deferred.
 
-### 11.3 Polaris polaris-v2 (bundle-hash binding)
-
-As noted in Section 9.1, the v1 `polaris-v1` format does not sign the `bundle_hash` directly. A v1.1 release of the Polaris attestation contract should add `bundle_hash` to `payload`, giving the same byte-bound guarantee Tier B+ already has. The migration path is: Polaris adds the field with a `polaris-v2` version tag; Cathedral begins accepting `polaris-v2` in addition to `polaris-v1`; after a deprecation window, `polaris-v1` is removed.
-
-### 11.4 Approved runtime registry on-chain
+### 11.3 Approved runtime registry on-chain
 
 When the Hermes release cadence stabilizes (estimated v2 timeframe, late 2026), the registry should move from a git JSON file to a multi-sig-controlled chain extrinsic on the Cathedral subnet. The migration mostly affects governance and auditability; the verification code path stays the same with a different loader.
 
-### 11.5 Vendor revocation polling
+### 11.4 Vendor revocation polling
 
 v2 should poll AWS Nitro, Intel PCS, and AMD KDS revocation endpoints on a heartbeat, cache the revoked-cert serials, and reject attestations whose cert chain intersects the revoked set. v1 handles this operationally (operator updates the env-var pinned roots on advisory).
 

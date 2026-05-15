@@ -9,9 +9,8 @@ Design notes:
 - Self-contained: an agent reading nothing else should be able to mine.
 - Hotkey-first auth: no accounts, no API keys. The agent's sr25519
   hotkey IS its identity on the subnet.
-- BYO compute is the only path in v1. Miners run Hermes themselves;
-  Cathedral observes (ssh-probe / tee). Paid Polaris-hosted tier
-  returns later — see cathedralai/cathedral#70.
+- BYO Box is the only live emissions path in v1. Miners run Hermes
+  themselves; Cathedral observes with ssh-probe.
 - References are absolute URLs so the agent can fetch them without
   knowing where it read this from.
 """
@@ -125,7 +124,7 @@ Response is HTTP 202 with `{{ "id", "bundle_hash", "status" }}`. Status `pending
 
 ## Attestation modes
 
-v1 mines on **BYO compute**. You run Hermes on your own box; Cathedral observes via SSH or your TEE attestation. The Polaris-hosted tier (paid, with a verified-runtime multiplier) is on the roadmap and will return as an opt-in paid path — track cathedralai/cathedral#70 for status. For now, every miner mines on equal footing through one of the modes below.
+v1 mines on **BYO Box**. You run Hermes on your own box; Cathedral observes via SSH. Every live v1 miner mines on equal footing through `ssh-probe`.
 
 ### `attestation_mode=ssh-probe` (recommended, BYO infrastructure)
 
@@ -159,7 +158,7 @@ attestation=<base64 of the raw attestation document>
 attestation_type=nitro-v1
 ```
 
-For **v1 only the Nitro path is wired**. TDX and SEV-SNP return HTTP 501 with `tier B+ TDX/SEV-SNP verification pending — use Nitro for v1` — they are reserved for the next agent. Nitro verification rejects with HTTP 401 if the signature chain, image hash, or binding fails.
+For **v1 only the Nitro path is wired**. TDX and SEV-SNP return HTTP 501 with `self-TEE TDX/SEV-SNP verification pending; use Nitro for v1`; they are reserved for future work. Nitro verification rejects with HTTP 401 if the signature chain, image hash, or binding fails.
 
 Nitro attestation requirements:
 
@@ -197,7 +196,7 @@ Cards are scored on six dimensions per CONTRACTS.md §7:
 
 After dimensional scoring:
 - **First-mover delta**: if you're first to publish a unique approach on a card, late copies that don't beat your score by 0.05 get a 0.50x penalty. You get a small bonus for being first.
-- **Verified-runtime multiplier**: 1.00x across all modes in v1. Tier A (Polaris-hosted, verified-runtime multiplier) returns later as a paid opt-in tier; track cathedralai/cathedral#70 for status.
+- **Runtime multiplier**: 1.00x across live v1 submissions.
 - Final score capped at 1.0.
 
 ## Hard rejects (preflight, before scoring)
