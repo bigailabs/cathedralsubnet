@@ -1,6 +1,6 @@
-"""AMD SEV-SNP attestation verifier — stub.
+"""AMD SEV-SNP attestation verifier stub.
 
-Tier B+ SEV-SNP verification is parked for the next agent; the submit
+self-TEE SEV-SNP verification is parked for future work; the submit
 endpoint surfaces 501 when a miner hits this path. Function shape kept
 stable so the next agent only fills in the body.
 """
@@ -26,8 +26,8 @@ def verify_sev_snp_attestation(
 ) -> SevSnpVerificationResult:
     """Verify an AMD SEV-SNP attestation. Not yet implemented."""
     _ = (doc_bytes, bundle_hash, card_id)
-    raise NotImplementedError("tier B+ SEV-SNP verification pending — use Nitro for v1")
+    raise NotImplementedError("self-TEE SEV-SNP verification pending; use Nitro for v1")
 
 
 def raise_unsupported() -> None:
-    raise UnsupportedAttestationTypeError("tier B+ SEV-SNP verification pending — use Nitro for v1")
+    raise UnsupportedAttestationTypeError("self-TEE SEV-SNP verification pending; use Nitro for v1")

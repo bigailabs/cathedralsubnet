@@ -123,15 +123,15 @@ async def submit_agent(
     # response (or call the prospective /v1/server-time endpoint).
     submitted_at_form: str | None = Form(default=None, alias="submitted_at"),
     logo: UploadFile | None = File(default=None),
-    # Per cathedralai/cathedral#70 the v1 default is 'ssh-probe' — the
-    # BYO-compute free tier. Tier A modes ('polaris', 'polaris-deploy')
-    # are accepted only when CATHEDRAL_ENABLE_POLARIS_DEPLOY=true; off
-    # by default in production, they 400 with rejection_reason
-    # 'tier_a_disabled_for_v1' and a pointer to the Tier B docs.
+    # Per cathedralai/cathedral#70 the v1 default is 'ssh-probe', the
+    # BYO Box live path. Polaris modes ('polaris', 'polaris-deploy') are
+    # accepted only when CATHEDRAL_ENABLE_POLARIS_DEPLOY=true; off by
+    # default in production, they 400 with rejection_reason
+    # 'tier_a_disabled_for_v1' and a pointer to the BYO Box docs.
     attestation_mode: str = Form(default="ssh-probe"),
     attestation: str | None = Form(default=None),
     attestation_type: str | None = Form(default=None),
-    # v2 free tier (ssh-probe). Only required when attestation_mode='ssh-probe';
+    # BYO Box (ssh-probe). Only required when attestation_mode='ssh-probe';
     # ignored for every other mode. The miner must have Cathedral's public SSH
     # key installed in ~ssh_user/.ssh/authorized_keys on ssh_host.
     ssh_host: str | None = Form(default=None),
@@ -170,11 +170,12 @@ async def submit_agent(
             ),
         )
 
-    # ----- Tier A gate (cathedralai/cathedral#70) ------------------------
+    # ----- Polaris deploy gate (cathedralai/cathedral#70) ----------------
     # Both Polaris-flavored modes route to Cathedral-owned compute and
     # depend on shared Verda balance + cathedral-runtime availability. v1
-    # collapses to Tier B (ssh-probe / bundle / tee / unverified) until
-    # we ship paid Tier A with proper isolation. The runner code stays;
+    # keeps the live path on BYO Box (ssh-probe / bundle / tee /
+    # unverified) until Polaris deployment has proper isolation.
+    # The runner code stays;
     # the door is closed at the submit boundary.
     import os as _os
 
@@ -186,20 +187,20 @@ async def submit_agent(
             detail=(
                 "tier_a_disabled_for_v1: attestation_mode "
                 f"{attestation_mode!r} is not accepted on v1. "
-                "Mine on Tier B instead — see "
+                "Mine on BYO Box instead; see "
                 "https://api.cathedral.computer/skill.md for the "
-                "ssh-probe flow. Tier A returns as a paid tier; "
+                "ssh-probe flow. Polaris deployment is not a live v1 path; "
                 "track cathedralai/cathedral#70 for status."
             ),
         )
 
-    # ----- ssh-probe coordinates (v2 free tier) --------------------------
+    # ----- ssh-probe coordinates (BYO Box) -------------------------------
     # When attestation_mode='ssh-probe', the miner runs Hermes themselves
     # and Cathedral SSHs in to invoke `hermes chat -q "<task>"` (v1.1.7;
     # was `hermes -z` pre-v1.1.7) as a subprocess.
     # ssh_host + ssh_user are required; ssh_port defaults to 22. For
     # every other mode, ssh_* fields are silently ignored — we don't
-    # want a typo in a free-tier field to block a Tier A submission.
+    # want a typo in a BYO Box field to block a gated Polaris submission.
     #
     # `hermes_port` is logged for back-compat observation (v1.0.x clients
     # may still send it) but is never persisted on new rows. Hermes is
