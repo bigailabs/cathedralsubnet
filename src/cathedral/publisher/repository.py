@@ -459,6 +459,37 @@ async def count_verified_agents_for_card(conn: aiosqlite.Connection, card_id: st
     return int(row[0]) if row else 0
 
 
+async def repair_stale_evaluating_rows(conn: aiosqlite.Connection) -> int:
+    """Restore rows stranded in ``status='evaluating'`` with a prior score.
+
+    Pre-PR #117 the orchestrator flipped every selected row to
+    ``evaluating`` before calling the runner, including previously
+    ranked cadence-refresh rows. A retryable failure or process crash
+    would leave the row stuck in ``evaluating`` while still carrying
+    the previous round's ``current_score``. The PR #117 read-model
+    filter drops those rows from public scored surfaces, which prevents
+    future leakage but also hides any existing stranded rows — a
+    previously ranked agent silently disappears off the leaderboard
+    after deploy.
+
+    This repair re-asserts ``status='ranked'`` on any row that carries
+    a non-null ``current_score`` while sitting in ``evaluating``. Such
+    a row proves a prior round committed a score; the next cadence tick
+    will pick it up again and either commit a fresh score (keeping it
+    ranked) or signal degradation through the rolling-average path.
+
+    Idempotent and self-disabling — once the live data is clean, the
+    UPDATE matches zero rows. Returns the number of rows repaired so
+    the caller can log it.
+    """
+    cur = await conn.execute(
+        "UPDATE agent_submissions SET status='ranked' "
+        "WHERE status='evaluating' AND current_score IS NOT NULL"
+    )
+    await conn.commit()
+    return int(cur.rowcount or 0)
+
+
 async def update_submission_status(
     conn: aiosqlite.Connection,
     submission_id: str,

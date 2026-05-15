@@ -489,6 +489,216 @@ async def test_crashed_first_eval_does_not_strand_evaluating():
 
 
 # --------------------------------------------------------------------------
+# Cadence cooldown — failed refresh must not re-pick every tick
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cadence_failure_arms_cooldown_blocking_immediate_re_pick():
+    """A cadence row that hits a retryable or terminal failure must not
+    be picked again on the very next tick. Without a cooldown, the
+    cadence query (which uses MAX(eval_runs.ran_at)) keeps surfacing
+    the same row because no eval_run was written, spamming logs and
+    consuming cadence slots."""
+    from cathedral.eval.orchestrator import EvalOrchestrator
+    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.storage.hippius import StubHippiusClient
+
+    orch = EvalOrchestrator(
+        db=_CapturingDB(),  # type: ignore[arg-type]
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=_StubSigner(),
+        registry=_StubRegistry(),
+    )
+
+    sub_id = "cadence-row-broken"
+    assert orch.is_cadence_in_cooldown(sub_id) is False
+
+    # Retryable failure on a cadence row — should arm cooldown.
+    await orch._on_retryable_failure(
+        {"id": sub_id, "card_id": "eu-ai-act", "status": "ranked"},
+        _bound_logger(),
+        "hippius unavailable",
+        is_cadence_refresh=True,
+    )
+    assert orch.is_cadence_in_cooldown(sub_id) is True, (
+        "retryable cadence failure must arm cooldown so the next tick skips"
+    )
+
+    # Terminal failure on a different row — should also arm cooldown.
+    other_id = "cadence-row-decrypt-fail"
+    await orch._fail_terminal(
+        {"id": other_id, "card_id": "eu-ai-act", "status": "ranked"},
+        _bound_logger(),
+        reason="bundle decryption failed",
+        is_cadence_refresh=True,
+        event="eval_bundle_decrypt_failed",
+        error="bad mac",
+    )
+    assert orch.is_cadence_in_cooldown(other_id) is True
+
+    # First-eval row that hits the same failure shapes must NOT be put
+    # in the cadence cooldown (the cooldown is cadence-specific; first-
+    # eval failures already update DB status).
+    first_id = "first-eval"
+    await orch._on_retryable_failure(
+        {"id": first_id, "card_id": "eu-ai-act", "status": "queued"},
+        _bound_logger(),
+        "boom",
+    )
+    assert orch.is_cadence_in_cooldown(first_id) is False
+
+
+@pytest.mark.asyncio
+async def test_cadence_cooldown_expires_after_window():
+    """After `_CADENCE_FAILURE_COOLDOWN` elapses, the row becomes
+    eligible again. We can't sleep an hour, so we backdate the
+    cooldown entry directly to prove the eviction path runs."""
+    from datetime import UTC, datetime, timedelta
+
+    from cathedral.eval.orchestrator import EvalOrchestrator
+    from cathedral.eval.polaris_runner import StubPolarisRunner
+    from cathedral.storage.hippius import StubHippiusClient
+
+    orch = EvalOrchestrator(
+        db=_CapturingDB(),  # type: ignore[arg-type]
+        hippius=StubHippiusClient(),
+        polaris=StubPolarisRunner(),
+        signer=_StubSigner(),
+        registry=_StubRegistry(),
+    )
+    sub_id = "expired"
+    orch._cadence_cooldown_until[sub_id] = datetime.now(UTC) - timedelta(seconds=1)
+    assert orch.is_cadence_in_cooldown(sub_id) is False
+    assert sub_id not in orch._cadence_cooldown_until, (
+        "expired entries must be evicted to keep the dict bounded"
+    )
+
+
+# --------------------------------------------------------------------------
+# Rank-against-self — cadence refresh that lowers score
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compute_rank_excludes_current_submission(tmp_path):
+    """A cadence refresh that lowers the row's avg used to count the
+    row's own pre-write higher score, returning a rank one worse than
+    reality. _compute_rank with exclude_submission_id drops the row."""
+    from cathedral.eval.scoring_pipeline import _compute_rank
+    from cathedral.validator.db import connect
+
+    conn = await connect(str(tmp_path / "rank.db"))
+    try:
+        # Seed card_def so the FK constraint on agent_submissions.card_id
+        # is satisfied.
+        await conn.execute(
+            "INSERT OR REPLACE INTO card_definitions "
+            "(id, display_name, jurisdiction, topic, description, "
+            " eval_spec_md, source_pool, task_templates, scoring_rubric, "
+            " refresh_cadence_hours, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "eu-ai-act",
+                "EU AI Act",
+                "EU",
+                "test",
+                "test",
+                "# spec",
+                "[]",
+                "[]",
+                "{}",
+                24,
+                "active",
+                "2026-05-01T00:00:00Z",
+                "2026-05-01T00:00:00Z",
+            ),
+        )
+        # Two ranked rows on the same card. The first carries 0.9, the
+        # second is about to refresh to 0.6 (down from 0.95).
+        await conn.execute(
+            "INSERT INTO agent_submissions "
+            "(id, miner_hotkey, card_id, bundle_blob_key, bundle_hash, "
+            " bundle_size_bytes, encryption_key_id, bundle_signature, "
+            " display_name, bio, logo_url, soul_md_preview, "
+            " metadata_fingerprint, similarity_check_passed, "
+            " rejection_reason, submitted_at, status, current_score, "
+            " current_rank, attestation_mode, discovery_only) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "other",
+                "5OTHER",
+                "eu-ai-act",
+                "k1",
+                "a" * 64,
+                10,
+                "kek",
+                "sig",
+                "other",
+                None,
+                None,
+                None,
+                "fp1",
+                1,
+                None,
+                "2026-05-01T00:00:00Z",
+                "ranked",
+                0.9,
+                1,
+                "ssh-probe",
+                0,
+            ),
+        )
+        await conn.execute(
+            "INSERT INTO agent_submissions "
+            "(id, miner_hotkey, card_id, bundle_blob_key, bundle_hash, "
+            " bundle_size_bytes, encryption_key_id, bundle_signature, "
+            " display_name, bio, logo_url, soul_md_preview, "
+            " metadata_fingerprint, similarity_check_passed, "
+            " rejection_reason, submitted_at, status, current_score, "
+            " current_rank, attestation_mode, discovery_only) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "self",
+                "5SELF",
+                "eu-ai-act",
+                "k2",
+                "b" * 64,
+                10,
+                "kek",
+                "sig",
+                "self",
+                None,
+                None,
+                None,
+                "fp2",
+                1,
+                None,
+                "2026-05-01T00:00:00Z",
+                "ranked",
+                0.95,  # PRE-write old score
+                1,
+                "ssh-probe",
+                0,
+            ),
+        )
+        await conn.commit()
+
+        # Without the exclusion, both 0.9 and 0.95 (self's old) would
+        # count as > 0.6 → rank 3. With exclusion of "self", only 0.9
+        # counts → rank 2.
+        rank_without = await _compute_rank(conn, "eu-ai-act", 0.6)
+        rank_with = await _compute_rank(conn, "eu-ai-act", 0.6, exclude_submission_id="self")
+        assert rank_without == 3, f"unguarded rank counts self; got {rank_without}"
+        assert rank_with == 2, (
+            f"excluding self must drop the row's pre-write score; got {rank_with}"
+        )
+    finally:
+        await conn.close()
+
+
+# --------------------------------------------------------------------------
 # Unit-test helpers — no DB, no Polaris, no signer.
 # --------------------------------------------------------------------------
 

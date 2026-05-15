@@ -447,3 +447,69 @@ async def test_list_submissions_all_excludes_in_flight_rows(db, tmp_path: Path):
         f"cross-card list must surface ranked, drop queued; got {ids}"
     )
     assert total == 1, f"total must match filtered set; got {total}"
+
+
+# --------------------------------------------------------------------------
+# Startup repair — stranded `evaluating` rows with prior score
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_repair_stale_evaluating_rows_restores_ranked(db, tmp_path: Path):
+    """Pre-PR-#117 pattern: row stuck in `evaluating` while still
+    carrying a prior `current_score`. The startup repair must flip it
+    back to `ranked` so the leaderboard surfaces it again instead of
+    silently hiding it."""
+    repo = _load_repository()
+    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    now = datetime.now(UTC)
+
+    stranded_id = await _seed_submission(
+        db, card_id="eu-ai-act", status="evaluating", submitted_at=now - timedelta(days=2)
+    )
+    await db.execute(
+        "UPDATE agent_submissions SET current_score=0.47, current_rank=28 WHERE id=?",
+        (stranded_id,),
+    )
+
+    # Control rows the repair must NOT touch:
+    queued_id = await _seed_submission(
+        db, card_id="eu-ai-act", status="queued", submitted_at=now - timedelta(hours=1)
+    )
+    fresh_eval_id = await _seed_submission(
+        db, card_id="eu-ai-act", status="evaluating", submitted_at=now - timedelta(hours=1)
+    )
+    await db.commit()
+
+    repaired = await repo.repair_stale_evaluating_rows(db)
+    assert repaired == 1, f"only the stranded row should match; got {repaired}"
+
+    cur = await db.execute("SELECT id, status FROM agent_submissions ORDER BY id")
+    rows = {r[0]: r[1] for r in await cur.fetchall()}
+    assert rows[stranded_id] == "ranked", "row with prior current_score must be restored to ranked"
+    assert rows[queued_id] == "queued", "queued rows must not be touched"
+    assert rows[fresh_eval_id] == "evaluating", (
+        "evaluating rows without a prior score (genuine first-eval) must be left alone"
+    )
+
+
+@pytest.mark.asyncio
+async def test_repair_is_idempotent(db, tmp_path: Path):
+    """Running the repair twice in a row must match zero rows the
+    second time — confirms the operation is safe to call on every
+    startup as a perpetual safety net."""
+    repo = _load_repository()
+    await _seed_card_def(db, card_id="eu-ai-act", cadence_hours=24)
+    now = datetime.now(UTC)
+
+    sid = await _seed_submission(
+        db, card_id="eu-ai-act", status="evaluating", submitted_at=now - timedelta(days=1)
+    )
+    await db.execute(
+        "UPDATE agent_submissions SET current_score=0.5, current_rank=1 WHERE id=?",
+        (sid,),
+    )
+    await db.commit()
+
+    assert await repo.repair_stale_evaluating_rows(db) == 1
+    assert await repo.repair_stale_evaluating_rows(db) == 0

@@ -25,7 +25,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,13 @@ logger = structlog.get_logger(__name__)
 
 
 _RETRY_BACKOFFS = (60, 120, 240)
+
+
+# Cooldown applied to cadence-refresh rows that hit a failure path that
+# does not advance MAX(eval_runs.ran_at). 1 hour is long enough to keep
+# a permanently broken bundle from re-picking every tick, short enough
+# that a transient outage recovers within the same cadence window.
+_CADENCE_FAILURE_COOLDOWN = timedelta(hours=1)
 
 
 def _retry_backoffs() -> tuple[float, ...]:
@@ -124,6 +131,16 @@ class EvalOrchestrator:
         self.registry = registry
         self._round_counter = _RoundCounter(epoch=epoch_for(datetime.now(UTC)))
         self._failure_counts: dict[str, int] = defaultdict(int)
+        # Per-submission cooldown for cadence-refresh rows that hit a
+        # retryable or terminal failure. Cadence rows stay 'ranked'
+        # through failures (so the leaderboard doesn't churn), and the
+        # cadence query uses MAX(eval_runs.ran_at) — which does NOT
+        # advance on a failure that never reached score_and_sign. Without
+        # this cooldown, a permanently broken bundle would re-pick on
+        # every loop tick, spam logs, and consume cadence slots. Process-
+        # local by design: a restart drops the cooldowns, which is
+        # acceptable (the row will be picked once, fail once, and re-cool).
+        self._cadence_cooldown_until: dict[str, datetime] = {}
 
     @property
     def polaris(self) -> PolarisRunner:
@@ -400,6 +417,7 @@ class EvalOrchestrator:
             # prior score — the cadence loop will pick it up again next
             # window. First-eval exhausted: terminal rejection.
             if is_cadence_refresh:
+                self._arm_cadence_cooldown(submission["id"])
                 log.error(
                     "eval_retryable_exhausted_cadence_kept_ranked",
                     reason=reason,
@@ -415,8 +433,12 @@ class EvalOrchestrator:
         else:
             if is_cadence_refresh:
                 # Cadence rows are not in 'evaluating' (we never flipped
-                # them) — nothing to restore. The cadence loop will pick
-                # them up again on the next eligible tick.
+                # them) — nothing to restore. Arm a cooldown so a row
+                # whose underlying bundle is permanently broken doesn't
+                # re-pick on every tick (the cadence query uses
+                # MAX(eval_runs.ran_at), which a failed retryable does
+                # not advance).
+                self._arm_cadence_cooldown(submission["id"])
                 log.warning(
                     "eval_retry_cadence_kept_ranked",
                     reason=reason,
@@ -433,6 +455,23 @@ class EvalOrchestrator:
                     reason=reason,
                     attempts=self._failure_counts[submission["id"]],
                 )
+
+    def _arm_cadence_cooldown(self, submission_id: str) -> None:
+        """Mark a cadence row as in-cooldown so the loop's batch picker
+        skips it for `_CADENCE_FAILURE_COOLDOWN`. Idempotent — repeated
+        failures just push the deadline forward."""
+        self._cadence_cooldown_until[submission_id] = datetime.now(UTC) + _CADENCE_FAILURE_COOLDOWN
+
+    def is_cadence_in_cooldown(self, submission_id: str) -> bool:
+        deadline = self._cadence_cooldown_until.get(submission_id)
+        if deadline is None:
+            return False
+        if datetime.now(UTC) >= deadline:
+            # Cooldown expired; drop the entry so the dict doesn't grow
+            # unboundedly across long-lived processes.
+            del self._cadence_cooldown_until[submission_id]
+            return False
+        return True
 
     async def _fail_terminal(
         self,
@@ -453,6 +492,10 @@ class EvalOrchestrator:
         is permanent the operator will see the repeated log lines.
         """
         if is_cadence_refresh:
+            # No eval_run will be written (terminal failure before
+            # score_and_sign), so MAX(ran_at) doesn't advance. Cool down
+            # so the cadence picker doesn't immediately re-select.
+            self._arm_cadence_cooldown(submission["id"])
             if error is not None:
                 log.error(event + "_cadence_kept_ranked", reason=reason, error=error)
             else:
@@ -526,11 +569,21 @@ async def run_eval_loop(
         due: list[dict[str, Any]] = []
         if remaining > 0:
             try:
-                due = await repository.submissions_due_for_cadence(
+                # Over-fetch then filter cooldown rows in-process. Without
+                # the over-fetch, a slot taken by a cooled-down row would
+                # leave the batch short even when other due rows exist.
+                # Cap is bounded by the cadence-query limit semantics.
+                raw_due = await repository.submissions_due_for_cadence(
                     db,
                     now=datetime.now(UTC),
-                    limit=remaining,
+                    limit=remaining * 4,
                 )
+                for row in raw_due:
+                    if orchestrator.is_cadence_in_cooldown(row["id"]):
+                        continue
+                    due.append(row)
+                    if len(due) >= remaining:
+                        break
             except aiosqlite.Error as e:
                 logger.warning("eval_loop_cadence_query_failed", error=str(e))
                 # Cadence query failure should not block queued processing
