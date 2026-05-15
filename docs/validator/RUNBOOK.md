@@ -29,8 +29,8 @@ Operators run against SN39 mainnet (`config/mainnet.toml`). The protocol-develop
 
 Copy `config/mainnet.toml`, fill in:
 
-- `network.validator_hotkey`: your registered hotkey ss58 (required)
-- `network.wallet_name`: local bittensor wallet name (default `cathedral-validator`; change if your local wallet uses a different name)
+- `network.validator_hotkey`: your local Bittensor wallet hotkey NAME (the same value you pass to `btcli` as `--wallet.hotkey`, e.g. `default`). This is NOT the ss58 address. The validator uses the name to open the wallet via `bt.Wallet(name=..., hotkey=<this>)` and reads the ss58 off the on-disk key file. `cathedral chain-check` reports the resolved ss58 if you want to confirm.
+- `network.wallet_name`: local Bittensor wallet (coldkey) name (default `cathedral-validator`; change if your local wallet uses a different name)
 - `polaris.public_key_hex`: Polaris runtime-attestation pubkey, from `kid: polaris-runtime-attestation` in the JWKS document. Required because `cathedral-validator serve` still constructs the legacy `/v1/claim` worker.
 - `http.bearer_token_env`: env var name that holds your local validator bearer token (default `CATHEDRAL_BEARER`)
 - `publisher.url`: publisher endpoint (default `https://api.cathedral.computer`)
@@ -84,6 +84,8 @@ Expected output:
   "metagraph_size": 256
 }
 ```
+
+`wallet_hotkey` here is the local wallet hotkey NAME you set in `network.validator_hotkey`, the same value you pass to `btcli --wallet.hotkey`. The chain-side ss58 is derived from the on-disk key file; `registered` is the result of looking up that ss58 on the subnet's metagraph.
 
 If `registered` is `false`, register the hotkey on the subnet first
 (`btcli s register --netuid <n> --network <net>`). The validator will run
@@ -220,7 +222,7 @@ Prints `registered: true` once the metagraph has been read and the validator's h
 Everything an incoming operator needs:
 
 1. This file
-2. `config/<network>.toml` (with hotkey ss58 and `polaris.public_key_hex` pinned)
+2. `config/<network>.toml` (with `network.validator_hotkey` set to the local wallet hotkey NAME and `polaris.public_key_hex` pinned)
 3. The hotkey + coldkey files
 4. A new local bearer token for the validator's `/v1/claim` endpoint (rotate on every handoff)
 5. The Polaris runtime-attestation pubkey, hex, from `kid: polaris-runtime-attestation` in `/.well-known/cathedral-jwks.json` (same across operators)
@@ -231,13 +233,15 @@ There is no private context beyond credentials. If you find yourself explaining 
 
 ## Provisioning a fresh box
 
-For a clean Polaris CPU box, run `scripts/provision_validator.sh` with the env vars documented in that script (bearer, Cathedral pubkey, Polaris pubkey, validator hotkey ss58, wallet name, network, netuid). The script:
+For a clean Polaris CPU box, run `scripts/provision_validator.sh` with the env vars documented in that script (bearer, Cathedral pubkey, Polaris pubkey, local wallet hotkey NAME via `BT_WALLET_HOTKEY`, wallet coldkey name via `BT_WALLET_NAME`, network via `BT_NETWORK` / `CATHEDRAL_NETWORK`, netuid via `BT_NETUID`). Defaults provision SN39 mainnet (`finney`, netuid 39); set `CATHEDRAL_NETWORK=testnet`, `BT_NETWORK=test`, `BT_NETUID=292` to provision the protocol-dev SN292 path instead.
+
+The script:
 
 - Installs Python 3.11, git, nodejs/npm, gpg
 - Creates the `cathedral` user and standard dirs
 - Clones the repo at the requested release tag
-- Renders `/etc/cathedral/<network>.toml` from `config/<network>.toml` (mainnet by default)
-- Renders `/etc/cathedral/validator.env` with chmod 600
+- Renders `/etc/cathedral/<network>.toml` from `config/<network>.toml` (mainnet by default). `network.validator_hotkey` is filled in with the local wallet hotkey NAME (`BT_WALLET_HOTKEY`), the same value passed to `btcli`. The ss58 is read from disk by the bittensor SDK at runtime.
+- Renders `/etc/cathedral/validator.env` with chmod 600, including `CATHEDRAL_CONFIG_PATH` so PM2 launches the right config file
 - Installs PM2 globally, starts the ecosystem, persists across reboots
 - Runs `cathedral-validator migrate` to init the DB
 

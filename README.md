@@ -222,8 +222,11 @@ curl -s https://api.cathedral.computer/.well-known/cathedral-jwks.json | jq
 
 # Copy and edit config/mainnet.toml (SN39 is the operator path; SN292 testnet
 # is for protocol development via config/testnet.toml):
-#   - network.validator_hotkey: your registered hotkey ss58 (required)
-#   - network.wallet_name:      local Bittensor wallet name (usually edit)
+#   - network.validator_hotkey: local wallet hotkey NAME (the --wallet.hotkey
+#                               you pass to btcli, e.g. "default"). NOT the
+#                               ss58. The bittensor SDK opens the wallet by
+#                               name and reads the ss58 off disk.
+#   - network.wallet_name:      local Bittensor wallet (coldkey) name (usually edit)
 #   - polaris.public_key_hex:   pin kid=polaris-runtime-attestation from JWKS
 
 export CATHEDRAL_BEARER=$(openssl rand -hex 32)              # local /v1/claim auth

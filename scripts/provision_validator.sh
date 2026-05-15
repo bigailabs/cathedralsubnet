@@ -19,8 +19,11 @@
 #                         --subtensor.network "$BT_NETWORK"
 #
 # This script does NOT touch wallets. It does NOT generate or import keys.
-# The registered hotkey's ss58 is passed in via VALIDATOR_HOTKEY_SS58 and
-# wired into /etc/cathedral/testnet.toml.
+# The local wallet hotkey NAME (e.g. "default") is what gets wired into
+# /etc/cathedral/<network>.toml as `network.validator_hotkey`. The
+# bittensor SDK opens the wallet by name and reads the ss58 off disk; the
+# ss58 is not passed in here. Use `cathedral chain-check` afterwards to
+# confirm the wallet's ss58 is registered on the subnet.
 
 set -euo pipefail
 
@@ -37,6 +40,19 @@ set -euo pipefail
 #                           polaris.public_key_hex; required because
 #                           `cathedral-validator serve` still constructs the
 #                           legacy /v1/claim worker.
+# CATHEDRAL_NETWORK         logical network name; selects which config template
+#                           is rendered. Defaults to `mainnet` (SN39 finney);
+#                           set to `testnet` for SN292 protocol-dev runs.
+# BT_NETWORK                bittensor subtensor network. Defaults to `finney`.
+#                           For testnet, set to `test`.
+# BT_NETUID                 subnet uid. Defaults to 39 (mainnet). For testnet,
+#                           set to 292.
+# BT_WALLET_NAME            local bittensor wallet (coldkey) name. Default
+#                           `cathedral-validator`.
+# BT_WALLET_HOTKEY          local bittensor wallet hotkey NAME (not ss58).
+#                           This is the value of `--wallet.hotkey` in btcli;
+#                           it is what gets written to `network.validator_hotkey`
+#                           in the rendered TOML. Default `default`.
 
 : "${CATHEDRAL_RELEASE_TAG:=main}"
 : "${CATHEDRAL_BEARER:?CATHEDRAL_BEARER is required (local validator bearer)}"
@@ -44,9 +60,19 @@ set -euo pipefail
 : "${POLARIS_PUBLIC_KEY_HEX:?POLARIS_PUBLIC_KEY_HEX is required (JWKS kid=polaris-runtime-attestation)}"
 : "${BT_WALLET_NAME:=cathedral-validator}"
 : "${BT_WALLET_HOTKEY:=default}"
-: "${BT_NETWORK:=test}"
-: "${BT_NETUID:=292}"
-: "${VALIDATOR_HOTKEY_SS58:?VALIDATOR_HOTKEY_SS58 is required (ss58 of registered hotkey)}"
+: "${BT_NETWORK:=finney}"
+: "${BT_NETUID:=39}"
+: "${CATHEDRAL_NETWORK:=mainnet}"
+
+# Sanity-check the network selector. Only `mainnet` and `testnet` ship with
+# a config template; anything else is an operator typo.
+case "$CATHEDRAL_NETWORK" in
+  mainnet|testnet) ;;
+  *)
+    echo "ERROR: CATHEDRAL_NETWORK must be 'mainnet' or 'testnet' (got: $CATHEDRAL_NETWORK)" >&2
+    exit 1
+    ;;
+esac
 
 REPO_URL="https://github.com/cathedralai/cathedral"
 SRC_DIR="/opt/cathedral/source"
@@ -59,7 +85,7 @@ echo "==> step 1: validate inputs"
 echo "    release_tag=${CATHEDRAL_RELEASE_TAG}"
 echo "    wallet=${BT_WALLET_NAME}/${BT_WALLET_HOTKEY}"
 echo "    network=${BT_NETWORK} netuid=${BT_NETUID}"
-echo "    validator_hotkey=${VALIDATOR_HOTKEY_SS58}"
+echo "    config_target=${CATHEDRAL_NETWORK}.toml (validator_hotkey will be set to wallet hotkey name '${BT_WALLET_HOTKEY}')"
 
 # --- Step 2: apt deps -------------------------------------------------------
 
@@ -158,24 +184,29 @@ if [[ ! -f "$ALLOWED_SIGNERS_SRC" ]]; then
 fi
 sudo install -o cathedral -g cathedral -m 0644 "$ALLOWED_SIGNERS_SRC" "$ALLOWED_SIGNERS_DST"
 
-# --- Step 8: render testnet.toml -------------------------------------------
+# --- Step 8: render <network>.toml -----------------------------------------
 
-echo "==> step 8: render ${ETC_DIR}/testnet.toml"
-TEMPLATE="$SRC_DIR/config/testnet.toml"
+CONFIG_NAME="${CATHEDRAL_NETWORK}.toml"
+CONFIG_DST="$ETC_DIR/$CONFIG_NAME"
+echo "==> step 8: render ${CONFIG_DST}"
+TEMPLATE="$SRC_DIR/config/${CONFIG_NAME}"
 if [[ ! -f "$TEMPLATE" ]]; then
   echo "ERROR: template not found at $TEMPLATE" >&2
   exit 1
 fi
 # Render to a tmp file under the cathedral user, then move into /etc.
 # Done in two sed passes so the substitution stays exact (no regex escaping
-# of user-provided hex strings).
+# of user-provided hex strings). `validator_hotkey` in the rendered TOML is
+# the local wallet hotkey NAME (e.g. "default"); the bittensor SDK uses it
+# to open the wallet on disk and reads the ss58 from the key file itself.
 TMP_TOML="$(mktemp)"
 trap 'rm -f "$TMP_TOML"' EXIT
 sed \
-  -e "s|validator_hotkey = \"REPLACE_ME\"|validator_hotkey = \"${VALIDATOR_HOTKEY_SS58}\"|" \
+  -e "s|validator_hotkey = \"REPLACE_ME\"|validator_hotkey = \"${BT_WALLET_HOTKEY}\"|" \
+  -e "s|wallet_name = \"cathedral-validator\"|wallet_name = \"${BT_WALLET_NAME}\"|" \
   -e "s|public_key_hex = \"REPLACE_WITH_POLARIS_ED25519_PUBLIC_KEY_HEX\"|public_key_hex = \"${POLARIS_PUBLIC_KEY_HEX}\"|" \
   "$TEMPLATE" > "$TMP_TOML"
-sudo install -o cathedral -g cathedral -m 0644 "$TMP_TOML" "$ETC_DIR/testnet.toml"
+sudo install -o cathedral -g cathedral -m 0644 "$TMP_TOML" "$CONFIG_DST"
 
 # --- Step 9: render validator.env ------------------------------------------
 
@@ -209,6 +240,13 @@ if [[ ! -f "$ECOSYSTEM_SRC" ]]; then
 fi
 sudo install -o cathedral -g cathedral -m 0644 "$ECOSYSTEM_SRC" "$ECOSYSTEM_DST"
 
+# Append CATHEDRAL_CONFIG_PATH to validator.env so ecosystem.config.cjs
+# launches the right config (mainnet by default; testnet only when
+# explicitly selected via CATHEDRAL_NETWORK=testnet).
+if ! sudo grep -q '^CATHEDRAL_CONFIG_PATH=' "$ETC_DIR/validator.env"; then
+  echo "CATHEDRAL_CONFIG_PATH=$CONFIG_DST" | sudo tee -a "$ETC_DIR/validator.env" >/dev/null
+fi
+
 # --- Step 12: pm2 start -----------------------------------------------------
 
 echo "==> step 12: pm2 start"
@@ -236,7 +274,7 @@ fi
 # --- Step 15: migrate db ---------------------------------------------------
 
 echo "==> step 15: run validator migrations"
-sudo -iu cathedral "$VENV_DIR/bin/cathedral-validator" migrate --config "$ETC_DIR/testnet.toml"
+sudo -iu cathedral "$VENV_DIR/bin/cathedral-validator" migrate --config "$CONFIG_DST"
 
 echo ""
 echo "==> done. pm2 status:"

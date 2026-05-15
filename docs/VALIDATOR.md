@@ -210,8 +210,8 @@ export CATHEDRAL_BEARER=$(openssl rand -hex 32)
 
 Copy `config/mainnet.toml` (SN39, the operator path) and edit:
 
-- `network.validator_hotkey`: your hotkey ss58 (required).
-- `network.wallet_name`: local Bittensor wallet name (defaults to `cathedral-validator`; change if your wallet is named differently).
+- `network.validator_hotkey`: your local Bittensor wallet hotkey NAME (the value you pass to `btcli` as `--wallet.hotkey`, e.g. `default`). Not the ss58 address. The bittensor SDK opens the wallet by name and reads the ss58 off the on-disk key file; `cathedral chain-check` then verifies that ss58 is registered on the subnet's metagraph.
+- `network.wallet_name`: local Bittensor wallet (coldkey) name (defaults to `cathedral-validator`; change if your wallet is named differently).
 - `polaris.public_key_hex`: the Polaris runtime-attestation pubkey from the JWKS document above (required; the legacy worker is constructed even when only the pull loop is doing real work).
 
 Env vars the validator reads at startup:

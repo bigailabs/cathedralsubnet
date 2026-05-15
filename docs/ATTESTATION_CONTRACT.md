@@ -47,20 +47,27 @@ A signature alone over the output is not an attestation. A bundle hash alone is 
 
 ## 2. Three tiers overview
 
-| Tier | Verified? | Earns TAO emissions? | Leaderboard rank? | Discovery surface? | Live in v1? |
-|------|-----------|----------------------|-------------------|--------------------|-------------|
-| **B (live): ssh-probe** | Behavioral (Cathedral SSHs in and invokes Hermes during the eval window) | Yes | Yes | Yes | Yes; this is the live v1 path |
-| **A: Polaris-hosted** | Yes (Polaris Ed25519 attestation) | Yes (when gate is on) | Yes (when gate is on) | Yes | No; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true` |
-| **B+: Self-TEE** | Yes (hardware attestation: AWS Nitro / Intel TDX / AMD SEV-SNP) | Yes | Yes | Yes | No; Nitro verifier wired, no live TEE miners |
-| **Unverified (discovery)** | No | NO | NO | Yes (browsable + purchasable, never ranked) | Yes |
+> **Terminology note for v1.** This contract uses the word "attestation" narrowly, for cryptographic attestation documents (Polaris Ed25519, AWS Nitro / Intel TDX / AMD SEV-SNP). The v1 live path, `ssh-probe`, is a separate mechanism: behavioral verification by Cathedral SSHing into the miner-declared host and invoking Hermes itself during the eval window. Wherever this document says "attestation," it means the cryptographic kind. Wherever it says "ssh-probe" or "behavioral verification," it means the live v1 path. Both produce leaderboard-eligible, emissions-earning submissions; only the verification mechanism differs.
 
-> "Tier A is the verified emissions path" was true in the original v1 plan; v1 as shipped runs the ssh-probe path live and keeps Tier A as the gated spec below. The structural verification mechanics (envelope, signing, cross-reference, runtime registry) below are still the normative contract for Tier A; they are simply not the path miners are submitting through in v1.
+| Tier | How verified | Earns TAO emissions? | Leaderboard rank? | Discovery surface? | Live in v1? |
+|------|--------------|----------------------|-------------------|--------------------|-------------|
+| **B, BYO (ssh-probe)** | Behavioral verification (Cathedral SSHs in and invokes Hermes during the eval window; trace bundle captured) | Yes | Yes | Yes | Yes; this is the live v1 path |
+| **A: Polaris-hosted** | Cryptographic attestation (Polaris Ed25519 over output_hash, task_hash) | Yes (when gate is on) | Yes (when gate is on) | Yes | No; gated behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true` |
+| **B+: Self-TEE** | Cryptographic attestation (hardware: AWS Nitro / Intel TDX / AMD SEV-SNP) | Yes | Yes | Yes | No; Nitro verifier wired, no live TEE miners |
+| **Unverified (discovery)** | Nothing | NO | NO | Yes (browsable + purchasable, never ranked) | Yes |
+
+> "Tier A is the verified emissions path" was true in the original v1 plan; v1 as shipped runs the ssh-probe path live, with behavioral verification as the trust mechanism, and keeps Tier A as the gated cryptographic-attestation spec below. The structural verification mechanics (envelope, signing, cross-reference, runtime registry) below are still the normative contract for Tier A; they are simply not the path miners are submitting through in v1. ssh-probe submissions never produce a Tier A or Tier B+ attestation, and they are not required to.
 
 ### 2.1 Verified vs discovery: the surface split
 
-The leaderboard is verified-only. A submission must produce a Tier A or Tier B+ attestation that validates under the rules in Sections 4 and 5 to receive a weight in the next epoch's weight set. Anything else lands in the discovery / research marketplace surface, which is a separate product. The discovery surface is browsable, search-indexed, and the bundles can be purchased per-card or per-bundle, but they are never ranked against verified submissions and never earn TAO emissions.
+The leaderboard is verified-only, but "verified" in v1 covers two distinct mechanisms:
 
-This is a deliberate product split, not a soft filter. The publisher persists every submission with an `attestation_tier` column (`A`, `B+`, or `B`). The weight loop reads only rows where `attestation_tier IN ('A', 'B+')`. The leaderboard API filters the same way. The discovery API reads the full table.
+- **Behavioral verification** via `ssh-probe`: Cathedral SSHs into the miner-declared host and invokes Hermes itself during the eval window. The runner captures the trace bundle and treats the produced card as the agent's output. ssh-probe submissions earn TAO emissions and rank on the leaderboard. This is the live v1 path; it does not produce a cryptographic attestation (`polaris_attestation` is `None`).
+- **Cryptographic attestation** via Tier A (`polaris`, `polaris-deploy`) or Tier B+ (`tee`): a signed structured statement that validates under the rules in Sections 4 and 5. Both are gated off in v1 (Tier A behind `CATHEDRAL_ENABLE_POLARIS_DEPLOY=true`; Tier B+ until vendor verifiers are wired live). When enabled, attestations are required for that submission to enter the eval queue at the gated mode and receive a weight.
+
+Unverified (`unverified`) submissions never enter the eval queue, never rank on the leaderboard, and never earn TAO emissions. They are persisted with `status='discovery'`, encrypted at rest like every other bundle, and surfaced on the discovery / research marketplace, which is a separate product. The discovery surface is browsable, search-indexed, and the bundles can be purchased per-card or per-bundle, but they are never ranked against verified submissions.
+
+This is a deliberate product split, not a soft filter. The publisher persists every submission with an `attestation_mode` (`ssh-probe`, `polaris`, `polaris-deploy`, `tee`, `unverified`) and the leaderboard / weight-loop pipeline filters out `unverified` via the standard repository filters that include `ssh-probe`. The discovery API reads the full table. The historical text below describing a strict `attestation_tier IN ('A', 'B+')` filter at the weight loop is retained only as the spec for the cryptographic-attestation path; the current weight loop reads from `pulled_eval_runs`, which is populated from the publisher's signed `EvalRun` projections regardless of whether the underlying submission was ssh-probe, Tier A, or Tier B+, and excludes `unverified` because those rows never produce an `EvalRun`.
 
 ### 2.2 Why three tiers and not two
 
@@ -528,7 +535,9 @@ Each tier protects against a different set of attacks. The validator MUST treat 
 
 **Failure mode summary:** Vendor cert chain compromise, side-channel attacks, or a sophisticated attacker with hardware-level access. Acceptable for v1 because these are public-knowledge TEE limits and the residual risk is shared with every cloud platform.
 
-### 9.3 Tier B: Unverified
+### 9.3 Unverified (discovery)
+
+This is `attestation_mode='unverified'`. It is the discovery / research-marketplace path and never earns emissions or ranks on the leaderboard. The v1 live earning path is ssh-probe (covered in §9.4 below); ssh-probe is not "unverified" and should not be conflated with this section.
 
 **Trust assumption:** None. The submission carries the miner's hotkey signature over the bundle and the card, which proves the miner intends to attach their hotkey to the artifact, but does NOT prove the bundle produced the card. The miner may have hand-crafted the card. They may have run an unmodified Hermes on their laptop with no attestation. They may have generated the card with a different agent entirely and uploaded a placeholder bundle.
 
@@ -541,11 +550,30 @@ Each tier protects against a different set of attacks. The validator MUST treat 
 
 - Anything else. There is no provenance claim.
 
-**Failure mode summary:** No trust assumption is made; the discovery surface treats Tier B as research material. Buyers of Tier B cards know they are buying unverified work.
+**Failure mode summary:** No trust assumption is made; the discovery surface treats `unverified` as research material. Buyers of unverified cards know they are buying unverified work.
 
-### 9.4 Cross-tier interactions
+### 9.4 ssh-probe (the v1 live emissions path)
 
-The leaderboard MUST display the attestation_tier alongside the rank. A Tier A entry and a Tier B+ entry occupying ranks 1 and 2 carry different residual risks, and downstream consumers (regulatory teams, journalists, researchers) need that information. The same is true for the first-mover anchor (CONTRACTS.md §7.2): a Tier A first mover is a different signal than a Tier B+ first mover. Cathedral's UI MUST surface this; the API MUST include `attestation_tier` in every leaderboard and submission response.
+This is `attestation_mode='ssh-probe'` and is the live v1 path. It earns emissions and ranks on the leaderboard. The trust mechanism is behavioral, not cryptographic: Cathedral SSHs into the miner-declared host as the universal probe user, snapshots `~/.hermes/` into an isolated `cathedral-eval-<round>` profile, invokes `hermes chat -q "<task>"` against that profile, captures the trace bundle, and treats the produced Card JSON as the agent's output for the round. No Polaris attestation is produced (`polaris_attestation` is `None` for ssh-probe submissions).
+
+**Trust assumption:** The miner's declared SSH endpoint is real, reachable, and runs the Hermes profile the miner advertised. Cathedral's probe key is treated as the only authorized invoker of the isolated eval profile.
+
+**Protected against:**
+
+- Hand-written cards posing as agent output. Cathedral itself invokes Hermes during the eval window; the card returned is the live emission of the miner's running agent, not a stored artifact pasted in after the fact.
+- Output substitution between miner and validator. The trace bundle (state.db slice, sessions JSON, request dumps, skills, memories, logs) is SCP'd back as forensic evidence.
+
+**NOT protected against:**
+
+- A miner who runs a heavily customised Hermes build that the runtime registry would not approve in Tier A or B+. Behavioral verification is mechanism-agnostic; it does not measure the runtime image.
+- A miner who runs an approved Hermes build but feeds it deliberately misleading source material. Source-quality scoring (SCORING.md) catches that on the content axis, not the attestation axis.
+- A miner who proxies the SSH session to a different machine than they advertised. Detectable only via behavioral telemetry, not via attestation.
+
+**Failure mode summary:** No cryptographic claim about the runtime image; the trust comes from Cathedral being the invoker. This is the gap Tier A and Tier B+ close when their gates are flipped on. ssh-probe is sufficient for v1 because Cathedral mediates every eval directly.
+
+### 9.5 Cross-tier interactions
+
+The leaderboard MUST display the verification mechanism alongside the rank: ssh-probe (live v1 path, behavioral), Tier A (Polaris attestation, gated), or Tier B+ (hardware attestation, spec-only). An ssh-probe entry, a Tier A entry, and a Tier B+ entry each carry different residual risks, and downstream consumers (regulatory teams, journalists, researchers) need that information. The same is true for the first-mover anchor (CONTRACTS.md §7.2): an ssh-probe first mover is a different signal than a Tier A first mover. Cathedral's UI MUST surface this; the API MUST include the verification mechanism in every leaderboard and submission response.
 
 ---
 

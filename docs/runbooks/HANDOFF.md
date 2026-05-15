@@ -6,7 +6,7 @@ A clean handoff is a property of the system, not a one-time event. If the valida
 
 1. This document
 2. `docs/validator/RUNBOOK.md`
-3. `config/<network>.toml` (with `validator_hotkey` filled in and `polaris.public_key_hex` pinned from JWKS)
+3. `config/<network>.toml` (with `network.validator_hotkey` set to the local wallet hotkey NAME, same value passed to `btcli --wallet.hotkey`, NOT the ss58; and `polaris.public_key_hex` pinned from JWKS)
 4. Hotkey + coldkey files (encrypted at rest)
 5. A new local validator bearer token for the `/v1/claim` endpoint (rotate on every handoff). This is the value of `CATHEDRAL_BEARER`; it is local auth, not publisher-read auth.
 6. The Cathedral eval-signing pubkey hex, for `CATHEDRAL_PUBLIC_KEY_HEX` env (same across operators; pin from `kid: cathedral-eval-signing` in `https://api.cathedral.computer/.well-known/cathedral-jwks.json`)
