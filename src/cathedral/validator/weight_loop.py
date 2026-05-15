@@ -23,7 +23,7 @@ async def run_weight_loop(
     interval_secs: int = 1200,
     disabled: bool = False,
     burn_uid: int = 204,
-    forced_burn_percentage: float = 98.0,
+    forced_burn_percentage: float = 0.0,
     stop: asyncio.Event | None = None,
     initial_backfill_complete: asyncio.Event | None = None,
     initial_backfill_timeout_secs: float = 120.0,

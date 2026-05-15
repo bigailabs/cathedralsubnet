@@ -11,6 +11,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MAINNET_FORCED_BURN_PERCENTAGE = 0.0
+
 
 def _load_toml(path: Path) -> dict[str, Any]:
     if sys.version_info >= (3, 11):
@@ -51,7 +53,7 @@ class WeightsConfig(BaseModel):
     interval_secs: int = 1200
     disabled: bool = False
     burn_uid: int = 204
-    forced_burn_percentage: float = 98.0
+    forced_burn_percentage: float = MAINNET_FORCED_BURN_PERCENTAGE
 
 
 class PublisherConfig(BaseModel):
@@ -109,21 +111,26 @@ def resolve_validator_config_path(
     legacy managed path to a rendered mainnet config.
     """
     values = os.environ if env is None else env
-    override = values.get("CATHEDRAL_CONFIG_PATH")
-    if override:
-        return override
-
     selected_network = values.get("CATHEDRAL_NETWORK", "").strip().lower()
-    if selected_network == "testnet":
-        return str(path)
-
     root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
     managed_etc = Path(etc_dir) if etc_dir is not None else Path("/etc/cathedral")
     requested = Path(path)
     legacy_testnet = managed_etc / "testnet.toml"
     mainnet = managed_etc / "mainnet.toml"
 
+    override = values.get("CATHEDRAL_CONFIG_PATH")
+    if override:
+        override_path = Path(override)
+        if selected_network != "testnet" and _same_path(override_path, mainnet):
+            _sync_managed_mainnet_weight_policy(override_path)
+        return override
+
+    if selected_network == "testnet":
+        return str(path)
+
     if requested != legacy_testnet:
+        if _same_path(requested, mainnet):
+            _sync_managed_mainnet_weight_policy(requested)
         return str(path)
 
     if not mainnet.exists():
@@ -132,6 +139,7 @@ def resolve_validator_config_path(
             mainnet_path=mainnet,
             template_path=root / "config" / "mainnet.toml",
         )
+    _sync_managed_mainnet_weight_policy(mainnet)
     _ensure_managed_env_path(managed_etc / "validator.env", mainnet)
     return str(mainnet if mainnet.exists() else requested)
 
@@ -212,6 +220,68 @@ def _ensure_managed_env_path(env_path: Path, config_path: Path) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(lines) + "\n")
     env_path.chmod(0o600)
+
+
+def _sync_managed_mainnet_weight_policy(config_path: Path) -> None:
+    """Keep managed SN39 configs on the current release burn policy."""
+    if not config_path.exists():
+        return
+    try:
+        current = _load_toml(config_path)
+    except Exception:
+        return
+
+    network = current.get("network", {})
+    weights = current.get("weights", {})
+    if not isinstance(network, dict) or not isinstance(weights, dict):
+        return
+    if str(network.get("name")) != "finney" or int(network.get("netuid", -1)) != 39:
+        return
+    if float(weights.get("forced_burn_percentage", MAINNET_FORCED_BURN_PERCENTAGE)) == (
+        MAINNET_FORCED_BURN_PERCENTAGE
+    ):
+        return
+
+    text = config_path.read_text()
+    lines = text.splitlines()
+    out: list[str] = []
+    in_weights = False
+    saw_weights = False
+    replaced = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_weights and not replaced:
+                out.append(
+                    f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}"
+                )
+                replaced = True
+            in_weights = stripped == "[weights]"
+            saw_weights = saw_weights or in_weights
+
+        if in_weights and stripped.startswith("forced_burn_percentage"):
+            out.append(f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}")
+            replaced = True
+        else:
+            out.append(line)
+
+    if saw_weights and in_weights and not replaced:
+        out.append(f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}")
+    elif not saw_weights:
+        out.extend(
+            [
+                "",
+                "[weights]",
+                f"forced_burn_percentage = {MAINNET_FORCED_BURN_PERCENTAGE:.1f}",
+            ]
+        )
+
+    config_path.write_text("\n".join(out) + "\n")
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return left.expanduser().resolve(strict=False) == right.expanduser().resolve(strict=False)
 
 
 def _toml_string(value: str) -> str:
