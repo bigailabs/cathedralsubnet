@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_DIR="/opt/cathedral/source"
 INSTALL_PREFIX="/opt/cathedral"
 ALLOWED_SIGNERS="${INSTALL_PREFIX}/allowed_signers"
+VALIDATOR_ENV="/etc/cathedral/validator.env"
 TAG_PREFIX="v"
 POLL_SECS=600
 
@@ -55,8 +56,27 @@ while true; do
     git checkout --quiet "$latest"
     "$INSTALL_PREFIX/.venv/bin/pip" install --quiet -e .
 
+    if [[ -f "$REPO_DIR/scripts/ecosystem.config.cjs" ]]; then
+      install -m 0644 "$REPO_DIR/scripts/ecosystem.config.cjs" \
+        "$INSTALL_PREFIX/ecosystem.config.cjs"
+    fi
+
+    config_path=""
+    if [[ -f "$VALIDATOR_ENV" ]]; then
+      config_path=$(awk -F= '$1 == "CATHEDRAL_CONFIG_PATH" {print $2}' "$VALIDATOR_ENV" | tail -1)
+    fi
+    if [[ -z "$config_path" && -f /etc/cathedral/testnet.toml ]]; then
+      config_path="/etc/cathedral/testnet.toml"
+    fi
+    if [[ -z "$config_path" ]]; then
+      config_path="/etc/cathedral/mainnet.toml"
+    fi
+
+    echo "$(date -u +%FT%TZ) updater: migrate validator config $config_path"
+    "$INSTALL_PREFIX/.venv/bin/cathedral-validator" migrate --config "$config_path"
+
     echo "$(date -u +%FT%TZ) updater: restart validator"
-    pm2 reload cathedral-validator
+    pm2 start "$INSTALL_PREFIX/ecosystem.config.cjs" --only cathedral-validator --update-env
   fi
 
   sleep "$POLL_SECS"

@@ -118,13 +118,15 @@ Boot persistence is set up via `pm2 startup systemd -u cathedral`; PM2 writes a 
 
 ## Auto-update
 
-The `cathedral-updater` PM2 app runs `/opt/cathedral/bin/updater.sh` on a 600-second loop. Each tick it:
+The `cathedral-updater` PM2 app runs `/opt/cathedral/source/bin/updater.sh` on a 600-second loop. Each tick it:
 
 1. Fetches tags from origin
 2. Compares current HEAD tag to latest `v*` tag (sorted by version)
 3. If different, verifies the tag's SSH signature against `/opt/cathedral/allowed_signers`
-4. Checks out the tag, runs `pip install -e .` in the venv, and `pm2 reload cathedral-validator`
+4. Checks out the tag, runs `pip install -e .` in the venv, copies the current ecosystem file, runs validator migrations, and reloads `cathedral-validator`
 5. Refuses to update on unsigned or untrusted tags (logs `bad signature` + git's stderr, waits)
+
+Managed hosts that were provisioned before the SN39 mainnet default may still have PM2 args pointing at `/etc/cathedral/testnet.toml`. On startup, the validator treats that exact managed path as legacy unless the host explicitly sets `CATHEDRAL_NETWORK=testnet` or `CATHEDRAL_CONFIG_PATH`. It renders `/etc/cathedral/mainnet.toml` from the current template, preserves the local wallet name, hotkey name, wallet path, and Polaris public key from the old config, records `CATHEDRAL_CONFIG_PATH=/etc/cathedral/mainnet.toml` in `validator.env`, and runs SN39 mainnet from that point forward.
 
 Tags are SSH-signed (`gpg.format=ssh`) by the maintainer's `~/.ssh/id_ed25519`. Verification uses `git -c gpg.ssh.allowedSignersFile=/opt/cathedral/allowed_signers tag -v <tag>` and checks the exit code, not output substrings — SSH and GPG produce different "good signature" phrasing and the older substring-grep implementation never matched SSH tags.
 
@@ -241,7 +243,7 @@ The script:
 - Creates the `cathedral` user and standard dirs
 - Clones the repo at the requested release tag
 - Renders `/etc/cathedral/<network>.toml` from `config/<network>.toml` (mainnet by default). `network.validator_hotkey` is filled in with the local wallet hotkey NAME (`BT_WALLET_HOTKEY`), the same value passed to `btcli`. The ss58 is read from disk by the bittensor SDK at runtime.
-- Renders `/etc/cathedral/validator.env` with chmod 600, including `CATHEDRAL_CONFIG_PATH` so PM2 launches the right config file
+- Renders `/etc/cathedral/validator.env` with chmod 600, including `CATHEDRAL_NETWORK` and `CATHEDRAL_CONFIG_PATH` so PM2 launches the right config file
 - Installs PM2 globally, starts the ecosystem, persists across reboots
 - Runs `cathedral-validator migrate` to init the DB
 

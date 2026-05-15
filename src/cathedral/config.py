@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +92,131 @@ class ValidatorSettings(BaseSettings):
     def from_toml(cls, path: str | Path) -> ValidatorSettings:
         data = _load_toml(Path(path))
         return cls.model_validate(data)
+
+
+def resolve_validator_config_path(
+    path: str | Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    repo_root: str | Path | None = None,
+    etc_dir: str | Path | None = None,
+) -> str:
+    """Resolve the validator config path, including the managed SN39 migration.
+
+    Older provisioned hosts were launched by PM2 with
+    `/etc/cathedral/testnet.toml`. The signed-tag updater can only reload that
+    process on the first update, so the validator itself needs to redirect that
+    legacy managed path to a rendered mainnet config.
+    """
+    values = os.environ if env is None else env
+    override = values.get("CATHEDRAL_CONFIG_PATH")
+    if override:
+        return override
+
+    selected_network = values.get("CATHEDRAL_NETWORK", "").strip().lower()
+    if selected_network == "testnet":
+        return str(path)
+
+    root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
+    managed_etc = Path(etc_dir) if etc_dir is not None else Path("/etc/cathedral")
+    requested = Path(path)
+    legacy_testnet = managed_etc / "testnet.toml"
+    mainnet = managed_etc / "mainnet.toml"
+
+    if requested != legacy_testnet:
+        return str(path)
+
+    if not mainnet.exists():
+        _render_managed_mainnet_config(
+            legacy_path=legacy_testnet,
+            mainnet_path=mainnet,
+            template_path=root / "config" / "mainnet.toml",
+        )
+    _ensure_managed_env_path(managed_etc / "validator.env", mainnet)
+    return str(mainnet if mainnet.exists() else requested)
+
+
+def _render_managed_mainnet_config(
+    *,
+    legacy_path: Path,
+    mainnet_path: Path,
+    template_path: Path,
+) -> None:
+    if not legacy_path.exists() or not template_path.exists():
+        return
+
+    current = _load_toml(legacy_path)
+    network = current.get("network", {})
+    polaris = current.get("polaris", {})
+    if not isinstance(network, dict) or not isinstance(polaris, dict):
+        return
+
+    wallet_hotkey = str(network.get("validator_hotkey") or "default")
+    wallet_name = str(network.get("wallet_name") or "cathedral-validator")
+    polaris_key = str(
+        polaris.get("public_key_hex") or "REPLACE_WITH_POLARIS_ED25519_PUBLIC_KEY_HEX"
+    )
+
+    rendered = template_path.read_text()
+    rendered = rendered.replace(
+        'validator_hotkey = "REPLACE_ME"',
+        f"validator_hotkey = {_toml_string(wallet_hotkey)}",
+    )
+    rendered = rendered.replace(
+        'wallet_name = "cathedral-validator"',
+        f"wallet_name = {_toml_string(wallet_name)}",
+    )
+    rendered = rendered.replace(
+        'public_key_hex = "REPLACE_WITH_POLARIS_ED25519_PUBLIC_KEY_HEX"',
+        f"public_key_hex = {_toml_string(polaris_key)}",
+    )
+
+    wallet_path = network.get("wallet_path")
+    if wallet_path and "wallet_path =" not in rendered:
+        rendered = rendered.replace(
+            f"wallet_name = {_toml_string(wallet_name)}",
+            f"wallet_name = {_toml_string(wallet_name)}\n"
+            f"wallet_path = {_toml_string(str(wallet_path))}",
+        )
+
+    mainnet_path.parent.mkdir(parents=True, exist_ok=True)
+    mainnet_path.write_text(rendered)
+    mainnet_path.chmod(0o644)
+
+
+def _ensure_managed_env_path(env_path: Path, config_path: Path) -> None:
+    existing = env_path.read_text().splitlines() if env_path.exists() else []
+    updates = {
+        "CATHEDRAL_CONFIG_PATH": str(config_path),
+        "CATHEDRAL_NETWORK": "mainnet",
+    }
+    seen: set[str] = set()
+    lines: list[str] = []
+
+    for line in existing:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            lines.append(line)
+            continue
+        key = line.split("=", 1)[0]
+        if key in updates:
+            lines.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            lines.append(line)
+
+    for key, value in updates.items():
+        if key not in seen:
+            lines.append(f"{key}={value}")
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("\n".join(lines) + "\n")
+    env_path.chmod(0o600)
+
+
+def _toml_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 # --------------------------------------------------------------------------

@@ -217,6 +217,8 @@ cat > "$TMP_ENV" <<EOF
 CATHEDRAL_BEARER=${CATHEDRAL_BEARER}
 CATHEDRAL_PUBLIC_KEY_HEX=${CATHEDRAL_PUBLIC_KEY_HEX}
 CATHEDRAL_PUBLISHER_TOKEN=
+CATHEDRAL_NETWORK=${CATHEDRAL_NETWORK}
+CATHEDRAL_CONFIG_PATH=${CONFIG_DST}
 EOF
 sudo install -o cathedral -g cathedral -m 0600 "$TMP_ENV" "$ETC_DIR/validator.env"
 
@@ -239,13 +241,6 @@ if [[ ! -f "$ECOSYSTEM_SRC" ]]; then
   exit 1
 fi
 sudo install -o cathedral -g cathedral -m 0644 "$ECOSYSTEM_SRC" "$ECOSYSTEM_DST"
-
-# Append CATHEDRAL_CONFIG_PATH to validator.env so ecosystem.config.cjs
-# launches the right config (mainnet by default; testnet only when
-# explicitly selected via CATHEDRAL_NETWORK=testnet).
-if ! sudo grep -q '^CATHEDRAL_CONFIG_PATH=' "$ETC_DIR/validator.env"; then
-  echo "CATHEDRAL_CONFIG_PATH=$CONFIG_DST" | sudo tee -a "$ETC_DIR/validator.env" >/dev/null
-fi
 
 # --- Step 12: pm2 start -----------------------------------------------------
 

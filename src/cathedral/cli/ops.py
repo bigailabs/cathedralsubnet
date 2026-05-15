@@ -48,8 +48,9 @@ def chain_check(
     metagraph. Exits non-zero on any failure.
     """
     from cathedral.chain import BittensorChain  # heavy import
-    from cathedral.config import ValidatorSettings
+    from cathedral.config import ValidatorSettings, resolve_validator_config_path
 
+    config = resolve_validator_config_path(config)
     settings = ValidatorSettings.from_toml(config)
     chain = BittensorChain(
         network=settings.network.name,
