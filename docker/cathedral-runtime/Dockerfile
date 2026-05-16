@@ -10,7 +10,7 @@
 # ghcr.io/cathedralai/cathedral-runtime:<version>. Bump
 # `CATHEDRAL_RUNTIME_VERSION` below to cut a new release.
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ARG CATHEDRAL_RUNTIME_VERSION=v1.0.0
 ENV CATHEDRAL_RUNTIME_VERSION=${CATHEDRAL_RUNTIME_VERSION} \
