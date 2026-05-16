@@ -406,3 +406,65 @@ async def test_eval_output_projection_carries_attestation(
     )
     assert projection["polaris_verified"] is True
     assert projection["polaris_attestation"] == attestation
+
+
+@pytest.mark.asyncio
+async def test_score_and_sign_rollbacks_when_submission_score_update_fails(
+    conn: aiosqlite.Connection,
+    signer: Any,
+    registry: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cathedralai/cathedral#69: eval_runs insert + submission score update
+    share one commit. If the score update fails, the eval_run must not
+    remain visible (no orphan signed row without matching submission state).
+    """
+    from cathedral.eval.scoring_pipeline import score_and_sign
+    from cathedral.publisher import repository
+
+    sub = await _insert_minimal_submission(conn, hotkey_seed="atomic-rollback")
+
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM eval_runs WHERE submission_id = ?",
+        (sub["id"],),
+    )
+    assert int((await cur.fetchone())[0]) == 0
+
+    real_update = repository.update_submission_score
+
+    async def _raise_on_deferred_commit(
+        c: aiosqlite.Connection,
+        submission_id: str,
+        *,
+        current_score: float,
+        current_rank: int,
+        commit: bool = True,
+    ) -> None:
+        if not commit:
+            raise RuntimeError("simulated score persistence failure")
+        await real_update(c, submission_id, current_score=current_score, current_rank=current_rank, commit=commit)
+
+    monkeypatch.setattr(repository, "update_submission_score", _raise_on_deferred_commit)
+
+    with pytest.raises(RuntimeError, match="simulated score persistence failure"):
+        await score_and_sign(
+            conn,
+            submission=sub,
+            epoch=1,
+            round_index=0,
+            polaris_agent_id="polaris-runtime:dep",
+            polaris_run_id="rid-atomic",
+            task_json={"card_id": "eu-ai-act", "epoch": 1, "round_index": 0},
+            output_card_json=_valid_card_dict(),
+            duration_ms=1,
+            polaris_errors=[],
+            registry=registry,
+            signer=signer,
+            polaris_attestation=None,
+        )
+
+    cur2 = await conn.execute(
+        "SELECT COUNT(*) FROM eval_runs WHERE submission_id = ?",
+        (sub["id"],),
+    )
+    assert int((await cur2.fetchone())[0]) == 0
