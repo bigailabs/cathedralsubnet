@@ -121,16 +121,15 @@ def resolve_validator_config_path(
     override = values.get("CATHEDRAL_CONFIG_PATH")
     if override:
         override_path = Path(override)
-        if selected_network != "testnet" and _same_path(override_path, mainnet):
-            _sync_managed_mainnet_weight_policy(override_path)
+        if selected_network != "testnet":
+            _sync_sn39_mainnet_weight_policy(override_path)
         return override
 
     if selected_network == "testnet":
         return str(path)
 
     if requested != legacy_testnet:
-        if _same_path(requested, mainnet):
-            _sync_managed_mainnet_weight_policy(requested)
+        _sync_sn39_mainnet_weight_policy(requested)
         return str(path)
 
     if not mainnet.exists():
@@ -139,7 +138,7 @@ def resolve_validator_config_path(
             mainnet_path=mainnet,
             template_path=root / "config" / "mainnet.toml",
         )
-    _sync_managed_mainnet_weight_policy(mainnet)
+    _sync_sn39_mainnet_weight_policy(mainnet)
     _ensure_managed_env_path(managed_etc / "validator.env", mainnet)
     return str(mainnet if mainnet.exists() else requested)
 
@@ -222,8 +221,8 @@ def _ensure_managed_env_path(env_path: Path, config_path: Path) -> None:
     env_path.chmod(0o600)
 
 
-def _sync_managed_mainnet_weight_policy(config_path: Path) -> None:
-    """Keep managed SN39 configs on the current release burn policy."""
+def _sync_sn39_mainnet_weight_policy(config_path: Path) -> None:
+    """Keep SN39 mainnet configs on the current release burn policy."""
     if not config_path.exists():
         return
     try:
