@@ -12,6 +12,19 @@ Coding-job families build on this substrate. **`bug_repro` (Phase 1 alpha), the 
 
 A hard sandbox gate enforces the trust boundary: `bug_repro` refuses to award any positive score when the sandbox backend is anything other than Docker, unless the operator explicitly opts into the trusted-fixture escape hatch via `CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1`, in which case readiness stays permanently `NEGATIVE`.
 
+### Trust boundary: validator-local sandbox vs Cathedral evaluator service
+
+The Docker-backed `cathedral.v3.sandbox` runner shipped on this branch is an **alpha and dev-harness path only**. It exists so the substrate, oracle, scoring rubric, export firewall, and `bug_repro` fixtures can be exercised end-to-end on a single operator's box. It is **not** the production execution path.
+
+In production, validators should not be executing arbitrary miner-submitted `bug_repro` test code locally. That follows the same trust model as v1 regulatory cards: validators verify signed evaluator output, they do not run untrusted user code themselves. The production `bug_repro` flow is:
+
+1. Miner submits a candidate test against a job.
+2. A Cathedral-controlled **evaluator service** (separate process, isolated infra, hardened image) executes the candidate against the hidden buggy source, the hidden fixed source, and the symptom oracle.
+3. The evaluator emits a signed result (oracle outputs + readiness + failure class + bundle hashes), using the same ed25519 receipt posture as v1 Cathedral signatures.
+4. Validators consume the signed evaluator result, verify the signature, and feed the verified result into the archive and weight loop.
+
+This branch ships steps 1, the local execution backend that step 2 will replace, the scoring/rubric that step 4 will consume, and the export firewall that protects the held-out oracle fields. Steps 2 and 3 (the central evaluator service plus its signing key, attestation surface, and operator runbook) are tracked in #123 and are required before `bug_repro` carries any rewardable weight on mainnet. Until that issue lands, `bug_repro` stays `OPERATOR_REVIEW` by default and is exported only after manual operator promotion.
+
 ## The thesis, restated
 
 A subnet is only as valuable as the data it generates. Cathedral v1 generated **answers**. Cathedral v3 generates **labour**: full trajectories of agent reasoning, tool use, intermediate artifacts, scored outcomes, and signed receipts. Every miner-validator interaction emits a row of training data. After N weeks the archive *is* the SFT corpus, the DPO preference set, the reward-model training signal, and the distillation target.
@@ -28,7 +41,8 @@ This branch is the **launch candidate for the v3 trajectory data substrate plus 
 | `bug_repro` coding task (Phase 1 alpha) | implemented | 3 curated fixtures, validator-side oracle, `task_split=OPERATOR_REVIEW` by default |
 | `CodingFailureClass` enum | implemented | `sandbox_violation`, `no_bug_repro`, `fixed_commit_fails`, `flake`, ... |
 | `TaskSplit` enum + export filter | implemented | default exports refuse `OPERATOR_REVIEW` and `HELDOUT_EVAL`; `HELDOUT_EVAL` is **never** exportable even with explicit `allowed_splits` |
-| Sandbox runner | implemented | `cathedral.v3.sandbox` with `DockerBackend` (real isolation) and `SubprocessBackend` (degraded fallback). `bug_repro` rubric refuses any positive score from subprocess unless `CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1` is set, and even then readiness stays `NEGATIVE`. |
+| Sandbox runner | implemented, **alpha / dev-harness only** | `cathedral.v3.sandbox` with `DockerBackend` (real isolation) and `SubprocessBackend` (degraded fallback). Local-validator execution is for substrate development; production `bug_repro` execution belongs in a Cathedral evaluator service (see "Trust boundary" above). `bug_repro` rubric refuses any positive score from subprocess unless `CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1` is set, and even then readiness stays `NEGATIVE`. |
+| Cathedral evaluator service (signed `bug_repro` results) | **planned** | Production path. Validators consume signed evaluator output, do not execute miner test code locally. Tracked separately. |
 | Signed repo bundle builder | implemented | `cathedral.v3.bundle`: per-file BLAKE3, aggregate BLAKE3, ed25519 signature. `verify_bundle` re-validates every entry path; `materialize_bundle` refuses to write outside `dest` |
 | Hidden-field export firewall | implemented | `hidden_context` strings are scrubbed out of SFT tool args, SFT final output, DPO `chosen`/`rejected`, RM `completion`. Oracle result keys retain their schema but values become `<oracle-output>` |
 | Echo / heuristic / LLM reference miners | implemented | LLM falls back to heuristic when `CATHEDRAL_V3_LLM_API_KEY` is unset |

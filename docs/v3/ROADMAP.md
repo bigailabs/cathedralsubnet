@@ -23,7 +23,7 @@ Goal: add the missing infra that coding-job families (bug_repro, test_gen) need 
 
 **Phase 1 status: alpha-shipped on this branch.** Items 1-6 below are implemented and tested. Calibration, gaming-detection, and reward-weight tuning still in progress before public exposure.
 
-1. **Sandbox runner.** [shipped] Docker-based (`DockerBackend`) with `--network=none`, read-only root, tmpfs work dir, env allowlist, CPU/RAM/wallclock limits, no host file mounts, no Linux capabilities. `SubprocessBackend` ships as degraded fallback for CI; `available_backend()` prefers Docker when the daemon responds.
+1. **Sandbox runner (alpha / dev-harness only).** [shipped] Docker-based (`DockerBackend`) with `--network=none`, read-only root, tmpfs work dir, env allowlist, CPU/RAM/wallclock limits, no host file mounts, no Linux capabilities. `SubprocessBackend` ships as degraded fallback for CI; `available_backend()` prefers Docker when the daemon responds. **This is the substrate development path, not the production execution path.** Production `bug_repro` execution belongs in the Cathedral evaluator service (Phase 1.5); validators should not run arbitrary miner-submitted test code locally on mainnet.
 2. **Repo bundle builder.** [shipped] `src/cathedral/v3/bundle/builder.py` — signed manifest, per-file BLAKE3, aggregate BLAKE3, ed25519 signature, materialize with path-escape refusal, full tamper-evidence test coverage.
 3. **Coding-trajectory schema fields.** [shipped] `TaskSplit` enum (`train_exportable`, `public_leaderboard`, `heldout_eval`, `operator_review`) on `JobSpec`. `JobSpec.hidden_context` separated from `JobSpec.context`; `public_view()` excludes hidden context. Export firewall (`prompt_visible_to_miner()`, `_collect_hidden_strings()`) scrubs hidden context, oracle outputs, and held-out splits from SFT/DPO/RM JSONL.
 4. **Code-specific failure-reason enum.** [shipped] `CodingFailureClass`: `sandbox_violation`, `no_bug_repro`, `fixed_commit_fails`, `flake` (plus generic `FailureClass` for non-code task types).
@@ -31,6 +31,18 @@ Goal: add the missing infra that coding-job families (bug_repro, test_gen) need 
 6. **SFT / DPO / RM exports for `bug_repro`.** [shipped] Hidden-field firewall scrubs `fixed_source`, `expected_symptom`, `reference_test_source`, oracle result values (`fails_on_buggy`, `passes_on_fixed`, `symptom_match`, `sandbox_backend`) from all three exports. DPO export refuses unsafe `bug_repro` pairs (subprocess or trusted-fixture mode). `HELDOUT_EVAL` is unconditionally non-exportable.
 
 Exit: scaled to ≥10 curated `bug_repro` jobs (currently 3), operator-review queue surfaces gaming attempts on real submissions, and the exports produce defensible SFT/DPO/RM rows under real miner traffic.
+
+## Phase 1.5: Cathedral evaluator service (gate to rewardable bug_repro)
+
+Goal: move `bug_repro` execution off validators and onto a Cathedral-controlled evaluator service so the production trust flow matches v1 (validators verify signed evaluator output; they do not run arbitrary miner code locally). This phase is **load-bearing**: until it ships, `bug_repro` stays `OPERATOR_REVIEW` by default and carries no rewardable weight.
+
+1. **Evaluator service.** Separate process and image with hardened isolation (network egress denied, read-only root, ephemeral work dirs, CPU/RAM/wallclock limits). Owns the hidden buggy/fixed sources and the symptom oracle. Receives candidate tests from the validator over an authenticated channel; executes them; returns `fails_on_buggy`, `passes_on_fixed`, `symptom_match`, readiness, and failure class.
+2. **Evaluator signing key + receipt.** ed25519 key (same posture as v1 Cathedral signatures). Result is signed; canonical payload includes job id, candidate bundle BLAKE3, oracle outputs, readiness, failure class, evaluator image digest, wall-clock.
+3. **Validator-side verifier.** Validator no longer runs `cathedral.v3.sandbox` for production `bug_repro`. It signs and forwards the candidate to the evaluator, verifies the signed result, and feeds it into the archive and the weight loop. Local sandbox stays available behind a dev-only flag.
+4. **Operator runbook + key rotation.** How to provision the evaluator, rotate its key, publish the trust set to validators, and roll a new image digest.
+5. **Tracking.** Filed as #123; this PR ships the substrate that the validator-side verifier will consume.
+
+Exit: rewardable `bug_repro` runs end-to-end on testnet using a Cathedral-hosted evaluator with no validator-local execution of miner code.
 
 ## Phase 2 — `test_gen` and scale (weeks 4-10)
 
