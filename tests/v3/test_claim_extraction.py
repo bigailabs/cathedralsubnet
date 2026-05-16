@@ -148,7 +148,7 @@ def test_invalid_json_in_final_answer_block_raises() -> None:
 
 def test_valid_json_wrong_shape_is_not_repair_worthy() -> None:
     """If the agent returned valid JSON but missed required fields,
-    a repair prompt is unlikely to help — they understand JSON, they
+    a repair prompt is unlikely to help; they understand JSON, they
     just don't follow the schema."""
     stdout = (
         "```FINAL_ANSWER\n"

@@ -283,7 +283,7 @@ def test_oracle_has_symbol_no_cap_applied() -> None:
         "failure_mode": "off-by-one loop boundary",
     }
     s = _score(claim)
-    # 0.35 + 0 + 0.25 + 0.20 = 0.80 — coincidence with the cap value
+    # 0.35 + 0 + 0.25 + 0.20 = 0.80, coincidence with the cap value
     # but the cap is NOT what's producing it; verify by raising another
     # slice and seeing the score exceed 0.80.
     assert s.culprit_symbol == 0.0
