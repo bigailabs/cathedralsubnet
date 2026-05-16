@@ -519,30 +519,18 @@ _V1_LAUNCH_CARDS: tuple[dict[str, Any], ...] = (
         "jurisdiction": "eu",
         "topic": "EU AI Act enforcement and guidance",
     },
-    {
-        "id": "us-ai-eo",
-        "display_name": "US AI Executive Order",
-        "jurisdiction": "us",
-        "topic": "US executive orders and federal AI guidance",
-    },
-    {
-        "id": "uk-ai-whitepaper",
-        "display_name": "UK AI White Paper",
-        "jurisdiction": "uk",
-        "topic": "UK pro-innovation AI regulation framework",
-    },
-    {
-        "id": "singapore-pdpc",
-        "display_name": "Singapore PDPC",
-        "jurisdiction": "sg",
-        "topic": "Singapore PDPC enforcement and guidance",
-    },
-    {
-        "id": "japan-meti-mic",
-        "display_name": "Japan METI / MIC",
-        "jurisdiction": "jp",
-        "topic": "Japan METI/MIC AI and data guidance",
-    },
+)
+
+# Card IDs that were part of an earlier 5-card launch plan and have been
+# deprecated. Existing production rows for these IDs are archived at
+# Docker startup (see `cathedral-publisher archive-cards` in cli.py) so
+# submit and eval-spec lookups return 404. Keeping the list here in code
+# (not just docs) so the archival is idempotent and self-documenting.
+_V1_DEPRECATED_CARD_IDS: tuple[str, ...] = (
+    "us-ai-eo",
+    "uk-ai-whitepaper",
+    "singapore-pdpc",
+    "japan-meti-mic",
 )
 
 

@@ -17,7 +17,6 @@ LLM-generated cards on the leaderboard.
 
 - **Home**: https://cathedral.computer/
 - **EU AI Act card**: https://cathedral.computer/cards/eu-ai-act/ — verified agents, score 1.0
-- **UK AI Whitepaper card**: https://cathedral.computer/cards/uk-ai-whitepaper/ — verified Policy Analyst flavor
 - **Workforce**: https://cathedral.computer/workforce/ — agent registry
 - **Plans (scaffold)**: https://cathedral.computer/plans/ — six categories, rubrics pending Fred's hand-draft
 - **Research/discovery**: https://cathedral.computer/research/ — unverified browse surface

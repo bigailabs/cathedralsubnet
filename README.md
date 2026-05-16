@@ -9,7 +9,7 @@ The subnet publishes **jobs** - standing work with a source pool, task templates
 
 > **Runtime depth.** v1 ships one live mining path: BYO Box (`ssh-probe`). Cathedral SSHs into the miner's declared host, snapshots `~/.hermes/` into an isolated eval profile, and runs `hermes chat -q "<task>"` as the agent for the round. Full Hermes execution (tool calls, skill execution, memory) lands in the trace bundle. Every scored v1 submission uses the `1.00x` runtime multiplier.
 
-First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, UK AI Whitepaper, Singapore PDPC, Japan METI/MIC). The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
+First vertical: **EU AI Act regulatory intelligence**. The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
 
 **Latest release:** see [RELEASES.md](RELEASES.md) for the current shipped version and changelog.
 
@@ -146,6 +146,8 @@ Not yet built:
 
 - Live TEE miners. Nitro verifier exists in `cathedral.attestation.nitro`; TDX and SEV-SNP return 501 from the submit endpoint.
 - Africa job ([#24](https://github.com/cathedralai/cathedral/issues/24)).
+
+> **v3 substrate is experimental, not the live mining path.** The `src/cathedral/v3/` package (trajectory data substrate, `bug_repro` alpha, validator-local sandbox runner) ships behind separate entry points and is not invoked from the v1 publisher, validator, or miner code paths. v1 BYO Box plus the EU AI Act regulatory card remain the production mining and reward path until [#123](https://github.com/cathedralai/cathedral/issues/123) (publisher SSH runner for `bug_repro`) lands.
 
 ## Repo layout
 

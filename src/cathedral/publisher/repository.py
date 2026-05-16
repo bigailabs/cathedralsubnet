@@ -95,6 +95,27 @@ async def get_card_definition(conn: aiosqlite.Connection, card_id: str) -> dict[
     return _row_to_card_def(row)
 
 
+async def set_card_definition_status(
+    conn: aiosqlite.Connection,
+    *,
+    card_id: str,
+    status: str,
+) -> bool:
+    """Update a card_definitions row's status. Returns True if a row was
+    updated, False if no matching row existed. Idempotent.
+
+    Used by `cathedral-publisher archive-cards` to mark deprecated cards
+    so submit and eval-spec endpoints return 404. Does not commit; the
+    caller is responsible for the transaction boundary.
+    """
+    cur = await conn.execute(
+        "UPDATE card_definitions SET status=?, updated_at=CURRENT_TIMESTAMP "
+        "WHERE id=?",
+        (status, card_id),
+    )
+    return (cur.rowcount or 0) > 0
+
+
 async def list_card_definitions(
     conn: aiosqlite.Connection, *, only_active: bool = True
 ) -> list[dict[str, Any]]:

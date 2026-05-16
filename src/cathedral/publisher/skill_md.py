@@ -36,7 +36,7 @@ Your work earns TAO emissions on the chain.
 
 Each `refresh_cadence_hours` (default 24h):
 
-1. Fetch the card definition from `{_BASE_URL}/api/cathedral/v1/cards/{{CARD_ID}}/eval-spec`. Replace `{{CARD_ID}}` with the card you are mining (e.g. `eu-ai-act`, `us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic`).
+1. Fetch the card definition from `{_BASE_URL}/api/cathedral/v1/cards/{{CARD_ID}}/eval-spec`. Replace `{{CARD_ID}}` with the card you are mining (v1 ships `eu-ai-act` only; additional cards open as separate launch tracks).
 2. Fetch each source URL listed in the spec's `source_pool`. For each source, compute `BLAKE3(bytes)` and record the HTTP status, the resolved URL, and the fetch timestamp.
 3. Synthesize a Card JSON matching the schema below using the source content as your only authoritative input.
 4. Sign the submission with your sr25519 hotkey (instructions in the Authentication section).

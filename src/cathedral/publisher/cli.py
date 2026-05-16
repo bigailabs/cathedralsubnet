@@ -105,10 +105,6 @@ def seed_cards(
 
     launch_cards = [
         ("eu-ai-act", "EU AI Act", "eu", "EU AI Act enforcement and guidance"),
-        ("us-ai-eo", "US AI Executive Order", "us", "Federal AI executive orders + guidance"),
-        ("uk-ai-whitepaper", "UK AI Whitepaper", "uk", "UK pro-innovation AI regulation framework"),
-        ("singapore-pdpc", "Singapore PDPC", "sg", "Singapore PDPC rulings + guidance"),
-        ("japan-meti-mic", "Japan METI/MIC", "jp", "Japan METI + MIC AI/data guidance"),
     ]
 
     async def _run() -> None:
@@ -162,7 +158,7 @@ def load_eval_spec(
         help="Base URL of the cathedral-eval-spec content (raw GitHub).",
     ),
     cards: str = typer.Option(
-        "eu-ai-act,us-ai-eo,uk-ai-whitepaper,singapore-pdpc,japan-meti-mic",
+        "eu-ai-act",
         "--cards",
         help="Comma-separated card IDs to load.",
     ),
@@ -236,6 +232,48 @@ def load_eval_spec(
                 )
                 typer.echo(f"  loaded {card_id}: {len(source_pool)} sources, "
                            f"{len(task_templates)} task templates")
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+@app.command("archive-cards")
+def archive_cards(
+    card_ids: list[str] = typer.Argument(  # noqa: B008
+        ...,
+        help="One or more card IDs to mark status='archived'.",
+    ),
+    database_path: str = typer.Option("data/publisher.db", "--db", "-d"),
+) -> None:
+    """Mark existing card_definitions rows as ``status='archived'``.
+
+    Idempotent. Safe to run on every deploy. Cards that are already
+    archived stay archived; cards that do not exist are skipped (no error,
+    no insert). Used by the Docker startup sequence to deprecate cards
+    that were part of an earlier launch plan: archived cards return 404
+    from ``POST /v1/agents/submit`` and ``GET /v1/cards/{id}/eval-spec``.
+
+    Example::
+
+        cathedral-publisher archive-cards us-ai-eo uk-ai-whitepaper
+    """
+    configure()
+
+    from cathedral.publisher import repository
+
+    async def _run() -> None:
+        conn = await connect(database_path)
+        try:
+            for card_id in card_ids:
+                updated = await repository.set_card_definition_status(
+                    conn, card_id=card_id, status="archived"
+                )
+                if updated:
+                    typer.echo(f"archived {card_id}")
+                else:
+                    typer.echo(f"skipped {card_id} (no row)")
+            await conn.commit()
         finally:
             await conn.close()
 
