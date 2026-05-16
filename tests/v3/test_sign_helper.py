@@ -153,6 +153,31 @@ def test_hash_challenge_id_is_stable_and_one_way() -> None:
     assert len(hash_challenge_id("ch_any")) == 12
 
 
+def test_hash_challenge_id_unsalted_is_deterministic_across_runs() -> None:
+    """The unsalted form is the framework default. It is reversible
+    by anyone who can enumerate plausible challenge_ids, which is
+    why production must call with an epoch_salt. Locked here so a
+    future tweak to the salt-free path is noticed by tests."""
+    a1 = hash_challenge_id("ch_alpha")
+    a2 = hash_challenge_id("ch_alpha")
+    assert a1 == a2, "unsalted hash must be stable for caching"
+
+
+def test_hash_challenge_id_epoch_salt_rotates_public_id() -> None:
+    """With a salt, the same raw id hashes to different public ids
+    across epochs. This is the production behavior before live
+    feed exposure."""
+    raw = "ch_alpha"
+    h_e1 = hash_challenge_id(raw, epoch_salt="epoch_1")
+    h_e2 = hash_challenge_id(raw, epoch_salt="epoch_2")
+    h_none = hash_challenge_id(raw)
+    assert h_e1 != h_e2, "different salts must yield different public ids"
+    assert h_e1 != h_none, "salted and unsalted must differ"
+    assert hash_challenge_id(raw, epoch_salt="epoch_1") == h_e1, (
+        "salted hash must still be deterministic for a given (raw, salt) pair"
+    )
+
+
 # --------------------------------------------------------------------------
 # Keyset enforcement
 # --------------------------------------------------------------------------

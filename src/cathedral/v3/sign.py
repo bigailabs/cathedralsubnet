@@ -62,16 +62,31 @@ _V3_SIGNED_KEYS: frozenset[str] = frozenset(
 _CHALLENGE_ID_HASH_PREFIX_LEN: int = 12
 
 
-def hash_challenge_id(challenge_id: str) -> str:
-    """SHA-256 of the challenge_id, truncated to a short hex prefix.
+def hash_challenge_id(challenge_id: str, *, epoch_salt: str | None = None) -> str:
+    """Public-feed hash of the challenge_id.
 
-    Stable across runs (sha256 is salt-free). Different challenge_ids
-    map to different hashes; the same id always maps to the same
-    public_id. The hash is one-way: a miner who only sees the
-    public_id cannot recover the raw challenge_id and thus cannot
-    look up the corresponding answer in a shared spreadsheet.
+    **WARNING: TEMPORARY, NON-PRODUCTION WHEN ``epoch_salt`` IS NONE.**
+
+    When ``epoch_salt`` is supplied, the hash is
+    ``sha256(epoch_salt || ":" || challenge_id)`` truncated to a
+    short hex prefix. This rotates the ``raw -> public`` mapping
+    per epoch so two miners cannot share answers by quoting the
+    public id from a previous epoch.
+
+    When ``epoch_salt`` is None (the framework PR default), the
+    hash is a salt-free ``sha256(challenge_id)`` prefix. That is
+    deterministic across hosts and trivially reversible by anyone
+    who can enumerate plausible raw challenge_ids. It is fine for
+    unit tests and for the scaffolding PR (where no challenge_ids
+    are ever served), but MUST be replaced with a salted hash
+    before live exposure (``CATHEDRAL_V3_FEED_ENABLED=true``).
+
+    Live publisher code must always pass ``epoch_salt`` once the
+    feed flips; this is tracked in
+    ``src/cathedral/v3/corpus/CORPUS_TODO.md``.
     """
-    digest = hashlib.sha256(challenge_id.encode()).hexdigest()
+    body = challenge_id if epoch_salt is None else f"{epoch_salt}:{challenge_id}"
+    digest = hashlib.sha256(body.encode()).hexdigest()
     return digest[:_CHALLENGE_ID_HASH_PREFIX_LEN]
 
 
