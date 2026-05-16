@@ -511,12 +511,14 @@ async def update_submission_score(
     *,
     current_score: float,
     current_rank: int,
+    commit: bool = True,
 ) -> None:
     await conn.execute(
         "UPDATE agent_submissions SET current_score=?, current_rank=?, status='ranked' WHERE id=?",
         (current_score, current_rank, submission_id),
     )
-    await conn.commit()
+    if commit:
+        await conn.commit()
 
 
 async def find_existing_bundle_hash(
@@ -655,6 +657,7 @@ async def insert_eval_run(
     eval_artifact_bundle_url: str | None = None,
     eval_artifact_manifest_url: str | None = None,
     eval_output_schema_version: int = 1,
+    commit: bool = True,
 ) -> None:
     """Insert an eval_runs row.
 
@@ -701,6 +704,11 @@ async def insert_eval_run(
       key set. Defaults to 1 so historical rows verify under the v1
       keyset; v1.1.0 publisher writes 2 when
       ``CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD=true``.
+
+    ``commit`` (default True): when False, the INSERT stays inside the
+    caller's transaction; ``score_and_sign`` pairs this with
+    ``update_submission_score(..., commit=False)`` and a single commit
+    (cathedralai/cathedral#69).
     """
     await conn.execute(
         """
@@ -745,7 +753,8 @@ async def insert_eval_run(
             int(eval_output_schema_version),
         ),
     )
-    await conn.commit()
+    if commit:
+        await conn.commit()
 
 
 async def list_eval_runs_for_submission(

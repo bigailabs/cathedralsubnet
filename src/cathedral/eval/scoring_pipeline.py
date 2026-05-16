@@ -150,8 +150,10 @@ async def score_and_sign(
 ) -> ScoredEval:
     """Run preflight + scorer, apply first-mover delta, build + sign EvalRun.
 
-    Inserts the row into `eval_runs` and updates `agent_submissions`
-    rolling score + rank. Returns the persisted record for caller use.
+    Inserts the row into ``eval_runs`` and updates ``agent_submissions``
+    rolling score + rank in a **single** database transaction (commits
+    once at the end; rolls back if anything after the insert fails).
+    Returns the persisted record for caller use.
 
     v1.1.0 (cathedralai/cathedral#75 PR 4): when
     ``published_artifact`` is supplied (an
@@ -362,6 +364,9 @@ async def score_and_sign(
         }
     signature = signer.sign(public_payload)
 
+    # Single transaction for eval_runs INSERT + agent_submissions score/rank
+    # UPDATE (cathedralai/cathedral#69). A crash between the two former
+    # commits left a signed eval_run with a stale submission row.
     await repository.insert_eval_run(
         conn,
         id=eval_run_id,
@@ -399,23 +404,32 @@ async def score_and_sign(
             published_artifact.manifest_url if published_artifact is not None else None
         ),
         eval_output_schema_version=schema_version,
+        commit=False,
     )
-
-    # Update rolling 30-day average + rank
-    avg = await repository.rolling_avg_score(conn, str(submission_id), days=30)
-    if avg is None:
-        avg = weighted_final
-    # Exclude this submission from the rank query — its current_score row
-    # still holds the PREVIOUS avg until update_submission_score below
-    # commits the new one. Without exclusion, a cadence refresh that
-    # lowers the score would count the row's own old higher score and
-    # over-rank it by one. Pre-PR-#117 this was masked because the row
-    # was flipped to status='evaluating' before this point (and the rank
-    # query filters status='ranked'); cadence rows now stay 'ranked'.
-    rank = await _compute_rank(conn, card_id, avg, exclude_submission_id=str(submission_id))
-    await repository.update_submission_score(
-        conn, str(submission_id), current_score=avg, current_rank=rank
-    )
+    try:
+        # Update rolling 30-day average + rank
+        avg = await repository.rolling_avg_score(conn, str(submission_id), days=30)
+        if avg is None:
+            avg = weighted_final
+        # Exclude this submission from the rank query — its current_score row
+        # still holds the PREVIOUS avg until update_submission_score below
+        # commits the new one. Without exclusion, a cadence refresh that
+        # lowers the score would count the row's own old higher score and
+        # over-rank it by one. Pre-PR-#117 this was masked because the row
+        # was flipped to status='evaluating' before this point (and the rank
+        # query filters status='ranked'); cadence rows now stay 'ranked'.
+        rank = await _compute_rank(conn, card_id, avg, exclude_submission_id=str(submission_id))
+        await repository.update_submission_score(
+            conn,
+            str(submission_id),
+            current_score=avg,
+            current_rank=rank,
+            commit=False,
+        )
+        await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise
 
     logger.info(
         "eval_run_persisted",
