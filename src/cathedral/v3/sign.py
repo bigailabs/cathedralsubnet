@@ -50,6 +50,7 @@ _V3_SIGNED_KEYS: frozenset[str] = frozenset(
         "miner_hotkey",
         "task_type",
         "challenge_id",
+        "challenge_id_public",
         "weighted_score",
         "score_parts",
         "claim",
@@ -126,7 +127,11 @@ def build_signed_v3_bug_isolation_row(
     so the public id rotates per epoch and cannot be used for
     cross-miner answer-sharing.
     """
-    if dispatch_result.ok and dispatch_result.score is not None and dispatch_result.claim is not None:
+    if (
+        dispatch_result.ok
+        and dispatch_result.score is not None
+        and dispatch_result.claim is not None
+    ):
         weighted = dispatch_result.score.weighted_score
         score_parts = dispatch_result.score.to_parts_dict()
         claim_dict = dispatch_result.claim.to_dict()
@@ -144,6 +149,7 @@ def build_signed_v3_bug_isolation_row(
             else {"challenge_id": challenge_id, "_failure_reason": failure_reason}
         )
 
+    challenge_id_public = hash_challenge_id(challenge_id, epoch_salt=epoch_salt)
     signed_subset = {
         "id": eval_run_id,
         "agent_id": submission_id,
@@ -151,6 +157,7 @@ def build_signed_v3_bug_isolation_row(
         "miner_hotkey": miner_hotkey,
         "task_type": "bug_isolation_v1",
         "challenge_id": challenge_id,
+        "challenge_id_public": challenge_id_public,
         "weighted_score": weighted,
         "score_parts": score_parts,
         "claim": claim_dict,
@@ -181,9 +188,7 @@ def build_signed_v3_bug_isolation_row(
     # Envelope (unsigned). Validators tolerate; site uses for UX.
     # When epoch_salt is None (framework PR), the hash is stable and
     # reversible; production must pass a real per-epoch salt.
-    row["challenge_id_public"] = hash_challenge_id(
-        challenge_id, epoch_salt=epoch_salt
-    )
+    row["challenge_id_public"] = challenge_id_public
     if shadow_metrics is not None:
         row["shadow_metrics"] = shadow_metrics
     if failure_reason is not None:

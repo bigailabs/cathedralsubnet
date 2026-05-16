@@ -158,23 +158,22 @@ async def latest_pulled_score_per_hotkey(
     dilute or replace EU AI Act scores by accident.
     """
     await _ensure_pulled_eval_runs_table(conn)
-    if v3_bug_isolation_weight is None:
-        import os
-
-        raw_weight = os.environ.get("CATHEDRAL_V3_BUG_ISOLATION_WEIGHT", "0")
-        try:
-            v3_bug_isolation_weight = float(raw_weight)
-        except ValueError:
-            v3_bug_isolation_weight = 0.0
-    v3_weight = max(0.0, min(1.0, float(v3_bug_isolation_weight)))
+    v3_weight = max(0.0, min(1.0, float(v3_bug_isolation_weight or 0.0)))
     v1_weight = 1.0 - v3_weight
 
     since = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
     cur = await conn.execute(
         """
-        SELECT miner_hotkey, task_type, AVG(weighted_score) FROM pulled_eval_runs
+        SELECT
+            miner_hotkey,
+            CASE
+                WHEN task_type = 'bug_isolation_v1' THEN 'v3'
+                ELSE 'v1'
+            END AS score_bucket,
+            AVG(weighted_score)
+        FROM pulled_eval_runs
         WHERE ran_at >= ?
-        GROUP BY miner_hotkey, task_type
+        GROUP BY miner_hotkey, score_bucket
         """,
         (since,),
     )
@@ -182,16 +181,15 @@ async def latest_pulled_score_per_hotkey(
     by_hotkey: dict[str, dict[str, float]] = {}
     for row in rows:
         hotkey = str(row[0])
-        task_type = str(row[1] or "unknown")
+        score_bucket = str(row[1] or "v1")
         score = float(row[2])
-        by_hotkey.setdefault(hotkey, {})[task_type] = score
+        by_hotkey.setdefault(hotkey, {})[score_bucket] = score
 
     out: dict[str, float] = {}
     for hotkey, scores in by_hotkey.items():
-        v3_score = scores.get("bug_isolation_v1")
-        v1_scores = [score for task, score in scores.items() if task != "bug_isolation_v1"]
-        if v1_scores:
-            v1_score = sum(v1_scores) / len(v1_scores)
+        v1_score = scores.get("v1")
+        v3_score = scores.get("v3")
+        if v1_score is not None:
             if v3_score is None:
                 out[hotkey] = v1_score
             else:
@@ -218,9 +216,13 @@ async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
     cur = await conn.execute("PRAGMA table_info(pulled_eval_runs)")
     cols = {str(row[1]) for row in await cur.fetchall()}
     if "task_type" not in cols:
-        await conn.execute(
-            "ALTER TABLE pulled_eval_runs ADD COLUMN task_type TEXT NOT NULL DEFAULT 'unknown'"
-        )
+        try:
+            await conn.execute(
+                "ALTER TABLE pulled_eval_runs ADD COLUMN task_type TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
     await conn.commit()
 
 
@@ -740,6 +742,7 @@ _SIGNED_EVAL_OUTPUT_KEYS_V3 = frozenset(
         "miner_hotkey",
         "task_type",
         "challenge_id",
+        "challenge_id_public",
         "weighted_score",
         "score_parts",
         "claim",

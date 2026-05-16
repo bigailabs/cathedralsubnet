@@ -219,7 +219,12 @@ class EvalOrchestrator:
             )
             return None
 
-    async def evaluate_one(self, submission: dict[str, Any]) -> None:
+    async def evaluate_one(
+        self,
+        submission: dict[str, Any],
+        *,
+        v3_active_hotkeys: list[str] | None = None,
+    ) -> None:
         log = logger.bind(submission_id=submission["id"], card_id=submission["card_id"])
 
         # Capture the entry status so failure paths know whether this is
@@ -415,9 +420,10 @@ class EvalOrchestrator:
                     epoch=epoch,
                     round_index=round_index,
                     log=log,
+                    active_hotkeys=v3_active_hotkeys,
                 )
             except Exception as exc:
-                log.warning("v3_bug_isolation_failed", error=str(exc))
+                log.exception("v3_bug_isolation_failed", error=str(exc))
             log.info("eval_run_complete", epoch=epoch, round_index=round_index)
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
@@ -435,6 +441,7 @@ class EvalOrchestrator:
         epoch: int,
         round_index: int,
         log: structlog.stdlib.BoundLogger,
+        active_hotkeys: list[str] | None = None,
     ) -> None:
         if not v3_feed_enabled():
             return
@@ -449,20 +456,11 @@ class EvalOrchestrator:
             log.info("v3_bug_isolation_skipped", reason="empty_corpus")
             return
 
-        ranked, _total = await repository.list_submissions_all(
-            self.db,
-            verified_only=True,
-            ranked_only=True,
-            limit=10000,
-        )
-        active_hotkeys = [
-            str(row["miner_hotkey"])
-            for row in ranked
-            if isinstance(row.get("miner_hotkey"), str) and row["miner_hotkey"]
-        ]
+        if active_hotkeys is None:
+            active_hotkeys = await _v3_active_hotkeys_snapshot(self.db)
         miner_hotkey = str(submission["miner_hotkey"])
         if miner_hotkey not in active_hotkeys:
-            active_hotkeys.append(miner_hotkey)
+            active_hotkeys = [*active_hotkeys, miner_hotkey]
 
         corpus_by_id = {row.id: row for row in corpus}
         challenge_row_id = sample_challenge_id_for_hotkey(
@@ -698,11 +696,21 @@ async def run_eval_loop(
             queued_count=len(queued),
             cadence_count=len(due),
         )
+        try:
+            v3_active_hotkeys = (
+                await _v3_active_hotkeys_snapshot(db) if v3_feed_enabled() else None
+            )
+        except aiosqlite.Error as e:
+            logger.warning("v3_active_hotkeys_query_failed", error=str(e))
+            v3_active_hotkeys = None
 
-        async def _process(s: dict[str, Any]) -> None:
+        async def _process(
+            s: dict[str, Any],
+            active_hotkeys: list[str] | None = v3_active_hotkeys,
+        ) -> None:
             async with sem:
                 try:
-                    await orchestrator.evaluate_one(s)
+                    await orchestrator.evaluate_one(s, v3_active_hotkeys=active_hotkeys)
                 except Exception as e:
                     logger.exception("eval_one_crashed", submission_id=s["id"], error=str(e))
                     # An uncaught exception inside evaluate_one would
@@ -718,6 +726,20 @@ async def run_eval_loop(
                         )
 
         await asyncio.gather(*[_process(s) for s in batch])
+
+
+async def _v3_active_hotkeys_snapshot(db: aiosqlite.Connection) -> list[str]:
+    ranked, _total = await repository.list_submissions_all(
+        db,
+        verified_only=True,
+        ranked_only=True,
+        limit=10000,
+    )
+    return [
+        str(row["miner_hotkey"])
+        for row in ranked
+        if isinstance(row.get("miner_hotkey"), str) and row["miner_hotkey"]
+    ]
 
 
 async def _sleep_or_stop(stop: asyncio.Event, secs: float) -> None:

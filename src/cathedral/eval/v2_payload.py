@@ -78,6 +78,7 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
             "miner_hotkey",
             "task_type",
             "challenge_id",
+            "challenge_id_public",
             "weighted_score",
             "score_parts",
             "claim",

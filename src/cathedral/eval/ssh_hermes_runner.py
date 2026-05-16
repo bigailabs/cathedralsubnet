@@ -354,6 +354,8 @@ class SshHermesRunner:
             username=ssh_user,
             miner_hotkey=miner_hotkey,
         )
+        profile_created = False
+        profile_deleted = False
         try:
             # 1. hermes --version (also confirms binary on PATH)
             hermes_version = await self._hermes_version(conn)
@@ -370,6 +372,7 @@ class SshHermesRunner:
 
             # 3. Snapshot the primary profile into the eval profile
             await self._clone_profile(conn, eval_profile)
+            profile_created = True
             trace.eval_profile_name = eval_profile
 
             # 4. Run `hermes chat -q`. Captures stdout (= Card JSON) and
@@ -424,6 +427,7 @@ class SshHermesRunner:
 
             # 8. Tear down the eval profile. Primary profile untouched.
             await self._delete_profile(conn, eval_profile)
+            profile_deleted = True
 
             trace.visit_ended_at = datetime.now(UTC).isoformat()
 
@@ -442,15 +446,16 @@ class SshHermesRunner:
 
         except SshHermesError as exc:
             trace.visit_ended_at = datetime.now(UTC).isoformat()
-            # Best-effort eval profile cleanup even on failure
-            try:
-                await self._delete_profile(conn, eval_profile)
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "ssh_hermes_cleanup_failed",
-                    eval_profile=eval_profile,
-                    error=str(cleanup_exc),
-                )
+            if profile_created and not profile_deleted:
+                try:
+                    await self._delete_profile(conn, eval_profile)
+                    profile_deleted = True
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "ssh_hermes_cleanup_failed",
+                        eval_profile=eval_profile,
+                        error=str(cleanup_exc),
+                    )
             return PolarisRunResult(
                 polaris_agent_id=f"ssh-hermes:{miner_hotkey[:12]}",
                 polaris_run_id=run_id,
@@ -468,6 +473,15 @@ class SshHermesRunner:
                 manifest=None,
             )
         finally:
+            if profile_created and not profile_deleted:
+                try:
+                    await self._delete_profile(conn, eval_profile)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "ssh_hermes_cleanup_failed",
+                        eval_profile=eval_profile,
+                        error=str(cleanup_exc),
+                    )
             try:
                 conn.close()
                 await conn.wait_closed()
@@ -513,12 +527,15 @@ class SshHermesRunner:
             username=ssh_user,
             miner_hotkey=miner_hotkey,
         )
+        profile_created = False
+        profile_deleted = False
         try:
             hermes_version = await self._hermes_version(conn)
             trace.hermes_version = hermes_version
             resolved_home = await self._resolve_hermes_home(conn)
             await self._verify_hermes_install(conn, resolved_home)
             await self._clone_profile(conn, eval_profile)
+            profile_created = True
             trace.eval_profile_name = eval_profile
 
             t_invoke = time.monotonic()
@@ -532,6 +549,7 @@ class SshHermesRunner:
             trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
             trace.visit_ended_at = datetime.now(UTC).isoformat()
             await self._delete_profile(conn, eval_profile)
+            profile_deleted = True
             return BugIsolationHermesRun(
                 stdout=stdout,
                 duration_ms=int((time.monotonic() - t_start) * 1000),
@@ -539,16 +557,27 @@ class SshHermesRunner:
             )
         except SshHermesError:
             trace.visit_ended_at = datetime.now(UTC).isoformat()
-            try:
-                await self._delete_profile(conn, eval_profile)
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "ssh_hermes_cleanup_failed",
-                    eval_profile=eval_profile,
-                    error=str(cleanup_exc),
-                )
+            if profile_created and not profile_deleted:
+                try:
+                    await self._delete_profile(conn, eval_profile)
+                    profile_deleted = True
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "ssh_hermes_cleanup_failed",
+                        eval_profile=eval_profile,
+                        error=str(cleanup_exc),
+                    )
             raise
         finally:
+            if profile_created and not profile_deleted:
+                try:
+                    await self._delete_profile(conn, eval_profile)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "ssh_hermes_cleanup_failed",
+                        eval_profile=eval_profile,
+                        error=str(cleanup_exc),
+                    )
             try:
                 conn.close()
                 await conn.wait_closed()
@@ -764,8 +793,8 @@ class SshHermesRunner:
         actually did work (fetching source URLs, calling tools,
         reasoning across turns) — ``-z`` stripped exactly that out.
 
-        ``hermes chat -q`` writes plain text to stdout — no JSON
-        envelope — so we still instruct the agent in the prompt to
+        ``hermes chat -q`` writes plain text to stdout, with no JSON
+        envelope, so we still instruct the agent in the prompt to
         emit a fenced JSON block, then parse it.
         """
         # Cathedral always wraps the card_definition's task_template with a

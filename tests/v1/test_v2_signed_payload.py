@@ -450,6 +450,7 @@ def test_publisher_signed_keyset_v3_matches_locked_field_list():
             "miner_hotkey",
             "task_type",
             "challenge_id",
+            "challenge_id_public",
             "weighted_score",
             "score_parts",
             "claim",

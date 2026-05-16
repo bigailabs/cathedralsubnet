@@ -456,8 +456,51 @@ async def test_v3_bug_isolation_weight_blends_without_diluting_v1_only_rows(tmp_
         await conn.close()
 
 
+@pytest.mark.asyncio
+async def test_v1_pool_averages_rows_not_task_type_averages(tmp_path) -> None:
+    """Migrated unknown rows and new card rows belong to one v1 pool."""
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        now = datetime.now(UTC).isoformat()
+        for idx in range(4):
+            await upsert_pulled_eval(
+                conn,
+                eval_run={
+                    "id": f"eval-historical-{idx}",
+                    "card_id": "eu-ai-act",
+                    "weighted_score": 0.0,
+                    "ran_at": now,
+                },
+                miner_hotkey="hk-migrated",
+            )
+            await conn.execute(
+                "UPDATE pulled_eval_runs SET task_type='unknown' WHERE eval_run_id=?",
+                (f"eval-historical-{idx}",),
+            )
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-new-eu-card",
+                "card_id": "eu-ai-act",
+                "weighted_score": 1.0,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-migrated",
+        )
+        await conn.commit()
+
+        scores = await latest_pulled_score_per_hotkey(
+            conn,
+            since_days=7,
+            v3_bug_isolation_weight=0.05,
+        )
+        assert scores["hk-migrated"] == pytest.approx(0.2)
+    finally:
+        await conn.close()
+
+
 # --------------------------------------------------------------------------
-# C1 regression — marker write must gate on a successfully drained tick.
+# C1 regression: marker write must gate on a successfully drained tick.
 #
 # PR #109 first-merge review caught: the marker was being written on every
 # outer tick that exited the inner loop, regardless of WHY it exited.

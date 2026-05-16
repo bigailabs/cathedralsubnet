@@ -13,10 +13,8 @@ Locks:
 
 from __future__ import annotations
 
-import base64
 from typing import Any
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.v3.dispatch import dispatch_bug_isolation_claim
@@ -56,7 +54,11 @@ def _good_stdout(challenge_id: str = "ch_seed_a") -> str:
     )
 
 
-def _sign_and_get_row(stdout: str, *, challenge_id: str = "ch_seed_a") -> tuple[dict[str, Any], _FakeSigner]:
+def _sign_and_get_row(
+    stdout: str,
+    *,
+    challenge_id: str = "ch_seed_a",
+) -> tuple[dict[str, Any], _FakeSigner]:
     sk = Ed25519PrivateKey.generate()
     signer = _FakeSigner(sk)
     dispatch = dispatch_bug_isolation_claim(
@@ -216,11 +218,10 @@ def test_build_signed_v3_row_forwards_epoch_salt() -> None:
     assert row_e1["challenge_id_public"] == hash_challenge_id(
         "ch_alpha", epoch_salt="epoch_1"
     )
-    # Signed bytes are identical (epoch_salt is envelope-only); the
-    # cathedral_signature should remain consistent across salt
-    # changes because nothing in the signed subset moved.
-    assert row_no_salt["cathedral_signature"] == row_e1["cathedral_signature"]
-    assert row_e1["cathedral_signature"] == row_e2["cathedral_signature"]
+    # The public id is now signed, so changing the salt changes the
+    # canonical bytes and the signature.
+    assert row_no_salt["cathedral_signature"] != row_e1["cathedral_signature"]
+    assert row_e1["cathedral_signature"] != row_e2["cathedral_signature"]
 
 
 # --------------------------------------------------------------------------
@@ -240,7 +241,8 @@ def test_build_v3_row_refuses_to_emit_extra_signed_fields() -> None:
     row, _ = _sign_and_get_row(_good_stdout())
     signed_keys = {
         "id", "agent_id", "agent_display_name", "miner_hotkey", "task_type",
-        "challenge_id", "weighted_score", "score_parts", "claim", "ran_at",
+        "challenge_id", "challenge_id_public", "weighted_score", "score_parts",
+        "claim", "ran_at",
     }
     # The row has more fields than the signed subset (envelope), but
     # the signed subset itself was complete.

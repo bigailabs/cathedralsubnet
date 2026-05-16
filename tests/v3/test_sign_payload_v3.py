@@ -36,6 +36,7 @@ EXPECTED_V3_KEYS: frozenset[str] = frozenset(
         "miner_hotkey",
         "task_type",
         "challenge_id",
+        "challenge_id_public",
         "weighted_score",
         "score_parts",
         "claim",
@@ -54,6 +55,7 @@ def _build_v3_signed_record(sk: Ed25519PrivateKey, *, idx: int = 0) -> dict[str,
         "miner_hotkey": f"5FakeHotkey{idx}",
         "task_type": "bug_isolation_v1",
         "challenge_id": f"ch_seed_{idx}",
+        "challenge_id_public": f"public{idx:06d}",
         "weighted_score": 0.42 + 0.01 * idx,
         "score_parts": {
             "culprit_file": 1.0,
@@ -160,6 +162,15 @@ def test_v3_record_rejects_tampered_challenge_id() -> None:
     pk = sk.public_key()
     record = _build_v3_signed_record(sk, idx=13)
     record["challenge_id"] = "ch_attacker_substitute"
+    with pytest.raises(pull_loop_module.PullVerificationError):
+        pull_loop_module.verify_eval_output_signature(record, pk)
+
+
+def test_v3_record_rejects_tampered_challenge_id_public() -> None:
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+    record = _build_v3_signed_record(sk, idx=17)
+    record["challenge_id_public"] = "altered-public-id"
     with pytest.raises(pull_loop_module.PullVerificationError):
         pull_loop_module.verify_eval_output_signature(record, pk)
 
