@@ -88,7 +88,9 @@ async def list_agents(
         )
     return {
         "items": [
-            _submission_to_leaderboard_entry(s) for s in items if s["current_score"] is not None
+            _submission_to_leaderboard_entry(s)
+            for s in items
+            if s["current_score"] is not None and s.get("status") == "ranked"
         ],
         "total": total,
         "limit": limit,
@@ -664,13 +666,18 @@ def _dedupe_leaderboard_by_hotkey(
     leaderboard now matches that.
 
     Assumes ``submissions`` is already sorted by score descending — the
-    first row seen for each hotkey is that miner's best. Drops rows with
-    ``current_score is None`` (still evaluating).
+    first row seen for each hotkey is that miner's best. Drops rows
+    that aren't currently ranked: ``current_score is None`` covers the
+    never-evaluated case; ``status != 'ranked'`` covers in-flight
+    transitions where the row still carries a prior score but no fresh
+    commit has landed yet (queued first-eval, evaluating refresh).
     """
     seen_hotkeys: set[str] = set()
     items: list[dict[str, Any]] = []
     for s in submissions:
         if s["current_score"] is None:
+            continue
+        if s.get("status") != "ranked":
             continue
         hk = s["miner_hotkey"]
         if hk in seen_hotkeys:
@@ -683,6 +690,13 @@ def _dedupe_leaderboard_by_hotkey(
 
 
 def _submission_to_leaderboard_entry(sub: dict[str, Any]) -> dict[str, Any]:
+    # `latest_eval_at` is the synthetic column added by
+    # `list_submissions_*` (MAX(eval_runs.ran_at)). Falls back to
+    # `submitted_at` only when no eval_runs row exists yet — that
+    # window is brief in production but matters for tests + fixtures
+    # that build the dict directly without the join. Falls back to
+    # `_now_iso()` as last resort to satisfy the wire-shape contract.
+    last_eval_at = sub.get("latest_eval_at") or sub.get("submitted_at") or _now_iso()
     return {
         "agent_id": sub["id"],
         "display_name": sub["display_name"],
@@ -691,7 +705,7 @@ def _submission_to_leaderboard_entry(sub: dict[str, Any]) -> dict[str, Any]:
         "card_id": sub["card_id"],
         "current_score": sub["current_score"] or 0.0,
         "current_rank": sub["current_rank"] or 0,
-        "last_eval_at": sub.get("submitted_at", _now_iso()),
+        "last_eval_at": last_eval_at,
     }
 
 
