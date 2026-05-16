@@ -1,8 +1,8 @@
-# Cathedral v3 — Roadmap to distillation
+# Cathedral v3: Roadmap to distillation
 
 The v3 spike on `experimental/cathedral-v3-launch` (originating from the earlier `experimental/cathedral-v2-agentic-workforce` branch) is the seed. The roadmap below is how the seed becomes a model.
 
-## Phase 0 — what shipped (this branch)
+## Phase 0: what shipped (this branch)
 
 - Five generic task types: research, code_patch, tool_route, multi_step, classify
 - Three reference miners: echo, heuristic, llm
@@ -17,14 +17,14 @@ The v3 spike on `experimental/cathedral-v3-launch` (originating from the earlier
 
 Definition of done for phase 0: `cathedral-v3 serve --ticks 3 --miners echo,heuristic` runs end-to-end, produces ≥15 signed trajectories, and `cathedral-v3 export sft` emits a non-empty JSONL. Verified in `tests/v3/test_e2e.py`.
 
-## Phase 1 — coding-job substrate (weeks 1-4)
+## Phase 1: coding-job substrate (weeks 1-4)
 
-Goal: add the missing infra that coding-job families (bug_repro, test_gen) need before they can be public tasks. Sequence is load-bearing — do not skip ahead.
+Goal: add the missing infra that coding-job families (bug_repro, test_gen) need before they can be public tasks. Sequence is load-bearing; do not skip ahead.
 
 **Phase 1 status: alpha-shipped on this branch.** Items 1-6 below are implemented and tested. Calibration, gaming-detection, and reward-weight tuning still in progress before public exposure.
 
 1. **Sandbox runner (alpha / dev-harness only).** [shipped] Docker-based (`DockerBackend`) with `--network=none`, read-only root, tmpfs work dir, env allowlist, CPU/RAM/wallclock limits, no host file mounts, no Linux capabilities. `SubprocessBackend` ships as degraded fallback for CI; `available_backend()` prefers Docker when the daemon responds. **This is the substrate development path, not the production execution path.** Production `bug_repro` execution belongs in the Cathedral evaluator service (Phase 1.5); validators should not run arbitrary miner-submitted test code locally on mainnet.
-2. **Repo bundle builder.** [shipped] `src/cathedral/v3/bundle/builder.py` — signed manifest, per-file BLAKE3, aggregate BLAKE3, ed25519 signature, materialize with path-escape refusal, full tamper-evidence test coverage.
+2. **Repo bundle builder.** [shipped] `src/cathedral/v3/bundle/builder.py`: signed manifest, per-file BLAKE3, aggregate BLAKE3, ed25519 signature, materialize with path-escape refusal, full tamper-evidence test coverage.
 3. **Coding-trajectory schema fields.** [shipped] `TaskSplit` enum (`train_exportable`, `public_leaderboard`, `heldout_eval`, `operator_review`) on `JobSpec`. `JobSpec.hidden_context` separated from `JobSpec.context`; `public_view()` excludes hidden context. Export firewall (`prompt_visible_to_miner()`, `_collect_hidden_strings()`) scrubs hidden context, oracle outputs, and held-out splits from SFT/DPO/RM JSONL.
 4. **Code-specific failure-reason enum.** [shipped] `CodingFailureClass`: `sandbox_violation`, `no_bug_repro`, `fixed_commit_fails`, `flake` (plus generic `FailureClass` for non-code task types).
 5. **`bug_repro` task type, alpha.** [shipped] `TaskType.BUG_REPRO` with 3 curated fixtures (`off_by_one_sum`, `wrong_default_arg`, `divide_by_zero_guard`). Oracle: `fails_on_buggy`, `passes_on_fixed`, `symptom_match`. Defaults to `TaskSplit.OPERATOR_REVIEW`. Sandbox gate refuses positive score unless `DockerBackend` is available (or `CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1` for trusted-fixture smoke testing, which still tags readiness as `negative`).
@@ -44,7 +44,7 @@ Goal: move `bug_repro` execution off validators and onto a Cathedral-controlled 
 
 Exit: rewardable `bug_repro` runs end-to-end on testnet using a Cathedral-hosted evaluator with no validator-local execution of miner code.
 
-## Phase 2 — `test_gen` and scale (weeks 4-10)
+## Phase 2: `test_gen` and scale (weeks 4-10)
 
 Goal: extend to the harder coding family and start scaling. test_gen comes AFTER bug_repro calibration; mutation infra comes BEFORE test_gen as a public task.
 
@@ -56,7 +56,7 @@ Goal: extend to the harder coding family and start scaling. test_gen comes AFTER
 
 Exit: the archive holds ≥50k coding trajectories across `bug_repro` and `test_gen`, the failure-cluster surface shows a long tail (not just 3 clusters per task type), and preference-pair coverage ≥30% of jobs.
 
-## Phase 3 — feed a trainer (months 3-5)
+## Phase 3: feed a trainer (months 3-5)
 
 Goal: produce the first Cathedral-distilled coding agent.
 
@@ -67,14 +67,14 @@ Goal: produce the first Cathedral-distilled coding agent.
 
 Exit: a Cathedral-distilled coding agent is live as a `MinerAgent` and earns weights on the subnet using only data the subnet itself produced. The flywheel closes.
 
-## Phase 4 — generalize the labour (months 5-9)
+## Phase 4: generalize the labour (months 5-9)
 
 Goal: become the data substrate other teams build on.
 
 - Open the job-generation surface: external parties submit jobs (under a Cathedral-signed `JobSpec`) and pay TAO to have the workforce execute them.
 - Open the archive read API with row-level signed receipts so external trainers can verify the data they consume.
 - Add task types driven by real demand: SQL-from-NL, frontend-from-spec, customer-support-trajectory, judge-of-judges (RM training data).
-- Add inter-validator agreement scoring — multiple validators score the same trajectory, disagreement becomes a signal both for the score and for retraining the rubric.
+- Add inter-validator agreement scoring: multiple validators score the same trajectory, disagreement becomes a signal both for the score and for retraining the rubric.
 
 Exit: external buyers pay for trajectory exports. The subnet revenue is decoupled from raw TAO emissions.
 

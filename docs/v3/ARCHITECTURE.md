@@ -1,4 +1,4 @@
-# Cathedral v3 — Verifiable Agentic Workforce (Trajectory Data Substrate)
+# Cathedral v3: Verifiable Agentic Workforce (Trajectory Data Substrate)
 
 > Their compute. Their models. Their cognition. Our verification.
 >
@@ -65,7 +65,7 @@ This branch is the **launch candidate for the v3 trajectory data substrate plus 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        Cathedral v3 — one process                       │
+│                        Cathedral v3, one process                        │
 │                                                                         │
 │   ┌──────────────┐  job_id      ┌──────────────┐  trajectory            │
 │   │ JobGenerator │ ───────────▶ │ JobDispatcher│ ──────────┐            │
@@ -109,7 +109,7 @@ This branch is the **launch candidate for the v3 trajectory data substrate plus 
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each component is a small Python module under `src/cathedral/v3/`. The default deployment runs all of them inside one process with an asyncio event loop and a SQLite archive — same shape as v1, but the boundaries are clean enough that any component can be lifted into its own service later without rewriting the wire format.
+Each component is a small Python module under `src/cathedral/v3/`. The default deployment runs all of them inside one process with an asyncio event loop and a SQLite archive, same shape as v1, but the boundaries are clean enough that any component can be lifted into its own service later without rewriting the wire format.
 
 ### 1. Job generation (`cathedral.v3.jobs`)
 
@@ -137,9 +137,9 @@ class MinerAgent(Protocol):
 
 v3 ships three reference miners:
 
-- `EchoAgent` — returns the prompt unchanged. Baseline; produces useful "what does a zero-effort trajectory look like" data.
-- `HeuristicAgent` — rule-based per task type. Solid floor for code-patch / classify.
-- `LLMAgent` — calls Chutes (or any OpenAI-compatible endpoint) with a ReAct-style tool-using loop. The canonical real miner.
+- `EchoAgent`: returns the prompt unchanged. Baseline; produces useful "what does a zero-effort trajectory look like" data.
+- `HeuristicAgent`: rule-based per task type. Solid floor for code-patch / classify.
+- `LLMAgent`: calls Chutes (or any OpenAI-compatible endpoint) with a ReAct-style tool-using loop. The canonical real miner.
 
 Every tool call routes through the `ToolBus`, which is what makes the trajectory observable. The `ToolBus` records every (tool_name, args, result, timestamp, latency_ms). By making tools the only side-effect channel the validator wants observed, it captures the full trace without instrumenting the model itself.
 
@@ -169,37 +169,37 @@ This is the **trajectory**. It is the unit of work and the unit of data.
 
 ### 4. Scoring (`cathedral.v3.scoring`)
 
-Each task type has a `Rubric` — a dimension list + a scoring function. Generic dimensions (`correctness`, `efficiency`, `cleanliness`, `groundedness`) compose with task-specific ones (`patch_applies`, `tests_pass`, `tool_select_acc`). Scores live in `[0, 1]` and feed both the receipt and the weight loop. The scorer also emits a `failure_class` enum (`tool_misuse`, `hallucinated_citation`, `wrong_format`, `timeout`, `irrelevant`, `none`) so the archive can cluster failures without re-reading every trace.
+Each task type has a `Rubric` (a dimension list plus a scoring function). Generic dimensions (`correctness`, `efficiency`, `cleanliness`, `groundedness`) compose with task-specific ones (`patch_applies`, `tests_pass`, `tool_select_acc`). Scores live in `[0, 1]` and feed both the receipt and the weight loop. The scorer also emits a `failure_class` enum (`tool_misuse`, `hallucinated_citation`, `wrong_format`, `timeout`, `irrelevant`, `none`) so the archive can cluster failures without re-reading every trace.
 
 A `DistillationReadiness` flag is set per trajectory:
 
-- `gold`: score ≥ 0.85 and no failure class — eligible for SFT
-- `preference_winner` / `preference_loser`: paired siblings on the same job — eligible for DPO
-- `negative`: clear failure with a clear right answer — eligible for reward-model negatives
+- `gold`: score ≥ 0.85 and no failure class; eligible for SFT
+- `preference_winner` / `preference_loser`: paired siblings on the same job; eligible for DPO
+- `negative`: clear failure with a clear right answer; eligible for reward-model negatives
 - `discard`: too noisy to learn from
 
 ### 5. Receipt + signing (`cathedral.v3.receipt`)
 
-A `Receipt` is the canonical, signed projection of a trajectory's identity and score. Fields: `trajectory_id`, `job_id`, `miner_hotkey`, `task_type`, `score`, `failure_class`, `bundle_hash` (BLAKE3 of the canonicalized trajectory), `signed_at`, `signature`. The signer is the Cathedral key (ed25519, sr25519-compatible on the bittensor side). Verifiers can validate a trajectory's score without trusting the archive — the signature commits to `bundle_hash`, and the bundle is reproducible from the stored trajectory.
+A `Receipt` is the canonical, signed projection of a trajectory's identity and score. Fields: `trajectory_id`, `job_id`, `miner_hotkey`, `task_type`, `score`, `failure_class`, `bundle_hash` (BLAKE3 of the canonicalized trajectory), `signed_at`, `signature`. The signer is the Cathedral key (ed25519, sr25519-compatible on the bittensor side). Verifiers can validate a trajectory's score without trusting the archive: the signature commits to `bundle_hash`, and the bundle is reproducible from the stored trajectory.
 
 ### 6. Trajectory archive (`cathedral.v3.archive`)
 
 SQLite-backed. One row per trajectory; artifacts (large outputs, diffs, traces) stored as files under `archive/artifacts/<trajectory_id>/` and referenced by hash. The archive answers:
 
-- *Who* — `by_miner(hotkey, limit, since)`
-- *What* — `by_task_type(type, score_min, limit)`
-- *Why* — `failure_clusters(task_type) → list[FailureCluster]`
-- *Show me the best* — `best_of(task_type, k)`
-- *Show me a pair* — `preference_pair(job_id) → (winner, loser)`
-- *Export* — `export_dataset(format, filter) → JSONL`
+- *Who*: `by_miner(hotkey, limit, since)`
+- *What*: `by_task_type(type, score_min, limit)`
+- *Why*: `failure_clusters(task_type) → list[FailureCluster]`
+- *Show me the best*: `best_of(task_type, k)`
+- *Show me a pair*: `preference_pair(job_id) → (winner, loser)`
+- *Export*: `export_dataset(format, filter) → JSONL`
 
 ### 7. Dataset export (`cathedral.v3.export`)
 
 Three formats out of the box:
 
-- `sft.jsonl`: `{messages: [{role, content}], task_type, score}` — only `gold` trajectories
-- `dpo.jsonl`: `{prompt, chosen, rejected, score_delta}` — preference pairs
-- `rm.jsonl`: `{prompt, completion, score, dimensions}` — reward model training
+- `sft.jsonl`: `{messages: [{role, content}], task_type, score}`; only `gold` trajectories
+- `dpo.jsonl`: `{prompt, chosen, rejected, score_delta}`; preference pairs
+- `rm.jsonl`: `{prompt, completion, score, dimensions}`; reward model training
 
 Each export emits a `manifest.json` with the filter, row count, score distribution, and the cathedral-signed hash of every row, so a downstream trainer can verify provenance.
 
@@ -211,7 +211,7 @@ Given a trajectory id, the replay engine reconstructs the exact `ToolBus` state 
 
 Per-miner score = EMA over their recent trajectories, normalized across miners.
 
-**Implemented today (Phase 0):** `compute_weights(archive)` returns a `Weights` record (hotkey → normalized weight in `[0, 1]`). Local-only — `Weights.on_chain` is always `False`.
+**Implemented today (Phase 0):** `compute_weights(archive)` returns a `Weights` record (hotkey → normalized weight in `[0, 1]`). Local-only: `Weights.on_chain` is always `False`.
 
 **Stubbed but unverified end-to-end:** `WeightLoop._push_to_chain` builds the `bittensor.Subtensor` call when `CATHEDRAL_V3_CHAIN_ENABLED=1` is set. The code path has not been exercised against a live netuid in this branch; treat it as wired-but-untested. Default is off; without the env var weights stay in memory and the loop is testable without a wallet.
 
@@ -225,13 +225,13 @@ All wire records are pydantic v3 models defined in `cathedral.v3.types`. The con
 
 Key models:
 
-- `JobSpec` — what the validator asks for
-- `ToolCall` — one observed action
-- `AgentResult` — what the miner returns
-- `Trajectory` — the joined record (job + tool trace + result + score + receipt)
-- `Receipt` — the signed projection
-- `ScoreParts` — per-dimension scores + failure class + readiness flag
-- `Weights` — per-miner weights at a snapshot time
+- `JobSpec`: what the validator asks for
+- `ToolCall`: one observed action
+- `AgentResult`: what the miner returns
+- `Trajectory`: the joined record (job + tool trace + result + score + receipt)
+- `Receipt`: the signed projection
+- `ScoreParts`: per-dimension scores + failure class + readiness flag
+- `Weights`: per-miner weights at a snapshot time
 
 ## Separation of concerns
 
@@ -261,6 +261,6 @@ output = serialized(tool_call_1, tool_result_1, …, tool_call_N, final_answer)
 weight = score × task_type_weight × novelty
 ```
 
-After 100k trajectories with `readiness=gold` across 5 task types, we have a domain-balanced, score-graded, tool-grounded corpus that can SFT a base model into a competent Cathedral agent. After 100k preference pairs we have DPO data. After 100k negatives we have RM training data. None of this requires changing the subnet — it falls out of the labour itself.
+After 100k trajectories with `readiness=gold` across 5 task types, we have a domain-balanced, score-graded, tool-grounded corpus that can SFT a base model into a competent Cathedral agent. After 100k preference pairs we have DPO data. After 100k negatives we have RM training data. None of this requires changing the subnet; it falls out of the labour itself.
 
 The archive is the moat. The chain is the timestamp.

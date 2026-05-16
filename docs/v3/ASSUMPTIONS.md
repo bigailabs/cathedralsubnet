@@ -1,4 +1,4 @@
-# Cathedral v3 — Assumptions and Defaults
+# Cathedral v3: Assumptions and Defaults
 
 This document captures every assumption made during the v3 rewrite so an operator can challenge or override each one. Where a default ships with the code, the env var and config field are listed alongside.
 
@@ -10,7 +10,7 @@ This document captures every assumption made during the v3 rewrite so an operato
 
 3. **SQLite is enough for the local archive.** Trajectories are append-only, queries are bounded by miner and time, and a single validator generates O(10k) rows/day. Postgres is a config switch (`CATHEDRAL_V3_DB_URL`) when it matters.
 
-4. **Signatures use ed25519 by default.** This branch only implements ed25519 — `signature_scheme` on the wire is always `"ed25519"`. The receipt schema is a versioned blob with a `scheme` field, so adding sr25519 (via a bittensor wallet) in a later branch is forward-compatible; `CATHEDRAL_V3_WALLET` today only configures the on-chain weight push, not signing.
+4. **Signatures use ed25519 by default.** This branch only implements ed25519, so `signature_scheme` on the wire is always `"ed25519"`. The receipt schema is a versioned blob with a `scheme` field, so adding sr25519 (via a bittensor wallet) in a later branch is forward-compatible; `CATHEDRAL_V3_WALLET` today only configures the on-chain weight push, not signing.
 
 5. **Scores live in `[0, 1]`.** Every rubric must produce this range. Per-dimension weights compose multiplicatively for the final score; the weight loop only sees the composed score.
 
