@@ -79,6 +79,8 @@ from cathedral.eval.polaris_runner import (
     PolarisRunResult,
 )
 from cathedral.v1_types import EvalTask
+from cathedral.v3.corpus.schema import ChallengeRow
+from cathedral.v3.prompts import build_bug_isolation_prompt
 
 logger = structlog.get_logger(__name__)
 
@@ -269,6 +271,15 @@ class HermesVisitTrace:
         }
 
 
+@dataclass
+class BugIsolationHermesRun:
+    """Raw Hermes result for one bug_isolation_v1 challenge."""
+
+    stdout: str
+    duration_ms: int
+    trace: dict[str, Any]
+
+
 # --------------------------------------------------------------------------
 # Runner
 # --------------------------------------------------------------------------
@@ -379,7 +390,10 @@ class SshHermesRunner:
                     cls = getattr(s, "class_", None) or getattr(s, "source_class", None) or "other"
                     cls_val = cls.value if hasattr(cls, "value") else str(cls)
                     src_lines.append(f"- {s.url}  [class: {cls_val}]")
-                sources_block = "\n\nSource pool to fetch via the fetch_url skill (use each, do not invent URLs):\n" + "\n".join(src_lines)
+                sources_block = (
+                    "\n\nSource pool to fetch via the fetch_url skill "
+                    "(use each, do not invent URLs):\n" + "\n".join(src_lines)
+                )
             enriched_prompt = task.prompt + sources_block
 
             card_json, hermes_stdout = await self._invoke_hermes(
@@ -453,6 +467,87 @@ class SshHermesRunner:
                 trace=trace.to_dict(),
                 manifest=None,
             )
+        finally:
+            try:
+                conn.close()
+                await conn.wait_closed()
+            except Exception as close_exc:
+                logger.debug("ssh_hermes_close_error", error=str(close_exc))
+
+    async def run_bug_isolation_challenge(
+        self,
+        *,
+        challenge: ChallengeRow,
+        miner_hotkey: str,
+        submission: dict[str, Any],
+    ) -> BugIsolationHermesRun:
+        """Run one bug_isolation_v1 prompt over SSH Hermes.
+
+        This is the v3 publisher transport. It deliberately returns raw
+        stdout instead of parsing or scoring. The publisher owns parse,
+        score, sign, and persistence so the hidden oracle never leaves
+        the publisher process.
+        """
+        ssh_host = submission.get("ssh_host")
+        ssh_port = submission.get("ssh_port") or 22
+        ssh_user = submission.get("ssh_user")
+        if not (ssh_host and ssh_user):
+            raise SshHermesError(
+                "config_invalid",
+                "submission missing ssh_host/ssh_user "
+                f"(ssh_host={bool(ssh_host)} ssh_user={bool(ssh_user)})",
+            )
+
+        run_id = str(uuid.uuid4())
+        eval_round = f"bug-isolation-{challenge.id}-{run_id[:8]}"
+        eval_profile = f"cathedral-eval-{eval_round}"
+        trace = HermesVisitTrace(visit_started_at=datetime.now(UTC).isoformat())
+        t_start = time.monotonic()
+
+        import asyncssh
+
+        conn = await self._connect_with_retries(
+            asyncssh,
+            host=ssh_host,
+            port=int(ssh_port),
+            username=ssh_user,
+            miner_hotkey=miner_hotkey,
+        )
+        try:
+            hermes_version = await self._hermes_version(conn)
+            trace.hermes_version = hermes_version
+            resolved_home = await self._resolve_hermes_home(conn)
+            await self._verify_hermes_install(conn, resolved_home)
+            await self._clone_profile(conn, eval_profile)
+            trace.eval_profile_name = eval_profile
+
+            t_invoke = time.monotonic()
+            stdout = await self._invoke_hermes_text(
+                conn,
+                eval_profile=eval_profile,
+                prompt=build_bug_isolation_prompt(challenge),
+                eval_round=eval_round,
+                resolved_home=resolved_home,
+            )
+            trace.invocation_duration_ms = int((time.monotonic() - t_invoke) * 1000)
+            trace.visit_ended_at = datetime.now(UTC).isoformat()
+            await self._delete_profile(conn, eval_profile)
+            return BugIsolationHermesRun(
+                stdout=stdout,
+                duration_ms=int((time.monotonic() - t_start) * 1000),
+                trace=trace.to_dict(),
+            )
+        except SshHermesError:
+            trace.visit_ended_at = datetime.now(UTC).isoformat()
+            try:
+                await self._delete_profile(conn, eval_profile)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "ssh_hermes_cleanup_failed",
+                    eval_profile=eval_profile,
+                    error=str(cleanup_exc),
+                )
+            raise
         finally:
             try:
                 conn.close()
@@ -673,13 +768,6 @@ class SshHermesRunner:
         envelope — so we still instruct the agent in the prompt to
         emit a fenced JSON block, then parse it.
         """
-        hermes_home = self._profile_path(eval_profile, resolved_home)
-        envs = [f"HERMES_HOME={shlex.quote(hermes_home)}"]
-        if self.config.pinned_provider:
-            envs.append(f"HERMES_INFERENCE_PROVIDER={shlex.quote(self.config.pinned_provider)}")
-        if self.config.pinned_model:
-            envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
-
         # Cathedral always wraps the card_definition's task_template with a
         # JSON-only output contract. Without this, models with tool access
         # branch into research-mode (writing files, narrating progress) instead
@@ -694,9 +782,42 @@ class SshHermesRunner:
             "Task:\n"
             f"{prompt}"
         )
+        stdout = await self._invoke_hermes_text(
+            conn,
+            eval_profile=eval_profile,
+            prompt=wrapped_prompt,
+            eval_round=eval_round,
+            resolved_home=resolved_home,
+        )
+        card_json = _extract_card_json(stdout)
+        if card_json is None:
+            raise SshHermesError(
+                "hermes_output_malformed",
+                (
+                    "hermes chat -q stdout had no parseable Card JSON; "
+                    f"first 200 chars: {stdout[:200]!r}"
+                ),
+            )
+        return card_json, stdout
 
-        cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(wrapped_prompt)}"
+    async def _invoke_hermes_text(
+        self,
+        conn: Any,
+        *,
+        eval_profile: str,
+        prompt: str,
+        eval_round: str,
+        resolved_home: str,
+    ) -> str:
+        """Run ``hermes chat -q`` and return raw stdout."""
+        hermes_home = self._profile_path(eval_profile, resolved_home)
+        envs = [f"HERMES_HOME={shlex.quote(hermes_home)}"]
+        if self.config.pinned_provider:
+            envs.append(f"HERMES_INFERENCE_PROVIDER={shlex.quote(self.config.pinned_provider)}")
+        if self.config.pinned_model:
+            envs.append(f"HERMES_INFERENCE_MODEL={shlex.quote(self.config.pinned_model)}")
 
+        cmd = " ".join(envs) + f" hermes chat -Q -q {shlex.quote(prompt)}"
         stdout, stderr, exit_status = await self._run_remote(
             conn,
             cmd,
@@ -711,17 +832,7 @@ class SshHermesRunner:
                     f"eval_round={eval_round}: {stderr[:300]}"
                 ),
             )
-
-        card_json = _extract_card_json(stdout)
-        if card_json is None:
-            raise SshHermesError(
-                "hermes_output_malformed",
-                (
-                    "hermes chat -q stdout had no parseable Card JSON; "
-                    f"first 200 chars: {stdout[:200]!r}"
-                ),
-            )
-        return card_json, stdout
+        return stdout
 
     def _profile_path(self, eval_profile: str, resolved_home: str) -> str:
         # Mirrors hermes_cli/profiles.py: profiles live at
@@ -1136,6 +1247,7 @@ def _compute_proof_of_loop(local_root: Path) -> ProofOfLoop:
 
 __all__ = [
     "SSH_HERMES_FAILURE_CODES",
+    "BugIsolationHermesRun",
     "HermesVisitTrace",
     "ManifestFile",
     "ProofOfLoop",

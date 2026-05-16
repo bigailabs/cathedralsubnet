@@ -75,6 +75,7 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
             "id",
             "agent_id",
             "agent_display_name",
+            "miner_hotkey",
             "task_type",
             "challenge_id",
             "weighted_score",

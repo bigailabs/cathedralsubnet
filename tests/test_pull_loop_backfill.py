@@ -382,6 +382,80 @@ async def test_fresh_validator_backfill_hydrates_weight_window(tmp_path) -> None
     await conn.close()
 
 
+@pytest.mark.asyncio
+async def test_v3_bug_isolation_weight_blends_without_diluting_v1_only_rows(tmp_path) -> None:
+    """bug_isolation_v1 contributes only the configured slice.
+
+    EU AI Act rows stay primary. A miner with no v3 row keeps its v1
+    score, a mixed miner gets the configured blend, and a v3-only miner
+    cannot take a full-weight slot when the blend is 5 percent.
+    """
+    conn = await connect(str(tmp_path / "v.db"))
+    try:
+        now = datetime.now(UTC).isoformat()
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-v1-only",
+                "card_id": "eu-ai-act",
+                "weighted_score": 0.70,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-v1-only",
+        )
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-mixed-v1",
+                "card_id": "eu-ai-act",
+                "weighted_score": 0.80,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-mixed",
+        )
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-mixed-v3",
+                "task_type": "bug_isolation_v1",
+                "eval_output_schema_version": 3,
+                "weighted_score": 0.20,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-mixed",
+        )
+        await upsert_pulled_eval(
+            conn,
+            eval_run={
+                "id": "eval-v3-only",
+                "task_type": "bug_isolation_v1",
+                "eval_output_schema_version": 3,
+                "weighted_score": 0.60,
+                "ran_at": now,
+            },
+            miner_hotkey="hk-v3-only",
+        )
+
+        scores = await latest_pulled_score_per_hotkey(
+            conn,
+            since_days=7,
+            v3_bug_isolation_weight=0.05,
+        )
+        assert scores["hk-v1-only"] == pytest.approx(0.70)
+        assert scores["hk-mixed"] == pytest.approx((0.80 * 0.95) + (0.20 * 0.05))
+        assert scores["hk-v3-only"] == pytest.approx(0.60 * 0.05)
+
+        scores_disabled = await latest_pulled_score_per_hotkey(
+            conn,
+            since_days=7,
+            v3_bug_isolation_weight=0.0,
+        )
+        assert scores_disabled["hk-mixed"] == pytest.approx(0.80)
+        assert "hk-v3-only" not in scores_disabled
+    finally:
+        await conn.close()
+
+
 # --------------------------------------------------------------------------
 # C1 regression — marker write must gate on a successfully drained tick.
 #

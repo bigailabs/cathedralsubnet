@@ -68,6 +68,7 @@ def _sign_and_get_row(stdout: str, *, challenge_id: str = "ch_seed_a") -> tuple[
         eval_run_id="00000000-0000-4000-8000-000000000001",
         submission_id="11111111-1111-4111-8111-000000000001",
         agent_display_name="Test Agent",
+        miner_hotkey="5FakeHotkey",
         challenge_id=challenge_id,
         dispatch_result=dispatch,
         ran_at_iso="2026-05-16T05:00:00.000Z",
@@ -196,6 +197,7 @@ def test_build_signed_v3_row_forwards_epoch_salt() -> None:
             eval_run_id="00000000-0000-4000-8000-000000000099",
             submission_id="11111111-1111-4111-8111-000000000099",
             agent_display_name="Salt Tester",
+            miner_hotkey="5SaltTesterHotkey",
             challenge_id="ch_alpha",
             dispatch_result=dispatch,
             ran_at_iso="2026-05-16T05:00:00.000Z",
@@ -237,7 +239,7 @@ def test_build_v3_row_refuses_to_emit_extra_signed_fields() -> None:
     # match is locked by tests/v3/test_sign_payload_v3.py.
     row, _ = _sign_and_get_row(_good_stdout())
     signed_keys = {
-        "id", "agent_id", "agent_display_name", "task_type",
+        "id", "agent_id", "agent_display_name", "miner_hotkey", "task_type",
         "challenge_id", "weighted_score", "score_parts", "claim", "ran_at",
     }
     # The row has more fields than the signed subset (envelope), but

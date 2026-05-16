@@ -10,6 +10,16 @@ from cathedral.validator.health import Health
 from cathedral.validator.pull_loop import upsert_pulled_eval
 
 
+def test_v3_bug_isolation_weight_env_overrides_config(monkeypatch) -> None:
+    monkeypatch.setenv("CATHEDRAL_V3_BUG_ISOLATION_WEIGHT", "0.05")
+    assert weight_loop._resolve_v3_bug_isolation_weight(0.0) == pytest.approx(0.05)
+
+
+def test_v3_bug_isolation_weight_invalid_env_keeps_config(monkeypatch) -> None:
+    monkeypatch.setenv("CATHEDRAL_V3_BUG_ISOLATION_WEIGHT", "not-a-number")
+    assert weight_loop._resolve_v3_bug_isolation_weight(0.01) == pytest.approx(0.01)
+
+
 @pytest.mark.asyncio
 async def test_disabled_weight_loop_computes_without_submitting(tmp_path, monkeypatch) -> None:
     conn = await connect(str(tmp_path / "validator.db"))

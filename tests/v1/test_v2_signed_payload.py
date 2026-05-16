@@ -447,6 +447,7 @@ def test_publisher_signed_keyset_v3_matches_locked_field_list():
             "id",
             "agent_id",
             "agent_display_name",
+            "miner_hotkey",
             "task_type",
             "challenge_id",
             "weighted_score",

@@ -26,6 +26,8 @@ disabled = false
 # mass to miners.
 burn_uid = 204
 forced_burn_percentage = 0.0
+# Off until the bug_isolation_v1 feed is intentionally enabled.
+v3_bug_isolation_weight = 0.0
 
 [publisher]
 url = "https://api.cathedral.computer"

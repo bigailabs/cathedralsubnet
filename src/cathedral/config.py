@@ -54,6 +54,7 @@ class WeightsConfig(BaseModel):
     disabled: bool = False
     burn_uid: int = 204
     forced_burn_percentage: float = MAINNET_FORCED_BURN_PERCENTAGE
+    v3_bug_isolation_weight: float = 0.0
 
 
 class PublisherConfig(BaseModel):
