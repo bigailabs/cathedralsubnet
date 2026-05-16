@@ -218,3 +218,53 @@ def test_eval_spec_endpoint_returns_404_for_unknown_card(publisher_client) -> No
     'card not found' path)."""
     resp = publisher_client.get("/v1/cards/never-seeded-ever/eval-spec")
     assert resp.status_code == 404, resp.text
+
+
+# --------------------------------------------------------------------------
+# Archived cards must 404 across every /v1/cards/{card_id}/* surface
+# --------------------------------------------------------------------------
+
+
+# Every /v1/cards/{card_id}/* route that surfaces card content. If a new
+# route lands and forgets to call get_active_card_definition_or_404, the
+# parametrised test below will fail on it once it's added here.
+_PUBLIC_CARD_SUBPATHS: list[str] = [
+    "",  # GET /v1/cards/{card_id} (summary)
+    "/eval-spec",
+    "/history",
+    "/feed",
+    "/attempts",
+    "/discovery",
+    "/discovery/count",
+]
+
+
+@pytest.mark.parametrize("subpath", _PUBLIC_CARD_SUBPATHS)
+def test_archived_card_404s_across_all_public_subpaths(
+    publisher_client, subpath: str
+) -> None:
+    """Every /v1/cards/{card_id}/* surface must 404 on archived cards.
+
+    Without the shared `get_active_card_definition_or_404` helper, each
+    route was independently checking only existence (not status), so an
+    archived row would still serve summary/history/feed/discovery
+    content even though submit and eval-spec correctly rejected it.
+    """
+    ctx = publisher_client.app.state.ctx
+    asyncio.run(_seed_archived_us_ai_eo_via_ctx(ctx))
+
+    resp = publisher_client.get(f"/v1/cards/us-ai-eo{subpath}")
+    assert resp.status_code == 404, (
+        f"GET /v1/cards/us-ai-eo{subpath} must return 404 for archived "
+        f"card, got {resp.status_code}: {resp.text}"
+    )
+
+
+def test_leaderboard_404s_for_archived_card(publisher_client) -> None:
+    """`GET /v1/leaderboard?card=<archived>` must 404 too: archived
+    cards should not appear anywhere a miner or the site might look."""
+    ctx = publisher_client.app.state.ctx
+    asyncio.run(_seed_archived_us_ai_eo_via_ctx(ctx))
+
+    resp = publisher_client.get("/v1/leaderboard", params={"card": "us-ai-eo"})
+    assert resp.status_code == 404, resp.text
