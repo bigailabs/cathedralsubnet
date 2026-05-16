@@ -2,39 +2,54 @@
 
 ## One-line
 
-A miner submits a Polaris agent claim. The validator pulls signed Polaris records, verifies them, scores the resulting card, and sets weights.
+A miner submits bundles to the publisher. The publisher runs the eval and signs each projection. Validators pull the signed projections, verify them locally, blend them with legacy `/v1/claim` scores, and set weights.
 
 ## Component map
 
 ```
-            ┌──────────────┐
-miner ─────▶│ POST /v1/claim│   bearer-protected, async insert into sqlite
-            ├──────────────┤
-            │ FastAPI      │
-            └──────┬───────┘
+            ┌───────────────┐
+miner ─────▶│ POST /v1/claim│   bearer-protected (CATHEDRAL_BEARER),
+            ├───────────────┤   async insert into sqlite. Legacy path.
+            │ FastAPI       │
+            └──────┬────────┘
                    │
           ┌────────▼────────┐    ┌────────────────────┐
           │ worker loop     │───▶│ cathedral.evidence │
-          │ (asyncio)       │    │ fetch + verify +   │
-          └────────┬────────┘    │ filter (Ed25519,   │
-                   │             │ BLAKE3)            │
-                   ▼             └────────┬───────────┘
+          │ (legacy /v1/    │    │ fetch + verify +   │
+          │  claim drain)   │    │ filter (Ed25519,   │
+          └────────┬────────┘    │ BLAKE3)            │
+                   │             └────────┬───────────┘
+                   ▼                      │
           ┌────────────────┐              │
           │ cathedral.cards│◀─────────────┘
           │ preflight +    │       EvidenceBundle
           │ score          │
           └────────┬───────┘
-                   │ ScoreParts → sqlite scores table
-                   ▼
-          ┌────────────────┐    ┌────────────────────┐
-          │ weight loop    │───▶│ cathedral.chain    │
-          │ (timer)        │    │ metagraph + weights│
-          └────────┬───────┘    └────────────────────┘
-                   │
+                   │ ScoreParts -> scores table
                    ▼
           ┌────────────────┐
-          │ /health        │   public, surfaces all of the above
-          └────────────────┘
+          │ weight loop    │
+          │ (timer)        │
+          └────────┬───────┘
+                   │ blends scores + pulled_eval_runs
+                   ▼
+            cathedral.chain (metagraph + set_weights)
+
+publisher ────▶ GET /v1/leaderboard/recent
+                       │
+                       ▼
+          ┌─────────────────────┐
+          │ pull loop           │ verifies cathedral_signature
+          │ (default 30s tick)  │ with CATHEDRAL_PUBLIC_KEY_HEX,
+          │ disabled if         │ writes to pulled_eval_runs.
+          │ pubkey unset        │
+          └─────────────────────┘
+                       │
+                       ▼
+                  stall watchdog
+                       │
+                       ▼
+            /health   surfaces all of the above
 ```
 
 ## Module dependency graph
@@ -65,22 +80,25 @@ cathedral.cli       depends on httpx + typer
 
 ## Async loops
 
-Three asyncio tasks run inside the FastAPI lifespan:
+`cathedral-validator serve` wires four asyncio tasks inside the FastAPI lifespan:
 
-1. **`run_worker`** (`cathedral.validator.worker`) — drains pending claims, verifies, scores, persists. Heartbeats `last_evidence_pass_at`.
-2. **`run_weight_loop`** (`cathedral.validator.weight_loop`) — every `weights.interval_secs`, reads metagraph, joins scores by hotkey to uid, normalizes, calls chain. Heartbeats `last_metagraph_at`, `last_weight_set_at`.
-3. **`run_stall_watchdog`** (`cathedral.validator.stall`) — every 30s, marks `stalled=true` if any heartbeat is older than `stall.after_secs`, and refreshes claim count fields.
+1. **`run_worker`** (`cathedral.validator.worker`): drains pending `/v1/claim` claims, verifies Polaris evidence, scores, persists. This is the legacy path and is constructed unconditionally, which is why `polaris.public_key_hex` remains required in the TOML.
+2. **`run_pull_loop`** (`cathedral.validator.pull_loop`): polls `GET /v1/leaderboard/recent` on the publisher (default cadence 30s, configurable via `publisher.pull_interval_secs`), verifies each `EvalRun` projection with `CATHEDRAL_PUBLIC_KEY_HEX`, and upserts into `pulled_eval_runs`. Heartbeats `last_evidence_pass_at`. Only spawned when `CATHEDRAL_PUBLIC_KEY_HEX` is set; otherwise startup logs `pull_loop_disabled` and the loop is skipped (the `initial_backfill_complete` signal is set immediately so the weight loop never hangs).
+3. **`run_weight_loop`** (`cathedral.validator.weight_loop`): every `weights.interval_secs`, awaits `initial_backfill_complete`, reads metagraph, joins the latest score per hotkey across both `scores` and `pulled_eval_runs`, normalizes, calls chain. Heartbeats `last_metagraph_at`, `last_weight_set_at`.
+4. **`run_stall_watchdog`** (`cathedral.validator.stall`): every 30s, marks `stalled=true` if any heartbeat is older than `stall.after_secs`, and refreshes claim count fields.
 
-All three share a `Health` snapshot guarded by `asyncio.Lock`. The HTTP `/health` endpoint reads it without blocking the writers.
+All loops share a `Health` snapshot guarded by `asyncio.Lock`. The HTTP `/health` endpoint reads it without blocking the writers.
 
 ## Database
 
-Sqlite with WAL mode. Single writer (the worker), readers tolerated. Schema in `cathedral.validator.db.SCHEMA`:
+Sqlite with WAL mode. The legacy worker is the single writer for `claims`, `evidence_bundles`, and `scores`. The pull loop writes its own table, `pulled_eval_runs`. The weight loop reads from both. Readers (CLI, `/health`) tolerated:
 
-- `claims` — submitted claims and their lifecycle
-- `evidence_bundles` — verified bundle JSON per claim
-- `scores` — one row per verified claim, joined back to `miner_hotkey`
-- `health_kv` — reserved for future use
+- `claims`: submitted legacy `/v1/claim` claims and their lifecycle
+- `evidence_bundles`: verified bundle JSON per claim
+- `scores`: one row per verified legacy claim, joined back to `miner_hotkey`
+- `pulled_eval_runs`: rows pulled from `/v1/leaderboard/recent`, keyed by `eval_run_id`, with `miner_hotkey` for the weight join
+- `pull_loop_meta`: durable single-row markers (e.g. `initial_backfill_completed_at`) so an upgrade cleanly re-walks the scoring window
+- `health_kv`: reserved for future use
 
 ## Issue traceability
 
@@ -92,11 +110,12 @@ Sqlite with WAL mode. Single writer (the worker), readers tolerated. Schema in `
 
 ## What this repo deliberately omits
 
-- GPU verification, SSH probing, hardware attestation
+- GPU verification, hardware fingerprinting
 - Rental flow, billing, k8s/k3s, miner prover daemons
 - POM, ModelFactory, cost-collapse marketplace logic
-- IP-first miner proof for Polaris-hosted workers
 - Public ledger, treasury dashboards, blog content
 - Subnet scouting, broad external miner outreach
 
 If a future story crosses into one of those areas, it goes in a sibling repo, not here.
+
+> SSH probing was historically listed as omitted; it landed in v1. The ssh-probe runner (`src/cathedral/eval/ssh_hermes_runner.py`, `src/cathedral/eval/ssh_probe_runner.py`) is the live BYO Box path, and the submit endpoint requires `ssh_host` + `ssh_user` whenever `attestation_mode='ssh-probe'`. TEE attestation (Nitro / TDX / SEV-SNP) is spec-only in v1: Nitro verifier is wired but no live TEE miners; TDX and SEV-SNP return 501 from the submit endpoint.

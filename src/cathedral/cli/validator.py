@@ -22,9 +22,10 @@ def serve(
 ) -> None:
     """Run the validator HTTP server with all background loops."""
     configure(level=log_level.upper(), json_logs=json_logs)
-    from cathedral.config import ValidatorSettings
+    from cathedral.config import ValidatorSettings, resolve_validator_config_path
     from cathedral.validator import from_settings
 
+    config = resolve_validator_config_path(config)
     settings = ValidatorSettings.from_toml(config)
     application = from_settings(config)
     uvicorn.run(
@@ -41,8 +42,9 @@ def migrate(
 ) -> None:
     """Initialize the sqlite schema. Idempotent."""
     configure()
-    from cathedral.config import ValidatorSettings
+    from cathedral.config import ValidatorSettings, resolve_validator_config_path
 
+    config = resolve_validator_config_path(config)
     settings = ValidatorSettings.from_toml(config)
 
     async def _run() -> None:
@@ -79,7 +81,7 @@ def pull(
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     from cathedral.chain import BittensorChain
-    from cathedral.config import ValidatorSettings
+    from cathedral.config import ValidatorSettings, resolve_validator_config_path
     from cathedral.validator.health import Health
     from cathedral.validator.pull_loop import run_pull_loop
     from cathedral.validator.weight_loop import run_weight_loop
@@ -89,6 +91,7 @@ def pull(
         raise typer.BadParameter(f"env var {public_key_env} not set")
     pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex))
 
+    config = resolve_validator_config_path(config)
     settings = ValidatorSettings.from_toml(config)
 
     async def _run() -> None:

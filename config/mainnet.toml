@@ -2,6 +2,7 @@
 name = "finney"
 netuid = 39
 validator_hotkey = "REPLACE_ME"
+wallet_name = "cathedral-validator"
 
 [polaris]
 base_url = "https://api.polaris.computer/"
@@ -9,16 +10,35 @@ public_key_hex = "REPLACE_WITH_POLARIS_ED25519_PUBLIC_KEY_HEX"
 fetch_timeout_secs = 30
 
 [http]
-listen = "0.0.0.0:9333"
+listen_host = "0.0.0.0"
+listen_port = 9333
 bearer_token_env = "CATHEDRAL_BEARER"
 
 [weights]
-# SN39 weights_rate_limit is 100 blocks × 12s = 1200s exactly. Firing at
+# SN39 weights_rate_limit is 100 blocks * 12s = 1200s exactly. Firing at
 # 1200s means every other set_weights races the rate-limit window and
 # half land as blocked_by_transaction_error. 1500s (125 blocks) gives a
 # clean 25-block buffer so every call succeeds.
 interval_secs = 1500
 disabled = false
+# SN39 mainnet: uid 204 is the subnet owner. Keep the burn uid configured as
+# the fallback target for empty score windows, but route all positive score
+# mass to miners.
+burn_uid = 204
+forced_burn_percentage = 0.0
+
+[publisher]
+url = "https://api.cathedral.computer"
+public_key_env = "CATHEDRAL_PUBLIC_KEY_HEX"
+pull_interval_secs = 30.0
+api_token_env = "CATHEDRAL_PUBLISHER_TOKEN"
 
 [storage]
-database_url = "sqlite://data/validator-mainnet.db"
+database_path = "data/validator-mainnet.db"
+
+[worker]
+poll_interval_secs = 5.0
+max_concurrent_verifications = 4
+
+[stall]
+after_secs = 600

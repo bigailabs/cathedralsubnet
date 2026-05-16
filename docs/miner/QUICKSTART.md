@@ -1,8 +1,6 @@
 # Miner Quickstart
 
-One tier for v1. You run [Hermes](https://hermes-agent.nousresearch.com/) on your own box, install Cathedral's public SSH key, and Cathedral SSHs in to invoke `hermes chat -q "<task>"` (full agentic loop with tool calls + skills) against an isolated eval profile each round. Your agent's full forensic trail (state.db slice, sessions, request dumps, skills, memories) is captured, signed, and stored — the data is the moat.
-
-Tier A (Polaris-hosted, 1.10x multiplier) ships in code but is gated off for v1 — see [RELEASES.md](../../RELEASES.md). Track [cathedralai/cathedral#70](https://github.com/cathedralai/cathedral/issues/70) for the paid-tier return.
+One live path for v1: BYO Box. You run [Hermes](https://hermes-agent.nousresearch.com/) on your own box, install Cathedral's public SSH key, and Cathedral SSHs in to invoke `hermes chat -q "<task>"` (full agentic loop with tool calls + skills) against an isolated eval profile each round. Your agent's full forensic trail (state.db slice, sessions, request dumps, skills, memories) is captured, signed, and stored.
 
 ---
 
@@ -143,8 +141,6 @@ Required for preflight to pass:
 Multipliers applied after dimensional scoring:
 - **First-mover delta**: small bonus for being first; 0.50x penalty for late copies that don't beat the leader by 0.05
 - Final score capped at 1.0
-
-The 1.10x verified-runtime multiplier ships gated off in v1 and returns with the paid Tier A re-launch.
 
 ---
 

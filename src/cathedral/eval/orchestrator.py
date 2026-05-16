@@ -25,7 +25,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,13 @@ logger = structlog.get_logger(__name__)
 
 
 _RETRY_BACKOFFS = (60, 120, 240)
+
+
+# Cooldown applied to cadence-refresh rows that hit a failure path that
+# does not advance MAX(eval_runs.ran_at). 1 hour is long enough to keep
+# a permanently broken bundle from re-picking every tick, short enough
+# that a transient outage recovers within the same cadence window.
+_CADENCE_FAILURE_COOLDOWN = timedelta(hours=1)
 
 
 def _retry_backoffs() -> tuple[float, ...]:
@@ -124,6 +131,16 @@ class EvalOrchestrator:
         self.registry = registry
         self._round_counter = _RoundCounter(epoch=epoch_for(datetime.now(UTC)))
         self._failure_counts: dict[str, int] = defaultdict(int)
+        # Per-submission cooldown for cadence-refresh rows that hit a
+        # retryable or terminal failure. Cadence rows stay 'ranked'
+        # through failures (so the leaderboard doesn't churn), and the
+        # cadence query uses MAX(eval_runs.ran_at) — which does NOT
+        # advance on a failure that never reached score_and_sign. Without
+        # this cooldown, a permanently broken bundle would re-pick on
+        # every loop tick, spam logs, and consume cadence slots. Process-
+        # local by design: a restart drops the cooldowns, which is
+        # acceptable (the row will be picked once, fail once, and re-cool).
+        self._cadence_cooldown_until: dict[str, datetime] = {}
 
     @property
     def polaris(self) -> PolarisRunner:
@@ -191,18 +208,34 @@ class EvalOrchestrator:
     async def evaluate_one(self, submission: dict[str, Any]) -> None:
         log = logger.bind(submission_id=submission["id"], card_id=submission["card_id"])
 
+        # Capture the entry status so failure paths know whether this is
+        # a first-time eval (queued) or a cadence refresh of a previously
+        # ranked row. A cadence refresh that fails must leave the row as
+        # 'ranked' with its prior score intact — flipping to 'rejected'
+        # would silently strip a working agent off the leaderboard.
+        original_status = submission.get("status")
+        is_cadence_refresh = original_status == "ranked"
+
         card_def = await repository.get_card_definition(self.db, submission["card_id"])
         if card_def is None:
-            await repository.update_submission_status(
-                self.db,
-                submission["id"],
-                status="rejected",
-                rejection_reason="card definition missing",
+            await self._fail_terminal(
+                submission,
+                log,
+                reason="card definition missing",
+                is_cadence_refresh=is_cadence_refresh,
+                event="eval_card_def_missing",
             )
-            log.warning("eval_card_def_missing")
             return
 
-        await repository.update_submission_status(self.db, submission["id"], status="evaluating")
+        # Only first-time rows get flipped to 'evaluating'. Cadence
+        # refresh rows stay 'ranked' until score_and_sign commits a fresh
+        # score (which sets status='ranked' again via update_submission_score),
+        # so public leaderboard surfaces never see the row in an
+        # in-flight 'evaluating' state.
+        if not is_cadence_refresh:
+            await repository.update_submission_status(
+                self.db, submission["id"], status="evaluating"
+            )
 
         # Generate deterministic task for this round
         epoch = epoch_for(datetime.now(UTC))
@@ -218,19 +251,22 @@ class EvalOrchestrator:
         try:
             ciphertext = await self.hippius.get_bundle(submission["bundle_blob_key"])
         except HippiusError as e:
-            await self._on_retryable_failure(submission, log, f"hippius get: {e}")
+            await self._on_retryable_failure(
+                submission, log, f"hippius get: {e}", is_cadence_refresh=is_cadence_refresh
+            )
             return
 
         try:
             plaintext = decrypt_bundle(ciphertext, submission["encryption_key_id"])
         except DecryptionError as e:
-            await repository.update_submission_status(
-                self.db,
-                submission["id"],
-                status="rejected",
-                rejection_reason="bundle decryption failed",
+            await self._fail_terminal(
+                submission,
+                log,
+                reason="bundle decryption failed",
+                is_cadence_refresh=is_cadence_refresh,
+                event="eval_bundle_decrypt_failed",
+                error=str(e),
             )
-            log.error("eval_bundle_decrypt_failed", error=str(e))
             return
 
         # Extract to ephemeral dir, then immediately drop the path —
@@ -242,13 +278,14 @@ class EvalOrchestrator:
             try:
                 safe_extract_zip(plaintext, tmp_root)
             except BundleStructureError as e:
-                await repository.update_submission_status(
-                    self.db,
-                    submission["id"],
-                    status="rejected",
-                    rejection_reason=f"bundle structure: {e}",
+                await self._fail_terminal(
+                    submission,
+                    log,
+                    reason=f"bundle structure: {e}",
+                    is_cadence_refresh=is_cadence_refresh,
+                    event="eval_bundle_structure_invalid",
+                    error=str(e),
                 )
-                log.error("eval_bundle_structure_invalid", error=str(e))
                 return
 
             polaris_errors: list[str] = []
@@ -307,12 +344,19 @@ class EvalOrchestrator:
                     registry=self.registry,
                     signer=self.signer,
                 )
-                await repository.update_submission_status(
-                    self.db,
-                    submission["id"],
-                    status="rejected",
-                    rejection_reason="polaris exhausted retries",
-                )
+                # First-eval rows that exhaust retries get rejected. A
+                # cadence refresh that exhausts retries leaves status as
+                # 'ranked' — score_and_sign above already folded the 0
+                # into the 30-day rolling avg, so the score itself
+                # signals degradation without stripping the row off the
+                # leaderboard.
+                if not is_cadence_refresh:
+                    await repository.update_submission_status(
+                        self.db,
+                        submission["id"],
+                        status="rejected",
+                        rejection_reason="polaris exhausted retries",
+                    )
                 return
 
             attestation_dict = (
@@ -364,24 +408,109 @@ class EvalOrchestrator:
         submission: dict[str, Any],
         log: structlog.stdlib.BoundLogger,
         reason: str,
+        *,
+        is_cadence_refresh: bool = False,
     ) -> None:
         self._failure_counts[submission["id"]] += 1
         if self._failure_counts[submission["id"]] >= 3:
-            await repository.update_submission_status(
-                self.db,
-                submission["id"],
-                status="rejected",
-                rejection_reason=reason,
-            )
-            log.error("eval_retryable_exhausted", reason=reason)
+            # Cadence refresh exhausted: keep the row 'ranked' with its
+            # prior score — the cadence loop will pick it up again next
+            # window. First-eval exhausted: terminal rejection.
+            if is_cadence_refresh:
+                self._arm_cadence_cooldown(submission["id"])
+                log.error(
+                    "eval_retryable_exhausted_cadence_kept_ranked",
+                    reason=reason,
+                )
+            else:
+                await repository.update_submission_status(
+                    self.db,
+                    submission["id"],
+                    status="rejected",
+                    rejection_reason=reason,
+                )
+                log.error("eval_retryable_exhausted", reason=reason)
         else:
-            # Re-queue
-            await repository.update_submission_status(self.db, submission["id"], status="queued")
-            log.warning(
-                "eval_retry_queued",
-                reason=reason,
-                attempts=self._failure_counts[submission["id"]],
-            )
+            if is_cadence_refresh:
+                # Cadence rows are not in 'evaluating' (we never flipped
+                # them) — nothing to restore. Arm a cooldown so a row
+                # whose underlying bundle is permanently broken doesn't
+                # re-pick on every tick (the cadence query uses
+                # MAX(eval_runs.ran_at), which a failed retryable does
+                # not advance).
+                self._arm_cadence_cooldown(submission["id"])
+                log.warning(
+                    "eval_retry_cadence_kept_ranked",
+                    reason=reason,
+                    attempts=self._failure_counts[submission["id"]],
+                )
+            else:
+                # First-eval: re-queue from 'evaluating' so the next tick
+                # picks it up again.
+                await repository.update_submission_status(
+                    self.db, submission["id"], status="queued"
+                )
+                log.warning(
+                    "eval_retry_queued",
+                    reason=reason,
+                    attempts=self._failure_counts[submission["id"]],
+                )
+
+    def _arm_cadence_cooldown(self, submission_id: str) -> None:
+        """Mark a cadence row as in-cooldown so the loop's batch picker
+        skips it for `_CADENCE_FAILURE_COOLDOWN`. Idempotent — repeated
+        failures just push the deadline forward."""
+        self._cadence_cooldown_until[submission_id] = datetime.now(UTC) + _CADENCE_FAILURE_COOLDOWN
+
+    def is_cadence_in_cooldown(self, submission_id: str) -> bool:
+        deadline = self._cadence_cooldown_until.get(submission_id)
+        if deadline is None:
+            return False
+        if datetime.now(UTC) >= deadline:
+            # Cooldown expired; drop the entry so the dict doesn't grow
+            # unboundedly across long-lived processes.
+            del self._cadence_cooldown_until[submission_id]
+            return False
+        return True
+
+    async def _fail_terminal(
+        self,
+        submission: dict[str, Any],
+        log: structlog.stdlib.BoundLogger,
+        *,
+        reason: str,
+        is_cadence_refresh: bool,
+        event: str,
+        error: str | None = None,
+    ) -> None:
+        """Terminal failure (e.g. decryption, structure, missing card_def).
+
+        First-eval rows go to 'rejected' as before. Cadence refresh rows
+        stay 'ranked' — a previously verified bundle failing decryption
+        once should not strip the agent off the leaderboard. The cadence
+        loop will pick it up again on the next tick, and if the failure
+        is permanent the operator will see the repeated log lines.
+        """
+        if is_cadence_refresh:
+            # No eval_run will be written (terminal failure before
+            # score_and_sign), so MAX(ran_at) doesn't advance. Cool down
+            # so the cadence picker doesn't immediately re-select.
+            self._arm_cadence_cooldown(submission["id"])
+            if error is not None:
+                log.error(event + "_cadence_kept_ranked", reason=reason, error=error)
+            else:
+                log.warning(event + "_cadence_kept_ranked", reason=reason)
+            return
+        await repository.update_submission_status(
+            self.db,
+            submission["id"],
+            status="rejected",
+            rejection_reason=reason,
+        )
+        if error is not None:
+            log.error(event, error=error)
+        else:
+            log.warning(event)
 
 
 # --------------------------------------------------------------------------
@@ -440,11 +569,21 @@ async def run_eval_loop(
         due: list[dict[str, Any]] = []
         if remaining > 0:
             try:
-                due = await repository.submissions_due_for_cadence(
+                # Over-fetch then filter cooldown rows in-process. Without
+                # the over-fetch, a slot taken by a cooled-down row would
+                # leave the batch short even when other due rows exist.
+                # Cap is bounded by the cadence-query limit semantics.
+                raw_due = await repository.submissions_due_for_cadence(
                     db,
                     now=datetime.now(UTC),
-                    limit=remaining,
+                    limit=remaining * 4,
                 )
+                for row in raw_due:
+                    if orchestrator.is_cadence_in_cooldown(row["id"]):
+                        continue
+                    due.append(row)
+                    if len(due) >= remaining:
+                        break
             except aiosqlite.Error as e:
                 logger.warning("eval_loop_cadence_query_failed", error=str(e))
                 # Cadence query failure should not block queued processing
@@ -468,6 +607,17 @@ async def run_eval_loop(
                     await orchestrator.evaluate_one(s)
                 except Exception as e:
                     logger.exception("eval_one_crashed", submission_id=s["id"], error=str(e))
+                    # An uncaught exception inside evaluate_one would
+                    # otherwise strand the row. For first-eval (queued)
+                    # rows that we flipped to 'evaluating', route through
+                    # the existing 3-attempt retry policy so the row
+                    # either re-queues or eventually rejects rather than
+                    # sitting in 'evaluating' forever. Cadence rows
+                    # stayed 'ranked' the whole time — nothing to do.
+                    if s.get("status") == "queued":
+                        await orchestrator._on_retryable_failure(
+                            s, logger.bind(submission_id=s["id"]), f"evaluate_one crash: {e}"
+                        )
 
         await asyncio.gather(*[_process(s) for s in batch])
 
@@ -837,6 +987,13 @@ async def _run_once_async() -> int:
             advanced += 1
         except Exception as e:
             logger.exception("eval_run_once_crashed", submission_id=s["id"], error=str(e))
+            # Same recovery as run_eval_loop._process: phase-2 rows were
+            # all promoted from 'queued' in a prior phase-1 tick. Route
+            # through the retry policy so a crashed eval re-queues or
+            # rejects rather than sitting in 'evaluating' forever.
+            await orch._on_retryable_failure(
+                s, logger.bind(submission_id=s["id"]), f"evaluate_one crash: {e}"
+            )
 
     # Phase 1: promote queued -> evaluating (work happens next tick).
     queued = await repository.queued_submissions(ctx.db, limit=10)

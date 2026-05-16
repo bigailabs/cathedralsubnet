@@ -142,6 +142,19 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         global _LATEST_CTX
         _LATEST_CTX = ctx
 
+        # One-shot startup repair for rows stranded in 'evaluating' with
+        # a prior current_score from pre-PR-#117 behavior. Idempotent —
+        # zero rows match once the live data is clean, so it stays in
+        # place as a safety net for any future stranding (process
+        # crashes mid-eval, etc.) without runtime cost.
+        from cathedral.publisher.repository import repair_stale_evaluating_rows
+
+        repaired = await repair_stale_evaluating_rows(ctx.db)
+        if repaired:
+            logger.warning("stale_evaluating_rows_repaired", count=repaired)
+        else:
+            logger.info("stale_evaluating_rows_repaired", count=0)
+
         stop = asyncio.Event()
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to

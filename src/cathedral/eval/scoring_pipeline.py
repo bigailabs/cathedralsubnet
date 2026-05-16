@@ -405,7 +405,14 @@ async def score_and_sign(
     avg = await repository.rolling_avg_score(conn, str(submission_id), days=30)
     if avg is None:
         avg = weighted_final
-    rank = await _compute_rank(conn, card_id, avg)
+    # Exclude this submission from the rank query — its current_score row
+    # still holds the PREVIOUS avg until update_submission_score below
+    # commits the new one. Without exclusion, a cadence refresh that
+    # lowers the score would count the row's own old higher score and
+    # over-rank it by one. Pre-PR-#117 this was masked because the row
+    # was flipped to status='evaluating' before this point (and the rank
+    # query filters status='ranked'); cadence rows now stay 'ranked'.
+    rank = await _compute_rank(conn, card_id, avg, exclude_submission_id=str(submission_id))
     await repository.update_submission_score(
         conn, str(submission_id), current_score=avg, current_rank=rank
     )
@@ -467,13 +474,34 @@ async def _first_mover_multiplier(
     )
 
 
-async def _compute_rank(conn: aiosqlite.Connection, card_id: str, my_score: float) -> int:
-    """1-indexed rank within `card_id` by current_score DESC."""
-    cur = await conn.execute(
-        "SELECT COUNT(*) FROM agent_submissions "
-        "WHERE card_id = ? AND status='ranked' AND current_score > ?",
-        (card_id, my_score),
-    )
+async def _compute_rank(
+    conn: aiosqlite.Connection,
+    card_id: str,
+    my_score: float,
+    *,
+    exclude_submission_id: str | None = None,
+) -> int:
+    """1-indexed rank within `card_id` by current_score DESC.
+
+    `exclude_submission_id`, when set, drops the row with that id from
+    the COUNT — the caller is about to overwrite that row's
+    current_score and is asking "where will I rank against everyone
+    else's current score?". Without this, a cadence-refresh row whose
+    score is dropping would count its own pre-write higher score.
+    """
+    if exclude_submission_id is None:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM agent_submissions "
+            "WHERE card_id = ? AND status='ranked' AND current_score > ?",
+            (card_id, my_score),
+        )
+    else:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM agent_submissions "
+            "WHERE card_id = ? AND status='ranked' AND current_score > ? "
+            "AND id != ?",
+            (card_id, my_score, exclude_submission_id),
+        )
     row = await cur.fetchone()
     higher = int(row[0]) if row else 0
     return higher + 1
