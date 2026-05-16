@@ -4,7 +4,7 @@ The v3 spike on `experimental/cathedral-v3-launch` (originating from the earlier
 
 ## Phase 0 — what shipped (this branch)
 
-- Five task types: research, code_patch, tool_route, multi_step, classify
+- Five generic task types: research, code_patch, tool_route, multi_step, classify
 - Three reference miners: echo, heuristic, llm
 - Validator with tool-bus observation
 - Per-task-type rubrics, score in `[0, 1]`, failure classification
@@ -21,14 +21,16 @@ Definition of done for phase 0: `cathedral-v3 serve --ticks 3 --miners echo,heur
 
 Goal: add the missing infra that coding-job families (bug_repro, test_gen) need before they can be public tasks. Sequence is load-bearing — do not skip ahead.
 
-1. **Sandbox runner.** Docker-based, `--network=none`, read-only root, env allowlist, resource limits (CPU/RAM/wallclock), throwaway work dirs, no host file mounts. Ships as standalone infra usable by any task type, not just code.
-2. **Repo bundle builder.** Reproducible signed snapshots of a target repo at a given commit, with manifest (file list, blake3 hashes, signature). Miners receive the bundle; validators recreate the same state.
-3. **Coding-trajectory schema fields.** Add code-specific fields to the trajectory before adding public coding tasks: `prompt_visible_to_miner`, `tool_trace`, `final_artifact`, `verifier_metrics`, `score`, `failure_reason` (using the code-specific enum below), `provenance`, plus a `task_split` tag (`train_exportable | public_leaderboard | heldout_eval | operator_review`). Hidden verifier fields MUST NOT leak into training prompts or future eval sets.
-4. **Code-specific failure-reason enum.** Replace generic enums for code tasks: `collection_failed`, `sandbox_violation`, `flake`, `no_bug_repro`, `fixed_commit_fails`, `missing_repo_symbol`, `coverage_gaming`, `mutation_threshold_miss`.
-5. **`bug_repro` task type, alpha.** Start with 10 curated fixed-commit tasks. Oracle: fail on buggy commit, pass on fixed commit, symptom match. Operator-reviewed alpha with low or no reward weight while we calibrate.
-6. **SFT / DPO / RM exports for `bug_repro`.** Same export pipeline, with explicit dataset views over the new schema fields so hidden verifier fields stay out of training prompts.
+**Phase 1 status: alpha-shipped on this branch.** Items 1-6 below are implemented and tested. Calibration, gaming-detection, and reward-weight tuning still in progress before public exposure.
 
-Exit: 10 curated `bug_repro` jobs run end-to-end through the sandbox, the operator-review queue catches gaming attempts, and the exports produce defensible SFT/DPO/RM rows.
+1. **Sandbox runner.** [shipped] Docker-based (`DockerBackend`) with `--network=none`, read-only root, tmpfs work dir, env allowlist, CPU/RAM/wallclock limits, no host file mounts, no Linux capabilities. `SubprocessBackend` ships as degraded fallback for CI; `available_backend()` prefers Docker when the daemon responds.
+2. **Repo bundle builder.** [shipped] `src/cathedral/v3/bundle/builder.py` — signed manifest, per-file BLAKE3, aggregate BLAKE3, ed25519 signature, materialize with path-escape refusal, full tamper-evidence test coverage.
+3. **Coding-trajectory schema fields.** [shipped] `TaskSplit` enum (`train_exportable`, `public_leaderboard`, `heldout_eval`, `operator_review`) on `JobSpec`. `JobSpec.hidden_context` separated from `JobSpec.context`; `public_view()` excludes hidden context. Export firewall (`prompt_visible_to_miner()`, `_collect_hidden_strings()`) scrubs hidden context, oracle outputs, and held-out splits from SFT/DPO/RM JSONL.
+4. **Code-specific failure-reason enum.** [shipped] `CodingFailureClass`: `sandbox_violation`, `no_bug_repro`, `fixed_commit_fails`, `flake` (plus generic `FailureClass` for non-code task types).
+5. **`bug_repro` task type, alpha.** [shipped] `TaskType.BUG_REPRO` with 3 curated fixtures (`off_by_one_sum`, `wrong_default_arg`, `divide_by_zero_guard`). Oracle: `fails_on_buggy`, `passes_on_fixed`, `symptom_match`. Defaults to `TaskSplit.OPERATOR_REVIEW`. Sandbox gate refuses positive score unless `DockerBackend` is available (or `CATHEDRAL_V3_BUG_REPRO_ALLOW_SUBPROCESS=1` for trusted-fixture smoke testing, which still tags readiness as `negative`).
+6. **SFT / DPO / RM exports for `bug_repro`.** [shipped] Hidden-field firewall scrubs `fixed_source`, `expected_symptom`, `reference_test_source`, oracle result values (`fails_on_buggy`, `passes_on_fixed`, `symptom_match`, `sandbox_backend`) from all three exports. DPO export refuses unsafe `bug_repro` pairs (subprocess or trusted-fixture mode). `HELDOUT_EVAL` is unconditionally non-exportable.
+
+Exit: scaled to ≥10 curated `bug_repro` jobs (currently 3), operator-review queue surfaces gaming attempts on real submissions, and the exports produce defensible SFT/DPO/RM rows under real miner traffic.
 
 ## Phase 2 — `test_gen` and scale (weeks 4-10)
 

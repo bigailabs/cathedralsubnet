@@ -6,9 +6,10 @@ does not touch v1.
 
 This is the substrate that v3 coding-job families (`bug_repro`,
 `test_gen`) land on top of. **`bug_repro` (Phase 1 alpha), the sandbox
-runner, and the signed repo bundle builder are all part of this PR.**
-`test_gen` and the mutation harness remain out of scope and will land
-in Phase 2 after `bug_repro` calibration.
+runner, the signed repo bundle builder, and the export firewall (hidden
+context, oracle scrubbing, DPO safety gate) are all included on this
+branch.** `test_gen` and the mutation harness remain out of scope and
+will land in Phase 2 after `bug_repro` calibration.
 
 > Read first: `docs/v3/ARCHITECTURE.md`, `docs/v3/ASSUMPTIONS.md`,
 > `docs/v3/ROADMAP.md`.
@@ -26,7 +27,7 @@ That's it. No bittensor wallet, no LLM key, no infrastructure required.
 ## Run the loop
 
 ```bash
-# 2 ticks × 5 task types × 2 miners = 20 trajectories
+# 2 ticks × 6 task types × 2 miners = 24 trajectories
 python -m cathedral.v3.cli serve --ticks 2 --miners echo,heuristic --interval 0
 ```
 
@@ -86,7 +87,7 @@ python -m cathedral.v3.cli submit-job --task-type tool_route --miner heuristic -
 python -m pytest tests/v3/ -v
 ```
 
-Phase 0 ships 58 tests: end-to-end smoke (6), cross-process determinism (26), tamper-evidence (5), and code_patch subprocess hardening (21).
+Phase 0 + Phase 1-alpha ship 164 tests: end-to-end smoke, cross-process determinism, tamper-evidence, code_patch subprocess hardening, sandbox behavior, bug_repro sandbox gate, DPO safety gate, export firewall (hidden-field scrubbing), repo bundle signing + tamper checks, and short-oracle scrubbing.
 
 ## File map
 
