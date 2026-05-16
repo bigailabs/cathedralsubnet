@@ -645,6 +645,9 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
             "challenge_id": task_json.get("challenge_id"),
             "challenge_id_public": task_json.get("challenge_id_public")
             or output.get("challenge_id_public"),
+            # epoch_salt is part of the signed subset; surface it
+            # back on the wire so validators can re-canonicalize.
+            "epoch_salt": task_json.get("epoch_salt"),
             "weighted_score": run["weighted_score"],
             "score_parts": run["score_parts"],
             "claim": output.get("claim"),

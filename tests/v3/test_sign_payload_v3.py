@@ -37,6 +37,7 @@ EXPECTED_V3_KEYS: frozenset[str] = frozenset(
         "task_type",
         "challenge_id",
         "challenge_id_public",
+        "epoch_salt",
         "weighted_score",
         "score_parts",
         "claim",
@@ -56,6 +57,7 @@ def _build_v3_signed_record(sk: Ed25519PrivateKey, *, idx: int = 0) -> dict[str,
         "task_type": "bug_isolation_v1",
         "challenge_id": f"ch_seed_{idx}",
         "challenge_id_public": f"public{idx:06d}",
+        "epoch_salt": f"epoch_{idx}",
         "weighted_score": 0.42 + 0.01 * idx,
         "score_parts": {
             "culprit_file": 1.0,
@@ -171,6 +173,19 @@ def test_v3_record_rejects_tampered_challenge_id_public() -> None:
     pk = sk.public_key()
     record = _build_v3_signed_record(sk, idx=17)
     record["challenge_id_public"] = "altered-public-id"
+    with pytest.raises(pull_loop_module.PullVerificationError):
+        pull_loop_module.verify_eval_output_signature(record, pk)
+
+
+def test_v3_record_rejects_tampered_epoch_salt() -> None:
+    """epoch_salt derives challenge_id_public; both are signed.
+    Swapping the salt post-sign must fail verification, otherwise an
+    attacker could relabel which epoch a row came from while keeping
+    the public id intact for cross-epoch answer-sharing."""
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+    record = _build_v3_signed_record(sk, idx=18)
+    record["epoch_salt"] = "epoch_attacker"
     with pytest.raises(pull_loop_module.PullVerificationError):
         pull_loop_module.verify_eval_output_signature(record, pk)
 

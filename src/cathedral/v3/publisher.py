@@ -107,6 +107,10 @@ async def persist_bug_isolation_result(
         "task_type": "bug_isolation_v1",
         "challenge_id": row["challenge_id"],
         "challenge_id_public": row.get("challenge_id_public"),
+        # epoch_salt is part of the signed subset so the validator
+        # must see it on the wire to re-canonicalize correctly. Stash
+        # it in task_json so _eval_run_to_output can surface it back.
+        "epoch_salt": row.get("epoch_salt"),
         "challenge": challenge.public_view(),
         "prompt": signed.prompt,
     }

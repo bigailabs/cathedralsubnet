@@ -51,6 +51,7 @@ _V3_SIGNED_KEYS: frozenset[str] = frozenset(
         "task_type",
         "challenge_id",
         "challenge_id_public",
+        "epoch_salt",
         "weighted_score",
         "score_parts",
         "claim",
@@ -150,6 +151,10 @@ def build_signed_v3_bug_isolation_row(
         )
 
     challenge_id_public = hash_challenge_id(challenge_id, epoch_salt=epoch_salt)
+    # epoch_salt is bound into the signed subset so the salt value
+    # used to derive challenge_id_public cannot be swapped post-sign.
+    # None is signed as a literal absence-of-salt (framework default);
+    # production must always pass a real per-epoch salt.
     signed_subset = {
         "id": eval_run_id,
         "agent_id": submission_id,
@@ -158,6 +163,7 @@ def build_signed_v3_bug_isolation_row(
         "task_type": "bug_isolation_v1",
         "challenge_id": challenge_id,
         "challenge_id_public": challenge_id_public,
+        "epoch_salt": epoch_salt,
         "weighted_score": weighted,
         "score_parts": score_parts,
         "claim": claim_dict,

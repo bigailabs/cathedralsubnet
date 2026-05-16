@@ -79,6 +79,7 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
             "task_type",
             "challenge_id",
             "challenge_id_public",
+            "epoch_salt",
             "weighted_score",
             "score_parts",
             "claim",

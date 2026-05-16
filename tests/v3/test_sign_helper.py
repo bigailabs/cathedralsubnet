@@ -218,10 +218,17 @@ def test_build_signed_v3_row_forwards_epoch_salt() -> None:
     assert row_e1["challenge_id_public"] == hash_challenge_id(
         "ch_alpha", epoch_salt="epoch_1"
     )
-    # The public id is now signed, so changing the salt changes the
-    # canonical bytes and the signature.
+    # epoch_salt itself is also in the signed subset, so changing the
+    # salt changes the canonical bytes and the signature.
+    assert row_no_salt["epoch_salt"] is None
+    assert row_e1["epoch_salt"] == "epoch_1"
+    assert row_e2["epoch_salt"] == "epoch_2"
     assert row_no_salt["cathedral_signature"] != row_e1["cathedral_signature"]
     assert row_e1["cathedral_signature"] != row_e2["cathedral_signature"]
+    # All three rows still verify with the validator's own code path.
+    pk = signer._sk.public_key()
+    for row in (row_no_salt, row_e1, row_e2):
+        pull_loop_module.verify_eval_output_signature(row, pk)
 
 
 # --------------------------------------------------------------------------
@@ -241,8 +248,8 @@ def test_build_v3_row_refuses_to_emit_extra_signed_fields() -> None:
     row, _ = _sign_and_get_row(_good_stdout())
     signed_keys = {
         "id", "agent_id", "agent_display_name", "miner_hotkey", "task_type",
-        "challenge_id", "challenge_id_public", "weighted_score", "score_parts",
-        "claim", "ran_at",
+        "challenge_id", "challenge_id_public", "epoch_salt", "weighted_score",
+        "score_parts", "claim", "ran_at",
     }
     # The row has more fields than the signed subset (envelope), but
     # the signed subset itself was complete.

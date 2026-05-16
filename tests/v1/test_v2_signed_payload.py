@@ -451,6 +451,7 @@ def test_publisher_signed_keyset_v3_matches_locked_field_list():
             "task_type",
             "challenge_id",
             "challenge_id_public",
+            "epoch_salt",
             "weighted_score",
             "score_parts",
             "claim",

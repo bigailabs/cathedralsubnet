@@ -743,6 +743,7 @@ _SIGNED_EVAL_OUTPUT_KEYS_V3 = frozenset(
         "task_type",
         "challenge_id",
         "challenge_id_public",
+        "epoch_salt",
         "weighted_score",
         "score_parts",
         "claim",
