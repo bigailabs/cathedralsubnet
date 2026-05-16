@@ -62,6 +62,27 @@ _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
             "ran_at",
         }
     ),
+    # v3, v3.0 bug_isolation_v1 benchmark lane. Cathedral prompts the
+    # miner via Hermes, miner returns a structured isolation claim,
+    # Cathedral scores statically against a hidden oracle on Railway
+    # and signs the result. No card_id in the signed bytes: v3 rows
+    # are not regulatory cards and do not route through the v1 card
+    # registry. `challenge_id` is signed (so validators can verify
+    # which corpus row was scored) but is hashed in public read
+    # surfaces to slow Discord-style answer-sharing across miners.
+    3: frozenset(
+        {
+            "id",
+            "agent_id",
+            "agent_display_name",
+            "task_type",
+            "challenge_id",
+            "weighted_score",
+            "score_parts",
+            "claim",
+            "ran_at",
+        }
+    ),
 }
 
 

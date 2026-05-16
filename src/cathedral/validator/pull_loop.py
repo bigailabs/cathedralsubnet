@@ -662,12 +662,34 @@ _SIGNED_EVAL_OUTPUT_KEYS_V2 = frozenset(
     }
 )
 
+# v3, v3.0 bug_isolation_v1 benchmark lane. Publisher prompts the
+# miner via SSH Hermes, miner returns a structured isolation claim,
+# publisher scores statically on Railway against a hidden oracle and
+# signs the result. No card_id in the signed bytes: v3 rows are not
+# regulatory cards and do not route through the v1 card registry.
+# Must stay byte-for-byte identical to
+# src/cathedral/eval/v2_payload.py:_SIGNED_KEYS_BY_VERSION[3].
+_SIGNED_EVAL_OUTPUT_KEYS_V3 = frozenset(
+    {
+        "id",
+        "agent_id",
+        "agent_display_name",
+        "task_type",
+        "challenge_id",
+        "weighted_score",
+        "score_parts",
+        "claim",
+        "ran_at",
+    }
+)
+
 # Version-keyed dispatcher. A record's signed payload schema is selected
 # by ``eval_output_schema_version`` (defaulting to 1 when the field is
 # absent — the v1.0.x wire shape).
 _SIGNED_KEYS_BY_VERSION: dict[int, frozenset[str]] = {
     1: _SIGNED_EVAL_OUTPUT_KEYS_V1,
     2: _SIGNED_EVAL_OUTPUT_KEYS_V2,
+    3: _SIGNED_EVAL_OUTPUT_KEYS_V3,
 }
 
 # Back-compat alias — the prior constant name. Tests and downstream code
