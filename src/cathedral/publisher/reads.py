@@ -190,6 +190,11 @@ async def get_card_eval_spec(card_id: str, request: Request) -> dict[str, Any]:
     card_def = await repository.get_card_definition(ctx.db, card_id)
     if card_def is None:
         raise HTTPException(status_code=404, detail="card not found")
+    # Mirror the submit gate at `publisher/submit.py`: archived cards must
+    # 404 here too so the eval-spec endpoint cannot keep advertising
+    # deprecated launch-plan cards after they've been archived at startup.
+    if card_def.get("status") != "active":
+        raise HTTPException(status_code=404, detail=f"card not active: {card_id}")
     return {
         "card_id": card_def["id"],
         "display_name": card_def["display_name"],

@@ -156,3 +156,65 @@ def test_archived_card_status_routes_through_submit_check(tmp_path: Path) -> Non
             await conn.close()
 
     asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------
+# HTTP-level archived-card 404 behavior
+# --------------------------------------------------------------------------
+
+
+async def _seed_archived_us_ai_eo_via_ctx(ctx: Any) -> None:
+    """Seed an archived us-ai-eo row using the publisher app's own
+    aiosqlite connection (`ctx.db`), so we hit the same DB the live
+    endpoint reads from."""
+    await repository.insert_card_definition(
+        ctx.db,
+        id="us-ai-eo",
+        display_name="US AI EO (deprecated)",
+        jurisdiction="us",
+        topic="deprecated",
+        description="Deprecated launch-plan card.",
+        eval_spec_md="deprecated",
+        source_pool=[],
+        task_templates=[],
+        scoring_rubric={},
+        refresh_cadence_hours=24,
+        status="archived",
+    )
+    await ctx.db.commit()
+
+
+def test_eval_spec_endpoint_returns_404_for_archived_card(publisher_client) -> None:
+    """``GET /v1/cards/{id}/eval-spec`` must return 404 for archived
+    cards, mirroring the submit gate at ``publisher/submit.py``.
+
+    Without this, archived launch-plan cards keep advertising their
+    eval-spec content via the public endpoint even though new submits
+    return 404, which would lead miners to build against cards they
+    cannot actually submit to.
+    """
+    ctx = publisher_client.app.state.ctx
+    asyncio.run(_seed_archived_us_ai_eo_via_ctx(ctx))
+
+    resp = publisher_client.get("/v1/cards/us-ai-eo/eval-spec")
+    assert resp.status_code == 404, (
+        f"archived card must 404 from eval-spec, got {resp.status_code}: "
+        f"{resp.text}"
+    )
+    assert "card not active" in resp.text or "card not found" in resp.text
+
+    # Sanity check: the active eu-ai-act card still returns 200 from
+    # the same endpoint.
+    resp_ok = publisher_client.get("/v1/cards/eu-ai-act/eval-spec")
+    assert resp_ok.status_code == 200, (
+        f"active eu-ai-act must still serve eval-spec, got "
+        f"{resp_ok.status_code}: {resp_ok.text}"
+    )
+
+
+def test_eval_spec_endpoint_returns_404_for_unknown_card(publisher_client) -> None:
+    """Sanity guard: never-seeded card_ids still 404 (the archived-card
+    gate is additive, not a regression of the existing
+    'card not found' path)."""
+    resp = publisher_client.get("/v1/cards/never-seeded-ever/eval-spec")
+    assert resp.status_code == 404, resp.text
