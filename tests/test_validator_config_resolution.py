@@ -117,6 +117,45 @@ def test_managed_mainnet_config_syncs_current_burn_policy(tmp_path: Path) -> Non
     assert "forced_burn_percentage = 0.0" in mainnet.read_text()
 
 
+def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> None:
+    custom = tmp_path / "operator" / "mainnet-custom.toml"
+    custom.parent.mkdir(parents=True)
+    custom.write_text(
+        "\n".join(
+            [
+                "[network]",
+                'name = "finney"',
+                "netuid = 39",
+                'validator_hotkey = "operator-hotkey"',
+                'wallet_name = "operator-wallet"',
+                "",
+                "[polaris]",
+                'base_url = "https://api.polaris.computer/"',
+                f'public_key_hex = "{POLARIS_KEY}"',
+                "",
+                "[weights]",
+                "interval_secs = 1500",
+                "disabled = false",
+                "burn_uid = 204",
+                "forced_burn_percentage = 98.0",
+            ]
+        )
+        + "\n"
+    )
+
+    resolved = resolve_validator_config_path(
+        custom,
+        env={"CATHEDRAL_CONFIG_PATH": str(custom)},
+        repo_root=Path.cwd(),
+        etc_dir=tmp_path / "etc" / "cathedral",
+    )
+
+    assert resolved == str(custom)
+    settings = ValidatorSettings.from_toml(resolved)
+    assert settings.weights.forced_burn_percentage == 0.0
+    assert "forced_burn_percentage = 0.0" in custom.read_text()
+
+
 def test_explicit_testnet_network_is_respected(tmp_path: Path) -> None:
     etc = tmp_path / "etc" / "cathedral"
     etc.mkdir(parents=True)
