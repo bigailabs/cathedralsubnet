@@ -40,14 +40,10 @@ CONTRACT_LOGO_MAX_BYTES = 200 * 1024  # 200 KiB — Section 2.1
 CONTRACT_SIGNATURE_HEADER = "X-Cathedral-Signature"
 CONTRACT_HOTKEY_HEADER = "X-Cathedral-Hotkey"
 
-# Locked card_id values per Section 9 lock #12.
-CONTRACT_V1_CARD_IDS: tuple[str, ...] = (
-    "eu-ai-act",
-    "us-ai-eo",
-    "uk-ai-whitepaper",
-    "singapore-pdpc",
-    "japan-meti-mic",
-)
+# v1 launch card_ids. Collapsed to EU AI Act only; the earlier 5-card
+# plan is deprecated and archived at Docker startup. Kept as a tuple so
+# future cards land here as the launch set expands.
+CONTRACT_V1_CARD_IDS: tuple[str, ...] = ("eu-ai-act",)
 
 # First-mover constants per Section 7.2.
 FIRST_MOVER_DELTA = 0.05

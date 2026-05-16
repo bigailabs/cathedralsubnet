@@ -54,13 +54,18 @@ def test_skill_md_route_returns_markdown(publisher_client: object) -> None:
 
 
 def test_skill_md_mentions_byo_path(publisher_client: object) -> None:
-    """The doc must teach BYO-compute as a first-class option."""
+    """skill.md must teach BYO-compute, the only live mining path in v1.
+
+    v1.1.0 made BYO Box (`ssh-probe`) the sole production path. The
+    legacy Polaris-hosted runtime is no longer the alternative; the
+    previous "polaris must be named" assertion was retired with that
+    migration.
+    """
     if publisher_client is None:
         pytest.skip("publisher app not buildable")
     r = publisher_client.get("/skill.md")  # type: ignore[attr-defined]
     body = r.text.lower()
-    assert "byo" in body or "bring your own" in body.lower()
-    assert "polaris" in body  # the alternative path is named
+    assert "byo" in body or "bring your own" in body
 
 
 def test_verified_multiplier_capped_at_one() -> None:

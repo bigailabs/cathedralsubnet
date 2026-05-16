@@ -49,34 +49,6 @@ class CardRegistry:
                     ),
                     refresh_cadence_hours=24,
                 ),
-                RegistryEntry(
-                    card_id="us-ai-eo",
-                    jurisdiction=Jurisdiction.US,
-                    topic="US executive orders and federal AI guidance",
-                    required_source_classes=(SourceClass.GOVERNMENT, SourceClass.REGULATOR),
-                    refresh_cadence_hours=24,
-                ),
-                RegistryEntry(
-                    card_id="uk-ai-whitepaper",
-                    jurisdiction=Jurisdiction.UK,
-                    topic="UK pro-innovation AI regulation framework",
-                    required_source_classes=(SourceClass.GOVERNMENT, SourceClass.REGULATOR),
-                    refresh_cadence_hours=48,
-                ),
-                RegistryEntry(
-                    card_id="singapore-pdpc",
-                    jurisdiction=Jurisdiction.SG,
-                    topic="Singapore PDPC enforcement and guidance",
-                    required_source_classes=(SourceClass.REGULATOR, SourceClass.LAW_TEXT),
-                    refresh_cadence_hours=48,
-                ),
-                RegistryEntry(
-                    card_id="japan-meti-mic",
-                    jurisdiction=Jurisdiction.JP,
-                    topic="Japan METI/MIC AI and data guidance",
-                    required_source_classes=(SourceClass.GOVERNMENT, SourceClass.REGULATOR),
-                    refresh_cadence_hours=48,
-                ),
             )
         )
 

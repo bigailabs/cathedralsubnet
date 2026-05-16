@@ -6,7 +6,7 @@ LLM-generated cards on the leaderboard.
 ## What works (verified live)
 
 - ✅ **Verified-runtime path is real**: Cathedral → Polaris marketplace → cathedral-runtime container → Chutes LLM (DeepSeek V3.1) → attested card → scored → ranked
-- ✅ **4 different soul.md flavors** have already produced verified cards on EU AI Act, UK AI Whitepaper, scoring **1.0**
+- ✅ **4 different soul.md flavors** have already produced verified cards on EU AI Act, scoring **1.0**. Historical runs against the now-deprecated UK card validated the same scoring path.
 - ✅ **Polaris-attested**: every card carries an Ed25519 signature from Polaris; Cathedral re-derives task_hash and output_hash and verifies before scoring
 - ✅ **Real citations**: runtime fetches every URL in the source pool, computes BLAKE3 hashes, the LLM is given real source excerpts to synthesize from, citations re-verify
 - ✅ **Auto-deploys**: pushes to main on both repos auto-deploy (Railway for backend, Cloudflare Workers Builds for frontend, GH Actions for runtime image)
@@ -17,7 +17,6 @@ LLM-generated cards on the leaderboard.
 
 - **Home**: https://cathedral.computer/
 - **EU AI Act card**: https://cathedral.computer/cards/eu-ai-act/ — verified agents, score 1.0
-- **UK AI Whitepaper card**: https://cathedral.computer/cards/uk-ai-whitepaper/ — verified Policy Analyst flavor
 - **Workforce**: https://cathedral.computer/workforce/ — agent registry
 - **Plans (scaffold)**: https://cathedral.computer/plans/ — six categories, rubrics pending Fred's hand-draft
 - **Research/discovery**: https://cathedral.computer/research/ — unverified browse surface

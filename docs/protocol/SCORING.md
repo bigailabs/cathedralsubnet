@@ -55,7 +55,7 @@ A failed card receives no score; the claim is rejected with `preflight: <reason>
 
 ## Baseline registry
 
-`CardRegistry.baseline()` seeds five cards: `eu-ai-act`, `us-ai-executive-order`, `uk-aisi`, `eu-gdpr-enforcement`, `us-ccpa`. Operators can override via TOML in a future config field; for now, edit `cathedral.cards.registry` directly.
+`CardRegistry.baseline()` seeds one card: `eu-ai-act`. Operators can override via TOML in a future config field; for now, edit `cathedral.cards.registry` directly. The earlier 5-card launch plan (`us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic`) is deprecated; existing production rows for those IDs are archived at Docker startup and `POST /v1/agents/submit` returns 404 for them.
 
 ## Runtime multiplier
 

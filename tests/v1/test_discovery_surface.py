@@ -152,11 +152,27 @@ def seeded(publisher_app, tmp_path: Path):
                 display_name="Discovery Agent",
                 soul_md_preview="# Soul preview\nThis is the first 500 chars of the soul.",
             )
-            # A second unverified on a different card, slightly older —
-            # used by the cross-card /v1/discovery/recent test.
+            # Seed a second test-only card so the cross-card discovery
+            # test has two distinct card_ids to read across. v1 launch
+            # only blesses eu-ai-act, so we insert a fixture row here
+            # rather than reusing a deprecated launch-plan card id.
+            await repository.insert_card_definition(
+                conn,
+                id="test-secondary",
+                display_name="Test Secondary",
+                jurisdiction="other",
+                topic="Test fixture for cross-card discovery surface",
+                description="Fixture only; not a real launch card.",
+                eval_spec_md="Fixture.",
+                source_pool=[],
+                task_templates=[],
+                scoring_rubric={},
+                refresh_cadence_hours=24,
+                status="active",
+            )
             other_id = await _seed_unverified(
                 conn,
-                card_id="us-ai-eo",
+                card_id="test-secondary",
                 display_name="Other Card Discovery",
                 submitted_offset_secs=-30,
             )

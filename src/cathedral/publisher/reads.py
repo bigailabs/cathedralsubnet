@@ -24,6 +24,34 @@ router = APIRouter()
 
 
 # --------------------------------------------------------------------------
+# Shared helpers
+# --------------------------------------------------------------------------
+
+
+async def get_active_card_definition_or_404(
+    db: Any, card_id: str
+) -> dict[str, Any]:
+    """Look up a card_definitions row by id; 404 if missing OR archived.
+
+    Mirrors the submit gate at ``publisher/submit.py`` so every public
+    ``/v1/cards/{card_id}/*`` surface treats archived cards as invisible.
+    Without this, archived launch-plan cards keep advertising history,
+    discovery, feed, attempts, and eval-spec content even though new
+    submits are rejected, which leads miners and the site to build
+    against cards they cannot actually submit to.
+
+    Returns the card_def dict on success. Raises HTTPException(404)
+    otherwise; callers do not need to add their own status check.
+    """
+    card_def = await repository.get_card_definition(db, card_id)
+    if card_def is None:
+        raise HTTPException(status_code=404, detail="card not found")
+    if card_def.get("status") != "active":
+        raise HTTPException(status_code=404, detail=f"card not active: {card_id}")
+    return card_def
+
+
+# --------------------------------------------------------------------------
 # 2.2 GET /v1/agents/{id}
 # --------------------------------------------------------------------------
 
@@ -106,9 +134,7 @@ async def list_agents(
 @router.get("/v1/cards/{card_id}")
 async def get_card_summary(card_id: str, request: Request) -> dict[str, Any]:
     ctx: PublisherContext = request.app.state.ctx
-    card_def = await repository.get_card_definition(ctx.db, card_id)
-    if card_def is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    card_def = await get_active_card_definition_or_404(ctx.db, card_id)
 
     # `best_eval` and `agent_count` are both verified-surface only: the
     # public card overview should reflect only attested agents. Discovery
@@ -156,8 +182,7 @@ async def get_card_history(
     since: str | None = Query(default=None),
 ) -> dict[str, Any]:
     ctx: PublisherContext = request.app.state.ctx
-    if (await repository.get_card_definition(ctx.db, card_id)) is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    await get_active_card_definition_or_404(ctx.db, card_id)
     since_dt = _parse_since(since)
 
     if agent_id:
@@ -187,9 +212,7 @@ async def get_card_history(
 @router.get("/v1/cards/{card_id}/eval-spec")
 async def get_card_eval_spec(card_id: str, request: Request) -> dict[str, Any]:
     ctx: PublisherContext = request.app.state.ctx
-    card_def = await repository.get_card_definition(ctx.db, card_id)
-    if card_def is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    card_def = await get_active_card_definition_or_404(ctx.db, card_id)
     return {
         "card_id": card_def["id"],
         "display_name": card_def["display_name"],
@@ -227,8 +250,7 @@ async def get_card_discovery(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     ctx: PublisherContext = request.app.state.ctx
-    if (await repository.get_card_definition(ctx.db, card_id)) is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    await get_active_card_definition_or_404(ctx.db, card_id)
     items = await repository.list_discovery_submissions_for_card(
         ctx.db, card_id, limit=limit, offset=offset
     )
@@ -244,8 +266,7 @@ async def get_card_discovery(
 @router.get("/v1/cards/{card_id}/discovery/count")
 async def get_card_discovery_count(card_id: str, request: Request) -> dict[str, Any]:
     ctx: PublisherContext = request.app.state.ctx
-    if (await repository.get_card_definition(ctx.db, card_id)) is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    await get_active_card_definition_or_404(ctx.db, card_id)
     total = await repository.count_discovery_submissions_for_card(ctx.db, card_id)
     return {"total": total}
 
@@ -279,8 +300,7 @@ async def get_card_feed(
     limit: int = Query(default=30, ge=1, le=200),
 ) -> dict[str, Any]:
     ctx: PublisherContext = request.app.state.ctx
-    if (await repository.get_card_definition(ctx.db, card_id)) is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    await get_active_card_definition_or_404(ctx.db, card_id)
     since_dt = _parse_since(since)
     runs = await repository.list_eval_runs_for_card(ctx.db, card_id, since=since_dt, limit=limit)
     items: list[dict[str, Any]] = []
@@ -317,8 +337,7 @@ async def get_card_attempts(
     field is added on top so the site can attribute failed attempts.
     """
     ctx: PublisherContext = request.app.state.ctx
-    if (await repository.get_card_definition(ctx.db, card_id)) is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    await get_active_card_definition_or_404(ctx.db, card_id)
     runs = await repository.list_attempts_for_card(ctx.db, card_id, limit=limit)
     items: list[dict[str, Any]] = []
     for r in runs:
@@ -347,8 +366,7 @@ async def get_leaderboard(
     ctx: PublisherContext = request.app.state.ctx
     if not card:
         raise HTTPException(status_code=400, detail="card parameter required")
-    if (await repository.get_card_definition(ctx.db, card)) is None:
-        raise HTTPException(status_code=404, detail="card not found")
+    await get_active_card_definition_or_404(ctx.db, card)
     # Pull more than `limit` because we dedupe by hotkey below — a single
     # mason can have submitted many bundles, only their best should occupy
     # a leaderboard slot. Cap at the repository's ceiling (200) so a wide

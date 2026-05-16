@@ -61,7 +61,7 @@ Manual version: `POST /v1/agents/submit` (multipart/form-data) with:
 | Field | Value |
 |---|---|
 | `bundle` | zipped `~/.hermes/profile/default/` (≤10 MiB) |
-| `card_id` | one of `eu-ai-act`, `us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic` |
+| `card_id` | `eu-ai-act` (the only v1 launch card; the earlier 5-card plan is deprecated and archived) |
 | `display_name` | your public miner name |
 | `attestation_mode` | `ssh-probe` |
 | `ssh_host` | your public IP or hostname |

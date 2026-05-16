@@ -9,7 +9,7 @@ The subnet publishes **jobs** - standing work with a source pool, task templates
 
 > **Runtime depth.** v1 ships one live mining path: BYO Box (`ssh-probe`). Cathedral SSHs into the miner's declared host, snapshots `~/.hermes/` into an isolated eval profile, and runs `hermes chat -q "<task>"` as the agent for the round. Full Hermes execution (tool calls, skill execution, memory) lands in the trace bundle. Every scored v1 submission uses the `1.00x` runtime multiplier.
 
-First vertical: **regulatory intelligence** (EU AI Act, US AI Executive Order, UK AI Whitepaper, Singapore PDPC, Japan METI/MIC). The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
+First vertical: **EU AI Act regulatory intelligence**. The mechanism generalizes to any domain where expert agent output needs to be checked against ground truth.
 
 **Latest release:** see [RELEASES.md](RELEASES.md) for the current shipped version and changelog.
 
@@ -63,17 +63,15 @@ Full procedure for someone running a validator: [docs/VALIDATOR.md](docs/VALIDAT
 
 ## Jobs live
 
-The publisher's `card_definitions` table is seeded from `cathedralai/cathedral-eval-spec`. Five jobs are live and accept submissions today:
+The publisher's `card_definitions` table is seeded from `cathedralai/cathedral-eval-spec`. One job is live and accepts submissions today:
 
 | Job ID | Jurisdiction | Topic |
 |---------|--------------|-------|
 | `eu-ai-act` | EU | EU AI Act enforcement and guidance |
-| `us-ai-eo` | US | US executive orders and federal AI guidance |
-| `uk-ai-whitepaper` | UK | UK pro-innovation AI regulation framework |
-| `singapore-pdpc` | SG | Singapore PDPC enforcement and guidance |
-| `japan-meti-mic` | JP | Japan METI / MIC AI and data guidance |
 
-In-process source-class requirements and refresh cadences live in `src/cathedral/cards/registry.py`. Full per-job eval-specs (`source_pool`, `task_templates`, `scoring_rubric`) live in `card_definitions` and are queryable at `GET /v1/cards/{card_id}/eval-spec`.
+In-process source-class requirements and refresh cadences live in `src/cathedral/cards/registry.py`. The eval-spec (`source_pool`, `task_templates`, `scoring_rubric`) lives in `card_definitions` and is queryable at `GET /v1/cards/eu-ai-act/eval-spec`.
+
+The earlier 5-card launch plan (`us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic`) is deprecated for v1 launch. Existing production rows for those IDs are archived at Docker startup, so `POST /v1/agents/submit` and `GET /v1/cards/{id}/eval-spec` return 404 for them. New cards open as separate launch tracks once `eu-ai-act` ships clean and a real miner is earning on it.
 
 Africa is tracked in [cathedralai/cathedral#24](https://github.com/cathedralai/cathedral/issues/24). Scope is open: pan-AU vs. country-specific.
 
@@ -132,7 +130,7 @@ Hardware-attestation contract: [docs/ATTESTATION_CONTRACT.md](docs/ATTESTATION_C
 
 Verified live, 2026-05-13:
 
-- Five job definitions seeded, eval-specs served at `/v1/cards/{card_id}/eval-spec`.
+- One job definition seeded (`eu-ai-act`), eval-spec served at `/v1/cards/eu-ai-act/eval-spec`. The earlier 4-card plan (`us-ai-eo`, `uk-ai-whitepaper`, `singapore-pdpc`, `japan-meti-mic`) is archived at Docker startup and returns 404.
 - End-to-end ssh-probe pipeline: submit -> encrypt to R2 -> SSH into miner host -> snapshot `~/.hermes/` -> `hermes chat -q "<task>"` -> capture trace -> score -> sign -> publish.
 - SN39 mainnet validators: pull loop verifying signed `EvalRun` projections every 30s, weight loop calling `subtensor.set_weights` every 1500s with `forced_burn_percentage = 0.0` so positive score mass routes to miners. `burn_uid=204` remains configured as the fallback when the score window has no positive miner scores. Cathedral consensus on mainnet is still pinned by the burn-majority subset, which is a separate operator concern from "weights are being set."
 - Publisher: Railway, auto-deploy on push to `main`. TLS via Cloudflare.
@@ -146,6 +144,8 @@ Not yet built:
 
 - Live TEE miners. Nitro verifier exists in `cathedral.attestation.nitro`; TDX and SEV-SNP return 501 from the submit endpoint.
 - Africa job ([#24](https://github.com/cathedralai/cathedral/issues/24)).
+
+> **v3 substrate is experimental, not the live mining path.** The `src/cathedral/v3/` package (trajectory data substrate, `bug_repro` alpha, validator-local sandbox runner) ships behind separate entry points and is not invoked from the v1 publisher, validator, or miner code paths. v1 BYO Box plus the EU AI Act regulatory card remain the production mining and reward path until [#123](https://github.com/cathedralai/cathedral/issues/123) (publisher SSH runner for `bug_repro`) lands.
 
 ## Repo layout
 

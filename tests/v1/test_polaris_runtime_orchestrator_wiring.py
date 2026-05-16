@@ -340,15 +340,16 @@ async def test_attestation_persists_and_flips_polaris_verified(
     assert byo.polaris_verified is False
     assert byo.polaris_attestation is None
 
-    # 1.10x runtime multiplier applies on the verified path and is omitted
-    # on BYO. Identical card+registry means score_parts are identical, so
-    # the verified score must be strictly higher (capped at 1.0). Skip the
-    # assertion if either score saturates at the cap.
-    if polaris.weighted_score < 1.0 and byo.weighted_score < 1.0:
-        assert polaris.weighted_score > byo.weighted_score, (
-            f"§7.3: verified runtime must score higher than BYO baseline "
-            f"(verified={polaris.weighted_score}, byo={byo.weighted_score})"
-        )
+    # Since v1.1.0 every scored v1 submission uses the 1.00x runtime
+    # multiplier regardless of Polaris-verified vs BYO path; BYO Box
+    # (ssh-probe) is the only live mining path. Identical card+registry
+    # therefore yields identical weighted_score on both paths. The
+    # attestation row is still hydrated (asserted above) so downstream
+    # surfaces can show verified vs not, but the score does not diverge.
+    assert polaris.weighted_score == byo.weighted_score, (
+        f"v1.1.0+: 1.00x multiplier on both paths means scores must match "
+        f"(verified={polaris.weighted_score}, byo={byo.weighted_score})"
+    )
 
 
 @pytest.mark.asyncio

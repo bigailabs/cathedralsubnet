@@ -185,8 +185,9 @@ class EvidenceBundle(BaseModel):
 
 
 class Jurisdiction(str, Enum):
-    """Per CONTRACTS.md L2: SG (Singapore) and JP (Japan) added for the
-    launch content (singapore-pdpc + japan-meti-mic cards)."""
+    """Per CONTRACTS.md L2. Historical launch content included SG / JP
+    cards that have since been deprecated; the enum values stay so old
+    DB rows and historical evidence remain decodable."""
 
     EU = "eu"
     US = "us"
