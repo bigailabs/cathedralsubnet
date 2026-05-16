@@ -101,6 +101,7 @@ def build_signed_v3_bug_isolation_row(
     signer: Any,
     failure_reason: str | None = None,
     shadow_metrics: dict[str, Any] | None = None,
+    epoch_salt: str | None = None,
 ) -> dict[str, Any]:
     """Assemble + sign a v3 wire row.
 
@@ -114,6 +115,14 @@ def build_signed_v3_bug_isolation_row(
     zero-score payload with the partial claim if we have it. The
     publisher should still sign+serve so the miner has a verifiable
     failure record.
+
+    ``epoch_salt`` is forwarded to ``hash_challenge_id`` to produce
+    ``challenge_id_public``. Default ``None`` keeps the unsalted
+    framework-PR behavior so unit tests stay deterministic. The
+    follow-up PR that enables ``CATHEDRAL_V3_FEED_ENABLED`` must
+    pass a real per-epoch salt (for example ``f"epoch_{epoch_number}"``)
+    so the public id rotates per epoch and cannot be used for
+    cross-miner answer-sharing.
     """
     if dispatch_result.ok and dispatch_result.score is not None and dispatch_result.claim is not None:
         weighted = dispatch_result.score.weighted_score
@@ -156,13 +165,22 @@ def build_signed_v3_bug_isolation_row(
         )
 
     payload_bytes = canonical_json(signed_subset)
+    # TODO(#issue): private-attr access on EvalSigner. The existing
+    # contract exposes only `.sign(dict)` which canonicalizes
+    # internally; we need raw-bytes signing to keep canonicalization
+    # consistent across modules. Move to a public `.sign_bytes(bytes)`
+    # method on EvalSigner in a small refactor PR.
     sig_b64 = base64.b64encode(signer._sk.sign(payload_bytes)).decode("ascii")
 
     row = dict(signed_subset)
     row["cathedral_signature"] = sig_b64
     row["eval_output_schema_version"] = 3
     # Envelope (unsigned). Validators tolerate; site uses for UX.
-    row["challenge_id_public"] = hash_challenge_id(challenge_id)
+    # When epoch_salt is None (framework PR), the hash is stable and
+    # reversible; production must pass a real per-epoch salt.
+    row["challenge_id_public"] = hash_challenge_id(
+        challenge_id, epoch_salt=epoch_salt
+    )
     if shadow_metrics is not None:
         row["shadow_metrics"] = shadow_metrics
     if failure_reason is not None:

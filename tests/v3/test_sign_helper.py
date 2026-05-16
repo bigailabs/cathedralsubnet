@@ -178,6 +178,49 @@ def test_hash_challenge_id_epoch_salt_rotates_public_id() -> None:
     )
 
 
+def test_build_signed_v3_row_forwards_epoch_salt() -> None:
+    """build_signed_v3_bug_isolation_row(epoch_salt=...) must reach
+    hash_challenge_id so the public id rotates per epoch. Without
+    this plumbing, the publisher could call the builder forgetting
+    the salt and quietly emit reversible public ids."""
+    sk = Ed25519PrivateKey.generate()
+    signer = _FakeSigner(sk)
+    dispatch = dispatch_bug_isolation_claim(
+        expected_challenge_id="ch_alpha",
+        stdout=_good_stdout("ch_alpha"),
+        **_ORACLE,
+    )
+
+    def _build(salt: str | None) -> dict[str, Any]:
+        return build_signed_v3_bug_isolation_row(
+            eval_run_id="00000000-0000-4000-8000-000000000099",
+            submission_id="11111111-1111-4111-8111-000000000099",
+            agent_display_name="Salt Tester",
+            challenge_id="ch_alpha",
+            dispatch_result=dispatch,
+            ran_at_iso="2026-05-16T05:00:00.000Z",
+            signer=signer,
+            epoch_salt=salt,
+        )
+
+    row_no_salt = _build(None)
+    row_e1 = _build("epoch_1")
+    row_e2 = _build("epoch_2")
+
+    # Public ids must rotate when salt changes; framework default
+    # (no salt) differs from any salted value.
+    assert row_no_salt["challenge_id_public"] != row_e1["challenge_id_public"]
+    assert row_e1["challenge_id_public"] != row_e2["challenge_id_public"]
+    assert row_e1["challenge_id_public"] == hash_challenge_id(
+        "ch_alpha", epoch_salt="epoch_1"
+    )
+    # Signed bytes are identical (epoch_salt is envelope-only); the
+    # cathedral_signature should remain consistent across salt
+    # changes because nothing in the signed subset moved.
+    assert row_no_salt["cathedral_signature"] == row_e1["cathedral_signature"]
+    assert row_e1["cathedral_signature"] == row_e2["cathedral_signature"]
+
+
 # --------------------------------------------------------------------------
 # Keyset enforcement
 # --------------------------------------------------------------------------

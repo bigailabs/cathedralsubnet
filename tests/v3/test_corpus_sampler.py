@@ -163,6 +163,39 @@ def test_pilot_corpus_loads_and_validates() -> None:
         )
 
 
+def test_pilot_corpus_is_empty_in_framework_pr() -> None:
+    """The scaffolding PR ships PILOT_CORPUS empty by design. The
+    follow-up PR (live-feed enablement) raises this floor to >=10
+    independently-verified rows. If this test fails because someone
+    added a row, make sure you have a clickable upstream proof for
+    each commit + line range before you push: per `CORPUS_TODO.md`,
+    placeholder SHAs are not allowed in production seed_pilot.py."""
+    assert len(PILOT_CORPUS) == 0, (
+        f"PILOT_CORPUS must be empty in the framework PR; got "
+        f"{len(PILOT_CORPUS)} rows. If you have verified rows ready, "
+        f"raise this assertion to >=10 in the live-feed PR rather "
+        f"than landing a smaller production corpus here."
+    )
+
+
+def test_unverified_examples_all_parse_and_carry_prefix() -> None:
+    """Every fixture row must parse against the schema (so the
+    regex on commit catches typos), use the UNVERIFIED_ id prefix
+    (so they cannot be accidentally promoted to production), and
+    carry an https source_url (so a reviewer can verify them
+    later). Pure parse + invariant check."""
+    assert len(UNVERIFIED_EXAMPLES) >= 1, "fixtures should not be empty"
+    for row in UNVERIFIED_EXAMPLES:
+        assert row.id.startswith("UNVERIFIED_"), (
+            f"{row.id}: fixture rows must carry the UNVERIFIED_ prefix "
+            "so they cannot land in production seed_pilot.py by accident"
+        )
+        assert len(row.commit) == 40, f"{row.id}: commit must be 40-char SHA"
+        assert row.source_url.startswith("https://"), (
+            f"{row.id}: source_url must be https URL"
+        )
+
+
 def test_unverified_fixtures_exercise_symbol_less_path() -> None:
     """Spec: ``culprit_symbol`` is optional, so the scorer's 0.80
     composite cap must exercise against at least one fixture row

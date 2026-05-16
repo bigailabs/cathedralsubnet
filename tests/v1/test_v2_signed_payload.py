@@ -424,3 +424,49 @@ def test_emit_v2_false_by_default(monkeypatch):
     import os
 
     assert os.environ.get("CATHEDRAL_EMIT_V2_SIGNED_PAYLOAD", "").lower() != "true"
+
+
+# --------------------------------------------------------------------------
+# Test 7: v3 keyset on the publisher side
+# --------------------------------------------------------------------------
+
+
+def test_publisher_signed_keyset_v3_matches_locked_field_list():
+    """v3 keyset is the bug_isolation_v1 lane shipped in #127. It
+    must match the validator-side copy in pull_loop.py and the
+    cathedral.v3.sign local copy. The cross-module match is
+    enforced by tests/v3/test_sign_payload_v3.py for the validator
+    + v3.sign sides; this test covers the publisher side.
+    """
+    sp = _load(
+        "cathedral.eval.v2_payload",
+        _ROOT / "src" / "cathedral" / "eval" / "v2_payload.py",
+    )
+    expected_v3 = frozenset(
+        {
+            "id",
+            "agent_id",
+            "agent_display_name",
+            "task_type",
+            "challenge_id",
+            "weighted_score",
+            "score_parts",
+            "claim",
+            "ran_at",
+        }
+    )
+    assert sp._SIGNED_KEYS_BY_VERSION[3] == expected_v3
+
+
+def test_publisher_v3_keyset_excludes_card_id_and_schema_version():
+    """v3 rows are not regulatory cards. No card_id in the signed
+    bytes; eval_output_schema_version is a routing hint, never
+    signed."""
+    sp = _load(
+        "cathedral.eval.v2_payload",
+        _ROOT / "src" / "cathedral" / "eval" / "v2_payload.py",
+    )
+    keys = sp._SIGNED_KEYS_BY_VERSION[3]
+    assert "card_id" not in keys
+    assert "eval_output_schema_version" not in keys
+    assert "cathedral_signature" not in keys

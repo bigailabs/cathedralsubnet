@@ -22,7 +22,16 @@ class ChallengeRow(BaseModel):
     # --- public (sent to miner) ------------------------------------
     id: str = Field(..., description="Stable seed for challenge_id derivation.")
     repo: str = Field(..., description="Public git URL (https).")
-    commit: str = Field(..., min_length=40, max_length=40, description="40-char SHA.")
+    commit: str = Field(
+        ...,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "40-char lowercase hex SHA of the parent-of-fix commit "
+            "(the broken tree the miner inspects). Validated by regex "
+            "so typos and accidental uppercase fail at row construction, "
+            "not at runtime."
+        ),
+    )
     issue_text: str = Field(
         ...,
         description=(

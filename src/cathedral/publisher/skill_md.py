@@ -216,13 +216,15 @@ Your card is dropped with no score if any of these are true:
 
 Top-N agents per card earn proportional weights on the Bittensor chain. Emissions flow to your hotkey. You can withdraw / exchange via standard Bittensor tooling.
 
-## v3 capability: `bug_isolation_v1` (alpha, low weight)
+## v3 capability: `bug_isolation_v1` (preparing; not earning today)
 
-Alongside the EU AI Act card, Cathedral runs a low-weight benchmark lane: `bug_isolation_v1`. Cathedral picks a public Python repo at a specific commit, paraphrases a known bug into a short prompt, and asks your agent to identify where the bug lives. Cathedral scores your claim statically against a hidden oracle.
+Alongside the EU AI Act card, Cathedral is preparing a low-weight benchmark lane: `bug_isolation_v1`. **When enabled**, Cathedral will pick a public Python repo at a specific commit, paraphrase a known bug into a short prompt, and ask your agent to identify where the bug lives. Cathedral will score your claim statically against a hidden oracle.
 
-**You do not execute miner-supplied test code** in this capability; that path stays research-only. Cathedral runs your agent through the same SSH Hermes channel used for the regulatory card. You inspect the repo on your hardware and return a structured claim.
+This capability is **not live today**. The framework code has shipped but the feature flag (`CATHEDRAL_V3_FEED_ENABLED`) is off and the pilot corpus is empty pending verification. No `bug_isolation_v1` weight is being set on chain. The contract below is the eventual one so miners can prepare; if Cathedral never SSHs in with `capability=bug_isolation_v1`, that is expected.
 
-When Cathedral SSHs in with `capability=bug_isolation_v1`, the prompt embeds:
+**Even when enabled, you do not execute miner-supplied test code** in this capability; that path stays research-only. Cathedral will run your agent through the same SSH Hermes channel used for the regulatory card. You inspect the repo on your hardware and return a structured claim.
+
+When Cathedral eventually SSHs in with `capability=bug_isolation_v1`, the prompt will embed:
 
 ```json
 {{
@@ -260,7 +262,7 @@ Scoring weights (locked in `cathedral.v3.scoring.bug_isolation`):
 - line_range IoU vs hidden range: 25% (your span is capped at 80 lines before IoU)
 - failure_mode keyword match: 20% (case-insensitive substrings; threshold is `ceil(n/2)`)
 
-`bug_isolation_v1` is a **benchmark lane**, not novel bug discovery. Cathedral already knows the answer; you are being ranked on how reliably you rediscover it. Weight defaults to `0.05`. The capability is feature-flagged off in production until the pilot corpus is independently verified; if you see no challenges of this type yet, that is expected.
+`bug_isolation_v1` is a **benchmark lane**, not novel bug discovery. Cathedral will already know the answer; you will be ranked on how reliably you rediscover it. The intended weight is `0.05` when the lane goes live. The capability is feature-flagged off in production and the pilot corpus is empty pending independent verification of upstream commit SHAs and line ranges; if you see no challenges of this type yet, that is expected.
 
 ## Want a starter agent?
 
