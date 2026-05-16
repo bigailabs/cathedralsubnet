@@ -32,19 +32,35 @@ Goal: add the missing infra that coding-job families (bug_repro, test_gen) need 
 
 Exit: scaled to ≥10 curated `bug_repro` jobs (currently 3), operator-review queue surfaces gaming attempts on real submissions, and the exports produce defensible SFT/DPO/RM rows under real miner traffic.
 
-## Phase 1.5: publisher SSH runner (gate to rewardable bug_repro)
+## Phase 1.5: v3.0 launch, `bug_isolation_v1` benchmark lane
 
-Goal: move `bug_repro` execution off validators and into the **Cathedral publisher**, mirroring the v1 ssh-probe pattern. The publisher already SSHs into miner boxes for v1 regulatory cards, scores, signs, and serves signed `EvalRun` projections that validators verify. v3 `bug_repro` reuses that pattern. This phase is **load-bearing**: until it ships, `bug_repro` stays `OPERATOR_REVIEW` by default and carries no rewardable weight.
+Goal: ship a low-weight v3 reward path on the existing Railway publisher, without standing up a new server or executing miner code anywhere Cathedral does not already execute code today. Cathedral prompts the miner via the existing SSH Hermes channel, the miner returns a structured isolation claim, and Cathedral scores statically on Railway against a hidden oracle. This is a benchmark plus agent ranking, not novel bug discovery; honest emissions stay low while we calibrate.
 
-1. **Publisher SSH runner.** A new module in the publisher (e.g. `cathedral.publisher.eval.bug_repro_runner`) that SSHs into the miner-declared host, runs the candidate against the hidden buggy source, the hidden fixed source, and the symptom oracle in an isolated workspace. Mirrors the existing `ssh_probe_runner` shape. Network egress denied, CPU/RAM/wallclock limits, ephemeral work dirs.
-2. **Reuse existing signing key + receipt posture.** Result is signed with the same Cathedral ed25519 key already used for v1 `EvalRun` projections (`kid: cathedral-eval-signing`); canonical payload includes job id, candidate bundle BLAKE3, oracle outputs, readiness, failure class, runner image digest, wall-clock. No new signing identity, no key-rotation surface to double.
-3. **Validator-side verifier.** Validator no longer runs `cathedral.v3.sandbox` for production `bug_repro`. It pulls signed results from the existing `/v1/leaderboard/recent` endpoint (or a sibling), verifies against `CATHEDRAL_PUBLIC_KEY_HEX`, and feeds them into the v3 archive and the weight loop. Local sandbox stays available behind a dev-only flag.
-4. **Operator runbook.** How to enable the publisher SSH runner, how host-trust and rate-limits work, how to roll a new runner image digest.
-5. **Tracking.** Filed as #123; this PR ships the substrate that the validator-side verifier will consume.
+**Runtime flow** (mirrors the v1 ssh-probe trust boundary):
 
-Why publisher SSH runner instead of a separate evaluator service: reuses v1's trust boundary verbatim, no new infrastructure, no new signing identity, no new authenticated channel. A truly isolated evaluator service may still be worth filing later if specific abuse patterns, quotas, or non-SSH job types demand it; not for v3 launch.
+1. Publisher selects a challenge for each active miner hotkey via a deterministic per-epoch sampler (`cathedral.v3.corpus.sample_challenge_id_for_hotkey`).
+2. Publisher SSHs to the miner via the existing `SshHermesRunner` and runs `hermes chat -q` with the `bug_isolation_v1` prompt.
+3. Miner Hermes inspects `repo@commit` on the miner's own hardware and returns a structured claim JSON (file, symbol, line range, failure mode).
+4. Publisher parses the claim (`cathedral.v3.claim_extraction`), runs at most one repair prompt if the first reply is unparseable.
+5. Publisher scores statically against the hidden oracle (`cathedral.v3.scoring.bug_isolation.score_bug_isolation_claim`).
+6. Publisher signs the result with the existing Cathedral ed25519 key (`kid: cathedral-eval-signing`), `eval_output_schema_version=3`.
+7. Validators pull from the existing feed, verify with the same `CATHEDRAL_PUBLIC_KEY_HEX` they already pin, and blend a small fraction of weight (`CATHEDRAL_V3_BUG_ISOLATION_WEIGHT`, default `0.05`).
 
-Exit: rewardable `bug_repro` runs end-to-end on testnet using a Cathedral-hosted evaluator with no validator-local execution of miner code.
+**Hard constraints, no exceptions:**
+
+- No new server. No DinD on Railway. No untrusted code execution on Railway. The hidden buggy/fixed source is never copied to the miner box; the miner only sees a public repo URL plus a commit SHA.
+- The v3 feed is feature-gated by `CATHEDRAL_V3_FEED_ENABLED` (default `false`). Validators ship with v3 schema support so they can verify v3 rows when the flag flips, but no v3 rows reach the public feed until both the pilot corpus has been independently reviewed and operators are upgraded.
+- EU AI Act stays unchanged. v3 plumbing does not route through the v1 card registry or preflight.
+
+**Out of scope for v3.0** (revisit when there is a Cathedral-controlled executor box):
+
+- Executable `bug_repro` on miner-controlled hardware. The `cathedral.v3.sandbox.DockerBackend` stays dev / research only.
+- A separate isolated evaluator service. We accept the benchmark framing for v3.0 instead.
+- Live novel-OSS bug discovery (Shape B in the launch debate). Tracked as v3.5+ once executor infra exists.
+
+**Tracking.** Filed as #123 (architecture umbrella). v3.0 scaffolding lands in PR `v3.0: bug_isolation signing + scorer scaffolding (feed disabled)`. Pilot corpus expansion + live-feed enablement land in a follow-up after corpus verification per `src/cathedral/v3/corpus/CORPUS_TODO.md`.
+
+Exit: rewardable `bug_isolation_v1` runs end-to-end on testnet via the publisher SSH path; pilot corpus has ≥10 independently-verified rows; the public feed is on and at least one validator confirms verified v3 weights on chain.
 
 ## Phase 2: `test_gen` and scale (weeks 4-10)
 
