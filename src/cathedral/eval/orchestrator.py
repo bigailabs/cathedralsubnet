@@ -46,8 +46,8 @@ from cathedral.storage import (
     safe_extract_zip,
 )
 from cathedral.storage.bundle_extractor import BundleStructureError
+from cathedral.v3.corpus.private_loader import load_private_corpus
 from cathedral.v3.corpus.sampler import sample_challenge_id_for_hotkey
-from cathedral.v3.corpus.seed_pilot import get_pilot_corpus
 from cathedral.v3.publisher import (
     persist_bug_isolation_result,
     score_and_sign_bug_isolation_stdout,
@@ -451,7 +451,7 @@ class EvalOrchestrator:
             log.info("v3_bug_isolation_skipped", reason="runner_unsupported")
             return
 
-        corpus = get_pilot_corpus()
+        corpus = load_private_corpus()
         if not corpus:
             log.info("v3_bug_isolation_skipped", reason="empty_corpus")
             return
