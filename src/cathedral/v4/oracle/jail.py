@@ -140,6 +140,12 @@ def assemble_jail(workspace_dir: Path, python_prefix: Path) -> Path:
             tmp/    (mountpoint for fresh tmpfs)
             work/   (mountpoint for the workspace bind)
             python/ (mountpoint for the read-only python prefix bind)
+            lib  -> python/lib   (symlink, only if python_prefix/lib exists)
+            lib64 -> python/lib64 (symlink, only if python_prefix/lib64 exists)
+
+    The lib / lib64 symlinks let the dynamic linker resolve
+    ELF-hardcoded interpreter paths (e.g. /lib64/ld-linux-x86-64.so.2)
+    inside the jail without binding any host fs outside python_prefix.
 
     The actual bind mounts happen INSIDE the new mount namespace
     (see ``run_in_jail``); on the host we only create the empty
@@ -157,6 +163,20 @@ def assemble_jail(workspace_dir: Path, python_prefix: Path) -> Path:
     # `mount --bind <file> <file>` has a destination inode.
     (jail_root / "dev" / "null").touch()
     (jail_root / "dev" / "urandom").touch()
+    # The python interpreter's ELF header hardcodes its dynamic linker
+    # path (typically /lib64/ld-linux-x86-64.so.2 on Linux x86_64) and
+    # that lookup happens INSIDE the jail after pivot_root. On usrmerge
+    # distros (Ubuntu / Debian / Fedora) /lib and /lib64 are themselves
+    # symlinks into /usr, so the python_prefix bind at /python already
+    # holds the real files at /python/lib... -- we just need /lib and
+    # /lib64 inside the jail to point at /python/lib and /python/lib64
+    # so the kernel can follow the chain. We only create the symlinks
+    # for prefix subdirs that actually exist; a python install rooted
+    # at a non-usrmerge prefix (conda, asdf, relocatable build) ships
+    # its libs under /python directly and does not need the redirect.
+    for libdir in ("lib", "lib64"):
+        if (python_prefix / libdir).is_dir():
+            (jail_root / libdir).symlink_to(f"python/{libdir}")
     return jail_root
 
 

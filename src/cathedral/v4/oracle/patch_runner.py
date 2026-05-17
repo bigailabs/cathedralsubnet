@@ -492,7 +492,12 @@ def _run_jailed(
         + f"_rp.run_path('/work/{hidden_test_relpath}', run_name='__main__')\n"
     )
 
-    python_prefix = Path(sys.prefix)
+    # Use sys.base_prefix (not sys.prefix) so we bind the underlying
+    # python install rather than a venv that just contains symlinks
+    # back into it. For non-venv interpreters base_prefix == prefix so
+    # this is a no-op; for venv interpreters it points at the real
+    # install whose bin/python3 is a usable ELF binary inside the jail.
+    python_prefix = Path(sys.base_prefix)
     jail_root = _jail.assemble_jail(workspace_dir=workspace_dir, python_prefix=python_prefix)
     try:
         result = _jail.run_in_jail(
