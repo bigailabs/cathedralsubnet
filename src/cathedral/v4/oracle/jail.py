@@ -191,9 +191,22 @@ def _build_setup_script(
     # workaround is portable across kernels we care about.
     return f"""set -euo pipefail
 
-# Inside the new mount namespace. Bind the host bits we want
-# visible. None of these touch the host's mount table because the
-# unshare(1) wrapper gave us a private mount namespace.
+# Inside the new mount namespace. First make every mount we inherit
+# private so our binds and the later pivot_root cannot leak out into
+# the host's mount table. Distros (Ubuntu / Debian / Fedora) ship
+# `/` with shared propagation by default and the kernel rejects
+# pivot_root(2) on a tree that still has shared peers.
+mount --make-rprivate /
+
+# pivot_root(2) requires new_root to be a mount point on a different
+# filesystem from the current root. The jail_root tempdir is just a
+# directory on `/`, so bind-mount it onto itself to give it mountpoint
+# status. The bind happens entirely inside our private mount namespace.
+mount --bind {jail_root} {jail_root}
+
+# Bind the host bits we want visible inside the jail. None of these
+# touch the host's mount table -- the unshare(1) wrapper gave us a
+# private mount namespace and we made it rprivate above.
 mount --bind {python_prefix} {jail_root}/python
 mount -o remount,bind,ro {jail_root}/python
 mount --bind {workspace_dir} {jail_root}/work
