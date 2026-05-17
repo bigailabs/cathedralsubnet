@@ -188,6 +188,11 @@ async def test_bug_isolation_persist_is_write_and_read_gated(tmp_path) -> None:
         assert wire["weighted_score"] == pytest.approx(1.0)
         assert wire["challenge_id"] == "ch_pilot_alpha"
         assert wire["challenge_id_public"] == signed.row["challenge_id_public"]
+        # epoch_salt is part of the v3 signed subset; the readback
+        # path must surface it on the wire or a future regression in
+        # _eval_run_to_output could drop it silently while signed
+        # rows already on disk would then fail verification.
+        assert wire["epoch_salt"] == "epoch_301"
     finally:
         await conn.close()
 
