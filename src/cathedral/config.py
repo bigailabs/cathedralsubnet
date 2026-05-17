@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-MAINNET_FORCED_BURN_PERCENTAGE = 0.0
+MAINNET_FORCED_BURN_PERCENTAGE = 95.0
 
 
 def _load_toml(path: Path) -> dict[str, Any]:

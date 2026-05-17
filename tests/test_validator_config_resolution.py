@@ -53,7 +53,7 @@ def test_managed_legacy_testnet_path_renders_mainnet(tmp_path: Path) -> None:
     assert settings.polaris.public_key_hex == POLARIS_KEY
     assert settings.weights.interval_secs == 1500
     assert settings.weights.burn_uid == 204
-    assert settings.weights.forced_burn_percentage == 0.0
+    assert settings.weights.forced_burn_percentage == 95.0
 
     env_text = (etc / "validator.env").read_text()
     assert f"CATHEDRAL_CONFIG_PATH={etc / 'mainnet.toml'}" in env_text
@@ -113,8 +113,8 @@ def test_managed_mainnet_config_syncs_current_burn_policy(tmp_path: Path) -> Non
 
     assert resolved == str(mainnet)
     settings = ValidatorSettings.from_toml(resolved)
-    assert settings.weights.forced_burn_percentage == 0.0
-    assert "forced_burn_percentage = 0.0" in mainnet.read_text()
+    assert settings.weights.forced_burn_percentage == 95.0
+    assert "forced_burn_percentage = 95.0" in mainnet.read_text()
 
 
 def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> None:
@@ -152,8 +152,8 @@ def test_custom_sn39_config_path_syncs_current_burn_policy(tmp_path: Path) -> No
 
     assert resolved == str(custom)
     settings = ValidatorSettings.from_toml(resolved)
-    assert settings.weights.forced_burn_percentage == 0.0
-    assert "forced_burn_percentage = 0.0" in custom.read_text()
+    assert settings.weights.forced_burn_percentage == 95.0
+    assert "forced_burn_percentage = 95.0" in custom.read_text()
 
 
 def test_explicit_testnet_network_is_respected(tmp_path: Path) -> None:
