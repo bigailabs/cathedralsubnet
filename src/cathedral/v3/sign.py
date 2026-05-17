@@ -25,6 +25,27 @@ Public-feed envelope policy:
     in ``challenge_id_public`` alongside the raw signed value.
     Surfaces that serve to miners/site should drop the raw field
     and keep only the hash; validator-facing endpoints keep both.
+  - ``challenge_id_public`` is itself in the signed subset, so a
+    man-in-the-middle cannot swap the public hash for a different
+    value without invalidating the signature.
+  - ``epoch_salt`` is also in the signed subset. The salt feeds
+    ``hash_challenge_id`` to derive ``challenge_id_public`` per
+    epoch; signing the literal salt closes the cross-epoch relabel
+    attack (an attacker rewriting which epoch a row came from while
+    keeping the public id intact). ``epoch_salt`` is ``None`` for
+    framework/scaffolding rows (signs as JSON ``null``); production
+    must always pass a real per-epoch salt before the feed flips on
+    via ``CATHEDRAL_V3_FEED_ENABLED=true``. See
+    ``src/cathedral/v3/corpus/CORPUS_TODO.md``.
+
+Persistence contract:
+  - Every key in the v3 signed subset must round-trip through the
+    publisher DB and back onto the wire, or validators that
+    re-canonicalize a stored row will fail verification. ``epoch_salt``
+    is stashed inside ``task_json`` by ``persist_bug_isolation_result``
+    and surfaced again by ``cathedral.publisher.reads._eval_run_to_output``.
+    The same wire-round-trip invariant is locked by
+    ``tests/v3/test_publisher_bug_isolation.py``.
 """
 
 from __future__ import annotations
