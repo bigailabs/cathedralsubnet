@@ -10,7 +10,90 @@ need to know about.
 
 ---
 
-## v1.1.7 — Prober: hermes chat -q (full agentic loop)
+## v1.1.18 - v3 bug isolation wiring + private corpus loader (feed off)
+
+**Date:** 2026-05-16
+
+**Headline:** Validator + publisher now ship the full v3
+`bug_isolation_v1` lane, with the corpus loaded from operator-private
+storage at runtime. The lane stays inert until the publisher
+operator sets `CATHEDRAL_V3_CORPUS_PATH`, restarts, and flips
+`CATHEDRAL_V3_FEED_ENABLED=true`. No miner-side or validator-side
+action required for this tag beyond upgrading.
+
+### Added
+
+- **v3 `bug_isolation_v1` orchestrator lane (#128).** The publisher's
+  SSH Hermes path now dispatches a bug-isolation challenge after a
+  full EU AI Act eval completes, scores the miner's structured claim
+  statically against a hidden oracle, signs the result under schema
+  v3, and persists it. Validators with the new keyset accept and
+  pull these rows. Gated behind `CATHEDRAL_V3_FEED_ENABLED` (default
+  off); production corpus also empty by default, so no real v3 jobs
+  run after upgrade until the operator opts in.
+- **`epoch_salt` bound into the v3 signed payload (#128).** The salt
+  that derives `challenge_id_public` is now part of the signed
+  subset, so a man-in-the-middle cannot relabel the epoch a row came
+  from while keeping the public id intact for cross-epoch
+  answer-sharing.
+- **Private corpus loader (#130).** Real challenge rows are a hidden
+  oracle and live entirely outside this public repo.
+  `cathedral.v3.corpus.private_loader.load_private_corpus()` reads
+  operator-curated JSON from the path in `CATHEDRAL_V3_CORPUS_PATH`,
+  validates each entry through `ChallengeRow.model_validate(...)`,
+  rejects `UNVERIFIED_` ids and `swebench`/`SWE-bench` source
+  markers, and caches in-process. `PILOT_CORPUS` in `seed_pilot.py`
+  is permanently `()`.
+- **Boot-time corpus preload (#130).** Publisher lifespan now calls
+  the loader at startup whenever `CATHEDRAL_V3_CORPUS_PATH` is set,
+  so the operator's preflight check (`corpus_loaded path=... rows=N`
+  in the boot logs) succeeds independently of the feed flag.
+- **`CATHEDRAL_V3_BUG_ISOLATION_WEIGHT` blending env (#128).** Lets
+  validator operators dial v3's contribution to the per-hotkey
+  weight blend without a code change. Defaults to `0.0`, holding v3
+  at zero weight until each operator explicitly opts in.
+
+### Changed
+
+- **v3 keyset locked in three mirrors.** The signed-payload keyset
+  for `eval_output_schema_version=3` is asserted byte-equal across
+  `cathedral.v3.sign._V3_SIGNED_KEYS`,
+  `cathedral.eval.v2_payload._SIGNED_KEYS_BY_VERSION[3]`, and
+  `cathedral.validator.pull_loop._SIGNED_KEYS_BY_VERSION[3]` by
+  tests. Future drift will fail CI loudly rather than break verify
+  silently in the field.
+- **Latency anomaly handling in the validator pull loop.** v3 rows
+  are bucketed v1 vs v3 in `latest_pulled_score_per_hotkey` instead
+  of mean-of-means by task_type. Historical `task_type='unknown'`
+  rows no longer get inflated weight against newly-typed entries.
+
+### For validator operators
+
+Upgrade as usual; the `cathedral-updater` PM2 app will pick up this
+signed tag automatically. No env or config changes required to stay
+at parity. **Do not** set `CATHEDRAL_V3_BUG_ISOLATION_WEIGHT` above
+`0.0` until a separate operator DM gives you the go-ahead; v3 has
+not yet been exercised end-to-end on testnet.
+
+### For miners
+
+No action required. The v3 lane stays off across the fleet at this
+tag. A future tag will document the miner-visible Hermes prompt
+shape (`FINAL_ANSWER` JSON block, claim schema, expected stdout
+contract) when the corpus and feed flip are ready.
+
+### Not in this release
+
+- A populated production corpus. Real rows live in
+  operator-controlled private storage (see
+  `docs/v3/corpus/PRIVATE_CORPUS_STORAGE.md`).
+- Mainnet v3 emissions. Flag and weight both default off; live-feed
+  enablement is gated on the operator preflight ritual in
+  `src/cathedral/v3/corpus/CORPUS_TODO.md`.
+
+---
+
+## v1.1.7 - Prober: hermes chat -q (full agentic loop)
 
 **Date:** 2026-05-13
 
