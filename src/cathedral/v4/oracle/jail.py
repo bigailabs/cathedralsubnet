@@ -217,20 +217,39 @@ mount -o remount,bind,ro {jail_root}/dev/urandom
 mount -t tmpfs -o size=64m,mode=1777 tmpfs {jail_root}/tmp
 
 # Pivot into the jail. After pivot_root the old root is at /old.
+# We do not call `umount -l /old` / `rmdir /old` from bash because
+# pivot_root flipped our root and /usr/bin/umount + /usr/bin/rmdir
+# (which we intentionally did not bind into the jail) are no longer
+# reachable. Instead we hand off to the pinned interpreter, which
+# performs `umount2("/old", MNT_DETACH)` + `os.rmdir("/old")` via
+# ctypes against libc inside the python prefix, then execs the
+# caller-provided bootstrap. Isolation is preserved: `/old` is
+# detached and removed before the bootstrap runs.
 mkdir -p {jail_root}/old
 cd {jail_root}
 pivot_root . old
 cd /
-umount -l /old
-rmdir /old
 
 # /proc was already mounted in the new namespace by unshare
 # --mount-proc; after pivot_root it lives at /proc.
 
-# Exec the pinned interpreter against the bootstrap file the caller
-# wrote into the workspace (now /work) before the jail started.
 cd /work
-exec /python/{interpreter_relpath} -I /work/{bootstrap_in_work}
+exec /python/{interpreter_relpath} -I -c '
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+MNT_DETACH = 2
+if libc.umount2(b"/old", MNT_DETACH) != 0:
+    err = ctypes.get_errno()
+    sys.stderr.write(f"jail: umount2(/old) failed: errno={{err}}\\n")
+    raise SystemExit(1)
+try:
+    os.rmdir("/old")
+except OSError as exc:
+    sys.stderr.write(f"jail: rmdir(/old) failed: {{exc!r}}\\n")
+    raise SystemExit(1)
+_py = "/python/{interpreter_relpath}"
+os.execvp(_py, [_py, "-I", "/work/{bootstrap_in_work}"])
+'
 """
 
 
