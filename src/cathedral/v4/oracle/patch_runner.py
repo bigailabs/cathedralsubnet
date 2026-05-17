@@ -1,0 +1,393 @@
+"""Publisher-side bounded patch runner.
+
+This module runs ONLY on the publisher's worker host, never on a
+validator. It takes the original workspace state (the in-memory
+``{relpath: content}`` map produced by the engine after the
+synthetic bug patch has been applied), applies the miner-submitted
+unified diff to it, appends the hidden verification test, writes
+the resulting workspace to a tmpfs scratch dir, and runs the test
+in a child Python process with a hard wall-clock timeout.
+
+Security posture (publisher-side worker; defence in depth):
+
+  * **OS-level network isolation when available.** On Linux with
+    ``unshare`` on PATH we wrap the child in ``unshare -n`` so the
+    process gets a fresh, empty network namespace. On macOS / hosts
+    without unshare we fall back to in-process monkeypatching of
+    ``socket`` / ``urllib`` / ``http.client`` / ``ssl`` / ``ftplib``
+    / ``smtplib`` and poison ``requests`` / ``httpx`` / ``aiohttp``
+    in ``sys.modules``. The monkeypatch is documented as a fallback
+    and the production publisher worker must run on Linux with
+    unshare enforced.
+  * **Resource limits.** On Linux/macOS we apply ``RLIMIT_CPU`` and
+    ``RLIMIT_AS`` (address space) via ``preexec_fn``. The CPU limit
+    is set just above the wall-clock timeout so a CPU-burner can
+    still be killed by the wall timeout but cannot exceed the
+    chosen CPU budget. Address space is capped at 512MiB.
+  * **Strict command allowlist.** The runner only spawns
+    ``sys.executable`` with ``-I -c <bootstrap>``. No shell, no
+    user-supplied argv. The hidden test code is materialized to a
+    file inside the scratch dir and discovered with ``runpy``.
+  * **No host filesystem writes outside the scratch dir.** ``cwd``
+    is pinned to a fresh ``tempfile.TemporaryDirectory`` rooted in
+    ``/dev/shm`` (tmpfs) when available, otherwise the platform
+    tempdir. The dir is unconditionally cleaned up on context exit.
+  * **Bounded subprocess.** ``subprocess.Popen`` with timeout,
+    killed on overrun.
+
+Two perf budgets (per the revised v4 spec):
+
+  * ``BOOKKEEPING_BUDGET_SECONDS = 0.20`` — patch apply, hash, sign,
+    canonicalize. The validator-side verification path stays under
+    this. Asserted by the bookkeeping bench.
+  * ``REPRO_BUDGET_SECONDS = 3.0`` — the actual subprocess that
+    runs the hidden test. Realistic for FastAPI / Django / Prisma
+    code. Asserted by the repro bench against the canonical Python
+    vault. The default runner timeout
+    (``PATCH_RUNNER_TIMEOUT_SECONDS``) is set to ``REPRO_BUDGET_SECONDS``
+    so a misbehaving subprocess is killed before it blows the budget.
+
+This module imports the diff applier from the arena's sandbox
+module; that single implementation is the source of truth and is
+covered by both arena and oracle test suites.
+"""
+
+from __future__ import annotations
+
+import os
+import resource
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import structlog
+
+from cathedral.v4.arena.sandbox import _apply_unified_diff, _DiffError
+
+logger = structlog.get_logger(__name__)
+
+
+# Hard ceilings. Constants so callers can reason about the budget
+# without inspecting the implementation. Two budgets per the revised
+# v4 spec (see module docstring).
+BOOKKEEPING_BUDGET_SECONDS: float = 0.20
+REPRO_BUDGET_SECONDS: float = 3.0
+PATCH_RUNNER_TIMEOUT_SECONDS: float = REPRO_BUDGET_SECONDS
+
+# Back-compat alias kept for existing imports; equal to BOOKKEEPING
+# budget since that is the validator-visible verification ceiling.
+PATCH_RUNNER_BUDGET_SECONDS: float = BOOKKEEPING_BUDGET_SECONDS
+
+# Memory ceiling for the spawned hidden-test child (bytes).
+_RLIMIT_AS_BYTES: int = 512 * 1024 * 1024
+
+
+class OracleError(Exception):
+    """Raised when the oracle cannot even attempt a run — missing
+    test code, unwritable tmpfs, etc. NOT raised for patch failure
+    or test failure: those return ``PatchRunResult(passed=False)``.
+    """
+
+
+@dataclass(frozen=True)
+class PatchRunResult:
+    passed: bool
+    duration_seconds: float
+    returncode: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+    patch_applied: bool
+    isolation_mode: str  # "unshare_n" | "monkeypatch_only"
+
+
+# ---------------------------------------------------------------------------
+# bootstrap header — last-line-of-defence network monkeypatch
+# ---------------------------------------------------------------------------
+
+
+_HERMETIC_BOOTSTRAP = r"""# -- v4 oracle hermetic bootstrap --
+# Last-line-of-defence: even when the child is inside a fresh netns,
+# we still patch every common network primitive so a misconfigured
+# host (no unshare available, monkeypatch_only mode) cannot leak.
+# We import the network stack first so its own classes (ssl.SSLSocket
+# subclasses socket.socket, etc.) bind to the real implementations,
+# THEN swap the user-facing entry points to raise. Once swapped, any
+# attempt to *use* a socket / urlopen / HTTP connection raises
+# RuntimeError; the test cannot un-do the swap because we also poison
+# sys.modules for the common third-party libs.
+import sys as _sys
+
+_BLOCKED_MSG = "v4 oracle: network access is blocked inside the hermetic runner"
+
+
+def _v4_blocked(*_a, **_kw):
+    raise RuntimeError(_BLOCKED_MSG)
+
+
+# 1) import the stdlib network surface so it binds to real classes
+import socket as _socket
+import urllib.request as _urlreq
+import http.client as _httpc
+
+try:
+    import ssl as _ssl
+except Exception:
+    _ssl = None  # type: ignore[assignment]
+
+try:
+    import ftplib as _ftplib
+except Exception:
+    _ftplib = None  # type: ignore[assignment]
+
+try:
+    import smtplib as _smtp
+except Exception:
+    _smtp = None  # type: ignore[assignment]
+
+
+# 2) now neuter the *constructors* and *entry points*. We keep the
+#    types intact (so `isinstance` and `issubclass` keep working) but
+#    every attempt to actually open a connection blows up.
+def _v4_blocked_init(self, *_a, **_kw):
+    raise RuntimeError(_BLOCKED_MSG)
+
+
+_socket.socket.__init__ = _v4_blocked_init  # type: ignore[assignment,method-assign]
+_socket.create_connection = _v4_blocked  # type: ignore[assignment]
+_socket.getaddrinfo = _v4_blocked  # type: ignore[assignment]
+_socket.gethostbyname = _v4_blocked  # type: ignore[assignment]
+
+_urlreq.urlopen = _v4_blocked  # type: ignore[assignment]
+_urlreq.Request = _v4_blocked  # type: ignore[assignment]
+
+_httpc.HTTPConnection.connect = _v4_blocked  # type: ignore[assignment,method-assign]
+_httpc.HTTPSConnection.connect = _v4_blocked  # type: ignore[assignment,method-assign]
+
+if _ssl is not None:
+    _ssl.create_default_context = _v4_blocked  # type: ignore[assignment]
+
+if _ftplib is not None:
+    _ftplib.FTP.connect = _v4_blocked  # type: ignore[assignment,method-assign]
+
+if _smtp is not None:
+    _smtp.SMTP.connect = _v4_blocked  # type: ignore[assignment,method-assign]
+
+
+# 3) poison common third-party HTTP libs so importing them in the test
+#    body returns an exploding stub instead of the real package.
+class _BlockedModule:
+    def __getattr__(self, _name):
+        raise RuntimeError(_BLOCKED_MSG)
+
+
+for _name in ("requests", "httpx", "aiohttp"):
+    _sys.modules.setdefault(_name, _BlockedModule())
+
+# -- end bootstrap --
+"""
+
+
+# ---------------------------------------------------------------------------
+# scratch root selection
+# ---------------------------------------------------------------------------
+
+
+def _select_scratch_root() -> Path:
+    """Return a writable tmpfs root, preferring ``/dev/shm`` on Linux."""
+    shm = Path("/dev/shm")  # noqa: S108 — tmpfs is the intended target
+    if shm.is_dir() and os.access(shm, os.W_OK):
+        return shm
+    return Path(tempfile.gettempdir())
+
+
+def _select_isolation_argv() -> tuple[list[str], str]:
+    """Return ``(prefix_argv, mode)``.
+
+    On Linux with ``unshare`` on PATH we wrap the spawn in
+    ``unshare -n`` to get a fresh empty network namespace. macOS and
+    other platforms fall back to monkeypatch-only mode (see bootstrap
+    above). The mode string is recorded in ``PatchRunResult`` so the
+    operator can audit which posture each run took.
+    """
+    if sys.platform.startswith("linux"):
+        unshare = shutil.which("unshare")
+        if unshare:
+            # -n: new network namespace (no loopback, no routes)
+            # -r: map current uid to root inside the user ns (needed
+            #     for unprivileged netns on most distros)
+            return ([unshare, "-r", "-n"], "unshare_n")
+    return ([], "monkeypatch_only")
+
+
+def _preexec_apply_rlimits() -> None:
+    """Apply RLIMIT_CPU + RLIMIT_AS in the child before exec.
+
+    CPU limit is set to ceil(REPRO_BUDGET_SECONDS) + 1 so a busy
+    loop is killed by SIGXCPU after about the wall-clock timeout.
+    Address space is capped to keep a misbehaving allocator from
+    pinning host RAM.
+    """
+    # CPU seconds — round up and add slack so wall-clock timeout
+    # remains the primary mechanism.
+    cpu_seconds = int(REPRO_BUDGET_SECONDS) + 1
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+    except (ValueError, OSError):
+        pass
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (_RLIMIT_AS_BYTES, _RLIMIT_AS_BYTES))
+    except (ValueError, OSError):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# public entry
+# ---------------------------------------------------------------------------
+
+
+def run_patch_against_hidden_test(
+    original_repo_state: dict[str, str],
+    patch_str: str,
+    hidden_test_code: str,
+    hidden_test_relpath: str = "test_hidden_v4.py",
+    timeout_seconds: float = PATCH_RUNNER_TIMEOUT_SECONDS,
+) -> PatchRunResult:
+    """Apply ``patch_str`` to ``original_repo_state``, append the hidden
+    test, run it under the configured isolation posture, return the
+    result.
+
+    Args:
+      original_repo_state: ``{relpath: file_content}`` mirror of the
+        scrambled+already-bug-patched workspace at challenge-issue
+        time. The engine holds this; the miner never sees it.
+      patch_str: the miner's unified-diff submission.
+      hidden_test_code: the publisher's hidden verification test, as
+        a Python source string. Run via ``runpy.run_path``.
+      hidden_test_relpath: where to write the hidden test inside the
+        scratch dir. Defaults to ``test_hidden_v4.py``.
+      timeout_seconds: wall-clock subprocess timeout. Defaults to
+        ``REPRO_BUDGET_SECONDS`` (3s). Callers that want the tighter
+        bookkeeping budget should pass ``BOOKKEEPING_BUDGET_SECONDS``.
+
+    Returns a ``PatchRunResult``. ``passed=True`` iff the patch applied
+    cleanly AND the child exited 0 within the timeout.
+    """
+    if not hidden_test_code.strip():
+        raise OracleError("hidden_test_code is empty")
+
+    overall_start = time.monotonic()
+
+    # 1) apply patch in memory
+    try:
+        patched = _apply_unified_diff(original_repo_state, patch_str)
+        patch_applied = True
+    except _DiffError as e:
+        logger.info("oracle.patch_apply_failed", reason=str(e))
+        return PatchRunResult(
+            passed=False,
+            duration_seconds=time.monotonic() - overall_start,
+            returncode=None,
+            stdout="",
+            stderr=f"patch apply failed: {e}",
+            timed_out=False,
+            patch_applied=False,
+            isolation_mode=_select_isolation_argv()[1],
+        )
+
+    # 2) materialize to tmpfs
+    scratch_root = _select_scratch_root()
+    isolation_prefix, isolation_mode = _select_isolation_argv()
+
+    with tempfile.TemporaryDirectory(prefix="v4oracle_", dir=str(scratch_root)) as td:
+        td_path = Path(td)
+        for relpath, content in patched.items():
+            dest = td_path / relpath
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
+        hidden_dest = td_path / hidden_test_relpath
+        hidden_dest.parent.mkdir(parents=True, exist_ok=True)
+        hidden_dest.write_text(hidden_test_code)
+
+        # 3) build the child argv. Bootstrap runs BEFORE we runpy the
+        #    hidden test. The argv builds a single `-c` program so we
+        #    never have to ship the bootstrap to disk where test code
+        #    could edit it.
+        program = (
+            _HERMETIC_BOOTSTRAP
+            + "\nimport runpy as _rp\n"
+            + f"_rp.run_path({str(hidden_dest)!r}, run_name='__main__')\n"
+        )
+        argv: list[str] = [
+            *isolation_prefix,
+            sys.executable,
+            "-I",  # isolated mode: ignore PYTHON* env vars and user site
+            "-c",
+            program,
+        ]
+
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1",
+        }
+
+        run_start = time.monotonic()
+        # preexec_fn only runs on POSIX; on Windows resource limits
+        # are not enforced (the publisher worker is Linux-only).
+        preexec = _preexec_apply_rlimits if sys.platform != "win32" else None
+        proc = subprocess.Popen(  # noqa: S603 — argv list, no shell, allowlist
+            argv,
+            cwd=td_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            shell=False,
+            preexec_fn=preexec,
+        )
+        try:
+            stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
+            timed_out = False
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout_b, stderr_b = proc.communicate(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                stdout_b, stderr_b = (b"", b"")
+            timed_out = True
+            returncode = None
+        run_duration = time.monotonic() - run_start
+
+        stdout = stdout_b.decode("utf-8", "replace") if stdout_b else ""
+        stderr = stderr_b.decode("utf-8", "replace") if stderr_b else ""
+
+        passed = (not timed_out) and returncode == 0
+
+        return PatchRunResult(
+            passed=passed,
+            duration_seconds=run_duration,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=timed_out,
+            patch_applied=patch_applied,
+            isolation_mode=isolation_mode,
+        )
+
+
+__all__ = [
+    "BOOKKEEPING_BUDGET_SECONDS",
+    "PATCH_RUNNER_BUDGET_SECONDS",
+    "PATCH_RUNNER_TIMEOUT_SECONDS",
+    "REPRO_BUDGET_SECONDS",
+    "OracleError",
+    "PatchRunResult",
+    "run_patch_against_hidden_test",
+]
