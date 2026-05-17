@@ -10,6 +10,37 @@ need to know about.
 
 ---
 
+## v1.1.19 - protective mainnet burn while v3 corpus hardens
+
+**Date:** 2026-05-17
+
+**Headline:** Mainnet validator policy routes 95% of SN39 weight to the
+subnet owner burn uid until the v3 `bug_isolation_v1` corpus produces
+launch-grade per-miner signal.
+
+### Changed
+
+- **Mainnet forced burn restored to 95%.** `config/mainnet.toml` now
+  sets `forced_burn_percentage = 95.0`, leaving 5% for measured miner
+  signal while the current v1 EU AI Act lane is too saturated to
+  discriminate miner quality at scale.
+- **Managed SN39 config sync follows the release policy.**
+  `MAINNET_FORCED_BURN_PERCENTAGE` is now `95.0`, so managed validator
+  startups rewrite stale SN39 mainnet configs back to the protective
+  burn setting after signed-tag updates.
+
+### Operator note
+
+- No v3 feed or v3 weight change is included in this release.
+  `CATHEDRAL_V3_FEED_ENABLED` remains off and
+  `v3_bug_isolation_weight` remains `0.0`.
+- Revert this burn percentage toward `0.0` only after a real
+  `bug_isolation_v1` testnet E2E produces signed rows and validator
+  pull verification, and after the private corpus passes red-team
+  challenge checks.
+
+---
+
 ## v1.1.18 - v3 bug isolation wiring + private corpus loader (feed off)
 
 **Date:** 2026-05-16
