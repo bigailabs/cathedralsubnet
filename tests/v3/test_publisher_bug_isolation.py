@@ -210,7 +210,9 @@ async def test_orchestrator_runs_bug_isolation_lane_when_feed_is_enabled(
 
         submission = await _seed_submission(conn)
         challenge = _challenge()
-        monkeypatch.setattr(orchestrator_module, "get_pilot_corpus", lambda: (challenge,))
+        monkeypatch.setattr(
+            orchestrator_module, "load_private_corpus", lambda: (challenge,)
+        )
         sk = Ed25519PrivateKey.generate()
         signer = _FakeSigner(sk)
         runner = _FakeBugIsolationRunner()
