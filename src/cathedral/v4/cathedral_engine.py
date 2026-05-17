@@ -1,4 +1,4 @@
-"""CathedralEngine — the v4 publisher-side challenge runtime.
+"""CathedralEngine -- the v4 publisher-side challenge runtime.
 
 **Architectural position (REVISED 2026-05-17):**
 
@@ -8,7 +8,7 @@ publisher's worker host. It is NOT embedded in the validator loop.
 The end-to-end flow:
 
   1. Publisher loads a synthetic row from private operator storage
-     (``CATHEDRAL_V4_CORPUS_PATH``) — never from the public repo.
+     (``CATHEDRAL_V4_CORPUS_PATH``) -- never from the public repo.
   2. Publisher calls
      ``engine.build_miner_bundle(task)`` which loads the upstream
      micro-repo from ``vault/``, scrambles it, **applies the bug
@@ -34,10 +34,10 @@ The end-to-end flow:
 Two perf budgets (per the revised spec, see
 ``cathedral.v4.oracle.patch_runner``):
 
-  * ``BOOKKEEPING_BUDGET_SECONDS = 0.20`` — engine-only bookkeeping
+  * ``BOOKKEEPING_BUDGET_SECONDS = 0.20`` -- engine-only bookkeeping
     (load, scramble, build bundle, hash, package telemetry, sign).
     Asserted by ``tests/v4/test_benchmark.py::test_bookkeeping_*``.
-  * ``REPRO_BUDGET_SECONDS = 3.0`` — the actual subprocess that runs
+  * ``REPRO_BUDGET_SECONDS = 3.0`` -- the actual subprocess that runs
     the hidden test on the publisher worker. Asserted by
     ``tests/v4/test_benchmark.py::test_repro_*``.
 
@@ -139,19 +139,19 @@ class CathedralEngine:
 
     Lifecycle:
 
-      * ``__init__(vault_path, corpus_path=None)`` — anchor the engine
+      * ``__init__(vault_path, corpus_path=None)`` -- anchor the engine
         to a vault dir + optional private corpus dir. If
         ``corpus_path`` is None we read ``CATHEDRAL_V4_CORPUS_PATH``
         from the environment; if neither is set, ``load_task`` raises.
-      * ``load_task(task_id)`` — fetch one private row from corpus.
-      * ``load_and_scramble_task(base_repo)`` — synthesize a fresh
+      * ``load_task(task_id)`` -- fetch one private row from corpus.
+      * ``load_and_scramble_task(base_repo)`` -- synthesize a fresh
         ad-hoc task from a vault upstream base (for tests and
         scaffolding; production uses ``load_task``).
-      * ``build_miner_bundle(task)`` — apply the synthetic bug
+      * ``build_miner_bundle(task)`` -- apply the synthetic bug
         server-side and return the broken-state bundle the miner
         sees. The raw bug patch is NOT included.
-      * ``verify_miner_submission(...)`` — bounded publisher oracle.
-      * ``package_elite_telemetry(raw)`` — canonical envelope + hash.
+      * ``verify_miner_submission(...)`` -- bounded publisher oracle.
+      * ``package_elite_telemetry(raw)`` -- canonical envelope + hash.
     """
 
     def __init__(

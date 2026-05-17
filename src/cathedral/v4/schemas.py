@@ -1,4 +1,4 @@
-"""v4 wire types — telemetry envelope for the publisher-side runtime.
+"""v4 wire types -- telemetry envelope for the publisher-side runtime.
 
 These schemas are the contract between the v4 ``CathedralEngine``
 (publisher-side) and anything that consumes its signed output (the
@@ -17,12 +17,12 @@ never executes miner code. It only:
 The patch-runner, hidden test execution, and all subprocess work
 happens on **publisher infra** under a locked-down unprivileged
 worker. v4 schemas describe the row the publisher emits and the
-validator verifies — they do NOT describe anything the validator
+validator verifies -- they do NOT describe anything the validator
 executes.
 
 **Policy: no chain-of-thought.** ``AgentTurn`` deliberately does NOT
 carry an ``agent_thought`` field. We capture tool calls, file reads,
-patches, stdout/stderr, timings, and the final explanation — never
+patches, stdout/stderr, timings, and the final explanation -- never
 the model's internal reasoning. This is a policy + data-quality
 choice baked into the schema.
 

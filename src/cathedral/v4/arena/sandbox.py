@@ -62,7 +62,7 @@ class ArenaError(Exception):
 # ---------------------------------------------------------------------------
 
 
-# Reserved entry-point filenames the scrambler must NOT rename — the
+# Reserved entry-point filenames the scrambler must NOT rename -- the
 # language toolchain (pytest, bun, tsc, pip) discovers them by exact
 # name and breaks if they move.
 _RESERVED_BASENAMES: frozenset[str] = frozenset(
@@ -145,7 +145,7 @@ class IsomorphicScrambler:
             raise ArenaError(f"unknown base repo: {base_repo}")
 
         manifest = self.load_manifest(base_repo)
-        rng = random.Random(seed)  # noqa: S311 — deterministic scrambler, not crypto
+        rng = random.Random(seed)  # noqa: S311 -- deterministic scrambler, not crypto
         suffix = f"_s{rng.randrange(0x10_0000, 0xFF_FFFF):06x}"
 
         renamable_ids: list[str] = list(manifest.get("renamable_identifiers", []))
@@ -323,7 +323,7 @@ class MinerArena:
 
         Returns ``{"returncode": int, "stdout": str, "stderr": str,
         "duration_ms": float}``. This is the miner's *training-time*
-        signal — the validator's hermetic oracle is in
+        signal -- the validator's hermetic oracle is in
         ``cathedral.v4.oracle.patch_runner`` and is a separate path.
         """
         import subprocess
@@ -341,7 +341,7 @@ class MinerArena:
         if cmd and cmd[0] in {"python", "python3"}:
             cmd[0] = sys.executable
         try:
-            proc = subprocess.run(  # noqa: S603 — argv list, no shell
+            proc = subprocess.run(  # noqa: S603 -- argv list, no shell
                 cmd,
                 cwd=self._repo.workspace_path,
                 capture_output=True,
@@ -541,7 +541,7 @@ def _apply_hunks(
             elif tag == "+":
                 out_lines.append(payload)
             elif tag == "\\":
-                # "\ No newline at end of file" — ignore
+                # "\ No newline at end of file" -- ignore
                 continue
             else:
                 raise _DiffError(f"unknown diff line tag: {tag!r}")

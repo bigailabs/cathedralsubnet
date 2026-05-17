@@ -1,9 +1,9 @@
 """Perf budgets (revised v4 spec):
 
-* ``BOOKKEEPING_BUDGET_SECONDS = 0.20`` — pure-CPU envelope work
+* ``BOOKKEEPING_BUDGET_SECONDS = 0.20`` -- pure-CPU envelope work
   (load, scramble, package telemetry, hash, sign-bytes). Asserted
   by ``test_bookkeeping_p99_under_budget``.
-* ``REPRO_BUDGET_SECONDS = 3.0`` — the publisher-side oracle
+* ``REPRO_BUDGET_SECONDS = 3.0`` -- the publisher-side oracle
   subprocess that runs the hidden test against a miner patch.
   Asserted by ``test_repro_p99_under_budget``. Realistic ceiling
   for FastAPI / Django / Prisma test runs (per the revised spec,

@@ -282,7 +282,7 @@ def test_load_task_from_synthetic_fixture(vault_path, tmp_path) -> None:
     operator-checked-in so the test suite can run hermetically.
     """
     fixtures = (
-        # tests/v4/fixtures/synthetic_rows/ — committed in this PR
+        # tests/v4/fixtures/synthetic_rows/ -- committed in this PR
         # to exercise the load_task path without depending on
         # operator infra.
         __import__("pathlib").Path(__file__).parent / "fixtures" / "synthetic_rows"

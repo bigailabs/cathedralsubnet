@@ -1,4 +1,4 @@
-"""Arena — the miner-facing simulation surface for v4.
+"""Arena -- the miner-facing simulation surface for v4.
 
 Exposes the three atomic tool operations a miner agent runtime is
 allowed to call against a scrambled micro-repository workspace:

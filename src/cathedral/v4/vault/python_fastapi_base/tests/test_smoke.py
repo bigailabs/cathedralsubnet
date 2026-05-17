@@ -1,7 +1,7 @@
 """Smoke test the miner sees. Asserts the basic API surface compiles.
 
 The miner-visible test deliberately does NOT pin numerical behaviour
-— that is the validator's hidden test job. The miner's local compile
+-- that is the validator's hidden test job. The miner's local compile
 step is meant to verify the patch did not break imports.
 """
 

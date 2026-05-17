@@ -1,7 +1,7 @@
 """Tiny app surface that exercises calculator.
 
 Deliberately stdlib-only so the miner-facing arena compile step works
-on any host with python3 — no pydantic / fastapi runtime dep needed
+on any host with python3 -- no pydantic / fastapi runtime dep needed
 for the validator loop to verify the patch geometry.
 """
 

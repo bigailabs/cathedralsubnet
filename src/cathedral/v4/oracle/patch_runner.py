@@ -50,10 +50,10 @@ Security posture (publisher-side worker; defence in depth):
 
 Two perf budgets (per the revised v4 spec):
 
-  * ``BOOKKEEPING_BUDGET_SECONDS = 0.20`` — patch apply, hash, sign,
+  * ``BOOKKEEPING_BUDGET_SECONDS = 0.20`` -- patch apply, hash, sign,
     canonicalize. The validator-side verification path stays under
     this. Asserted by the bookkeeping bench.
-  * ``REPRO_BUDGET_SECONDS = 3.0`` — the actual subprocess that
+  * ``REPRO_BUDGET_SECONDS = 3.0`` -- the actual subprocess that
     runs the hidden test. Realistic for FastAPI / Django / Prisma
     code. Asserted by the repro bench against the canonical Python
     vault. The default runner timeout
@@ -112,7 +112,7 @@ _RLIMIT_AS_BYTES: int = 512 * 1024 * 1024
 
 
 class OracleError(Exception):
-    """Raised when the oracle cannot even attempt a run — missing
+    """Raised when the oracle cannot even attempt a run -- missing
     test code, unwritable tmpfs, etc. NOT raised for patch failure
     or test failure: those return ``PatchRunResult(passed=False)``.
     """
@@ -131,7 +131,7 @@ class PatchRunResult:
 
 
 # ---------------------------------------------------------------------------
-# bootstrap header — last-line-of-defence network monkeypatch
+# bootstrap header -- last-line-of-defence network monkeypatch
 # ---------------------------------------------------------------------------
 
 
@@ -224,7 +224,7 @@ for _name in ("requests", "httpx", "aiohttp"):
 
 def _select_scratch_root() -> Path:
     """Return a writable tmpfs root, preferring ``/dev/shm`` on Linux."""
-    shm = Path("/dev/shm")  # noqa: S108 — tmpfs is the intended target
+    shm = Path("/dev/shm")  # noqa: S108 -- tmpfs is the intended target
     if shm.is_dir() and os.access(shm, os.W_OK):
         return shm
     return Path(tempfile.gettempdir())
@@ -294,7 +294,7 @@ def _preexec_apply_rlimits() -> None:
     Address space is capped to keep a misbehaving allocator from
     pinning host RAM.
     """
-    # CPU seconds — round up and add slack so wall-clock timeout
+    # CPU seconds -- round up and add slack so wall-clock timeout
     # remains the primary mechanism.
     cpu_seconds = int(REPRO_BUDGET_SECONDS) + 1
     try:

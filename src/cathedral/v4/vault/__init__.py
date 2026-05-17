@@ -6,10 +6,10 @@ scrambles it, and presents the result to a miner agent.
 
 Repos:
 
-  * ``python_fastapi_base/`` — minimal FastAPI app (one route, one
+  * ``python_fastapi_base/`` -- minimal FastAPI app (one route, one
     Pydantic model, one pytest). Canonical path used by the
     benchmark and the default integration tests.
-  * ``ts_prisma_base/`` — minimal TypeScript + Prisma app (one model,
+  * ``ts_prisma_base/`` -- minimal TypeScript + Prisma app (one model,
     one bun test). Gated on ``bun`` being on PATH; the python repo is
     the always-on validator path.
 

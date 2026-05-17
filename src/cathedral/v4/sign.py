@@ -18,7 +18,7 @@ This module:
     pattern as ``cathedral.v3.sign``).
   * Returns a wire-shape dict ready to persist into the publisher DB
     and serve from a future ``/v4/leaderboard/recent`` (out of scope
-    for this PR — feed stays off).
+    for this PR -- feed stays off).
 
 **The validator never imports this module.** Validators only verify
 already-signed rows. See ``cathedral.v4.verify`` for the validator
@@ -79,7 +79,7 @@ def build_signed_v4_row(
 
     ``signer`` is the existing publisher ``EvalSigner`` instance
     (typed as ``Any`` to keep this module decoupled from the
-    publisher's eval package — same pattern as ``cathedral.v3.sign``).
+    publisher's eval package -- same pattern as ``cathedral.v3.sign``).
 
     Returns a dict with the signed subset + ``cathedral_signature`` +
     ``eval_output_schema_version: 4``. Caller is responsible for

@@ -17,7 +17,7 @@ end-to-end, not to provide hard challenges.
 
 Do NOT add real bug rows here. If you find yourself wanting to:
 
-  * Add a row whose `issue_text` would tip off miners — STOP.
+  * Add a row whose `issue_text` would tip off miners -- STOP.
     Put it under `$CATHEDRAL_V4_CORPUS_PATH`.
-  * Add a row sourced from a real upstream commit — STOP. Public
+  * Add a row sourced from a real upstream commit -- STOP. Public
     PR/issue history is not allowed under the revised v4 spec.
