@@ -110,6 +110,14 @@ PATCH_RUNNER_BUDGET_SECONDS: float = BOOKKEEPING_BUDGET_SECONDS
 # Memory ceiling for the spawned hidden-test child (bytes).
 _RLIMIT_AS_BYTES: int = 512 * 1024 * 1024
 
+# Jail-side rlimits applied inside the jail bootstrap (before exec of
+# the hidden-test interpreter). Same numeric ceilings as the non-jailed
+# path: address space capped at 512MiB, CPU at ceil(REPRO_BUDGET)+1s so
+# the wall-clock timeout remains the primary kill mechanism but a
+# CPU-burner cannot exceed the chosen CPU budget.
+JAIL_RLIMIT_AS_BYTES: int = _RLIMIT_AS_BYTES
+JAIL_RLIMIT_CPU_SECS: int = int(REPRO_BUDGET_SECONDS) + 1
+
 
 class OracleError(Exception):
     """Raised when the oracle cannot even attempt a run -- missing
@@ -506,6 +514,8 @@ def _run_jailed(
             python_prefix=python_prefix,
             program=program,
             timeout_seconds=timeout_seconds,
+            rlimit_cpu_secs=JAIL_RLIMIT_CPU_SECS,
+            rlimit_as_bytes=JAIL_RLIMIT_AS_BYTES,
         )
     finally:
         _jail.cleanup_jail(jail_root)
@@ -527,6 +537,8 @@ def _run_jailed(
 
 __all__ = [
     "BOOKKEEPING_BUDGET_SECONDS",
+    "JAIL_RLIMIT_AS_BYTES",
+    "JAIL_RLIMIT_CPU_SECS",
     "PATCH_RUNNER_BUDGET_SECONDS",
     "PATCH_RUNNER_TIMEOUT_SECONDS",
     "REPRO_BUDGET_SECONDS",

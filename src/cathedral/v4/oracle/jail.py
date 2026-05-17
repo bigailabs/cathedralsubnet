@@ -186,6 +186,8 @@ def _build_setup_script(
     python_prefix: Path,
     interpreter_relpath: str,
     bootstrap_in_work: str,
+    rlimit_cpu_secs: int,
+    rlimit_as_bytes: int,
 ) -> str:
     """Build the bash script that runs inside the new mount namespace.
 
@@ -255,7 +257,7 @@ cd /
 
 cd /work
 exec /python/{interpreter_relpath} -I -c '
-import ctypes, os, sys
+import ctypes, os, resource, sys
 libc = ctypes.CDLL(None, use_errno=True)
 MNT_DETACH = 2
 if libc.umount2(b"/old", MNT_DETACH) != 0:
@@ -267,6 +269,17 @@ try:
 except OSError as exc:
     sys.stderr.write(f"jail: rmdir(/old) failed: {{exc!r}}\\n")
     raise SystemExit(1)
+# Apply the same RLIMIT_CPU + RLIMIT_AS ceilings the non-jailed path
+# uses. setrlimit is inherited across execvp so the hidden-test
+# interpreter we are about to exec runs under these caps.
+try:
+    resource.setrlimit(resource.RLIMIT_CPU, ({rlimit_cpu_secs}, {rlimit_cpu_secs}))
+except (ValueError, OSError):
+    pass
+try:
+    resource.setrlimit(resource.RLIMIT_AS, ({rlimit_as_bytes}, {rlimit_as_bytes}))
+except (ValueError, OSError):
+    pass
 _py = "/python/{interpreter_relpath}"
 os.execvp(_py, [_py, "-I", "/work/{bootstrap_in_work}"])
 '
@@ -283,6 +296,8 @@ def run_in_jail(
     program: str,
     timeout_seconds: float,
     interpreter_relpath: str = "bin/python3",
+    rlimit_cpu_secs: int = 4,
+    rlimit_as_bytes: int = 512 * 1024 * 1024,
 ) -> JailResult:
     """Run ``program`` inside the jail via ``unshare(1)``.
 
@@ -309,6 +324,8 @@ def run_in_jail(
         python_prefix=python_prefix,
         interpreter_relpath=interpreter_relpath,
         bootstrap_in_work=_BOOTSTRAP_BASENAME,
+        rlimit_cpu_secs=rlimit_cpu_secs,
+        rlimit_as_bytes=rlimit_as_bytes,
     )
 
     argv = [
