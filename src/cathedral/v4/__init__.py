@@ -1,4 +1,4 @@
-"""Cathedral v4 — publisher-side private challenge runtime.
+"""Cathedral v4 -- publisher-side private challenge runtime.
 
 **Architectural position (REVISED 2026-05-17):**
 
@@ -15,64 +15,42 @@ v4 is a publisher-side runtime, NOT an inline validator engine.
     No subprocess, no patch-runner, no file I/O on the validator
     side.
 
-Public surface — importers should pin to ``cathedral.v4.<name>``:
+**Package import boundary (Finding 3, PR #133 review):**
 
-  * ``CathedralEngine`` (publisher)
-  * ``build_signed_v4_row`` (publisher signer wiring)
-  * ``verify_v4_row`` (validator-only)
-  * ``AgentTurn`` / ``MinerTrajectory`` / ``ValidationPayload`` (wire)
-  * ``MinerArena`` / ``IsomorphicScrambler`` / ``ScrambledRepo``
-    (publisher-side workspace synthesis)
-  * ``run_patch_against_hidden_test`` / ``PatchRunResult`` (publisher
-    oracle entry point; never call from a validator)
+This top-level package deliberately re-exports ONLY the
+validator-safe surface plus wire schemas. Publisher-only symbols
+(engine, arena, oracle, sign) must be imported by their full path
+so a validator-only consumer cannot accidentally drag the patch
+runner (and its subprocess / unshare / ctypes dependencies) into
+its process. Concretely:
 
-Coexistence: v4 lives alongside v3 (no v3 files modified). The v3
-publisher continues to serve bug_isolation rows; v4 adds the
-patch-validator capability behind a separate task_type once the feed
-flip lands in a follow-up PR.
+  * ``from cathedral.v4 import verify_v4_row``  -- OK on validator
+  * ``from cathedral.v4 import CathedralEngine`` -- removed; use
+    ``from cathedral.v4.cathedral_engine import CathedralEngine``
+  * ``from cathedral.v4 import run_patch_against_hidden_test`` --
+    removed; use
+    ``from cathedral.v4.oracle.patch_runner import
+    run_patch_against_hidden_test``
+
+The wire schemas (``AgentTurn``, ``MinerTrajectory``,
+``ValidationPayload``, ``MinerBundle``) re-export here because
+both publisher and validator paths consume them and they pull no
+heavy machinery.
 """
 
-from cathedral.v4.arena import (
-    ArenaError,
-    IsomorphicScrambler,
-    MinerArena,
-    ScrambledRepo,
-)
-from cathedral.v4.cathedral_engine import (
-    ONE_SHOT_TURN_THRESHOLD,
-    SIPHON_FLAG_ONE_SHOT,
-    CathedralEngine,
-    EngineError,
-)
-from cathedral.v4.oracle import (
-    OracleError,
-    PatchRunResult,
-    run_patch_against_hidden_test,
-)
 from cathedral.v4.schemas import (
     AgentTurn,
+    MinerBundle,
     MinerTrajectory,
     ValidationPayload,
 )
-from cathedral.v4.sign import build_signed_v4_row
 from cathedral.v4.verify import VerifyError, verify_v4_row
 
 __all__ = [
-    "ONE_SHOT_TURN_THRESHOLD",
-    "SIPHON_FLAG_ONE_SHOT",
     "AgentTurn",
-    "ArenaError",
-    "CathedralEngine",
-    "EngineError",
-    "IsomorphicScrambler",
-    "MinerArena",
+    "MinerBundle",
     "MinerTrajectory",
-    "OracleError",
-    "PatchRunResult",
-    "ScrambledRepo",
     "ValidationPayload",
     "VerifyError",
-    "build_signed_v4_row",
-    "run_patch_against_hidden_test",
     "verify_v4_row",
 ]

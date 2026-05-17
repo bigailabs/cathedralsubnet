@@ -17,7 +17,7 @@ import re
 import time
 from statistics import quantiles
 
-from cathedral.v4 import CathedralEngine
+from cathedral.v4.cathedral_engine import CathedralEngine
 from cathedral.v4.oracle.patch_runner import (
     BOOKKEEPING_BUDGET_SECONDS,
     REPRO_BUDGET_SECONDS,

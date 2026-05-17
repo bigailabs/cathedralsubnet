@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cathedral.v4 import CathedralEngine
+from cathedral.v4.cathedral_engine import CathedralEngine
 
 VAULT_PATH = Path(__file__).resolve().parents[2] / "src" / "cathedral" / "v4" / "vault"
 

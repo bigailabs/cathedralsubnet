@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import pytest
 
-from cathedral.v4 import (
+from cathedral.v4.oracle.patch_runner import (
+    REPRO_BUDGET_SECONDS,
     OracleError,
     PatchRunResult,
     run_patch_against_hidden_test,
 )
-from cathedral.v4.oracle.patch_runner import REPRO_BUDGET_SECONDS
 
 PRICE_FILE = """def compute(x, y):
     # buggy: returns sum, hidden test expects product

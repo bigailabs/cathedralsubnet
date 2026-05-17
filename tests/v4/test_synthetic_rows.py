@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from cathedral.v4 import CathedralEngine
+from cathedral.v4.cathedral_engine import CathedralEngine
 
 FIXTURES = Path(__file__).parent / "fixtures" / "synthetic_rows"
 SYNTHETIC_IDS = [

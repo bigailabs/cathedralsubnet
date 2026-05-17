@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cathedral.v4 import IsomorphicScrambler
+from cathedral.v4.arena import IsomorphicScrambler
 
 
 def test_ts_vault_manifest_well_formed(vault_path: Path) -> None:

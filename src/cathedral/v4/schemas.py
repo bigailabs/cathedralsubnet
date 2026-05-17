@@ -80,7 +80,7 @@ class ValidationPayload(BaseModel):
     """The complete publisher-side envelope for one v4 task.
 
     Holds the task metadata, the canonical winning patch (kept
-    private to the publisher until signing — the validator receives
+    private to the publisher until signing -- the validator receives
     it inside the signed row for replay verification), every miner's
     trajectory, and a deterministic hash that binds the envelope
     together for downstream consumers.
@@ -97,8 +97,43 @@ class ValidationPayload(BaseModel):
     deterministic_hash: str
 
 
+class MinerBundle(BaseModel):
+    """The wire-safe broken-state bundle the publisher hands to a miner.
+
+    Carries ONLY the broken-state workspace plus the public task
+    descriptors the miner needs to attempt a fix. Deliberately omits
+    clean_state, winning_patch, hidden_test_code, and rename maps so
+    that a transport that naively serializes this object cannot leak
+    the answer to the miner.
+
+    The publisher-internal counterpart is
+    ``cathedral.v4.cathedral_engine.PublisherHandle``; engine call
+    sites that need both receive them as a 2-tuple from the helper
+    ``CathedralEngine.build_bundle_and_handle``.
+
+    Added 2026-05-17 in response to Finding 2 of the PR #133 review:
+    the previous ``dict`` return value of ``build_miner_bundle``
+    carried both broken_state and clean_state in the same payload.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    base_repo: str
+    language: str
+    difficulty_tier: str
+    seed: int
+    workspace_files: dict[str, str] = Field(
+        ...,
+        description="Broken-state file content keyed by repo-relative POSIX path",
+    )
+    compile_command: list[str] = Field(default_factory=list)
+    test_entry_path: str | None = None
+
+
 __all__ = [
     "AgentTurn",
+    "MinerBundle",
     "MinerTrajectory",
     "ValidationPayload",
 ]

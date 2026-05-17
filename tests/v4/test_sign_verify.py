@@ -17,7 +17,8 @@ from datetime import UTC, datetime
 import pytest
 from nacl.signing import SigningKey, VerifyKey
 
-from cathedral.v4 import ValidationPayload, VerifyError, build_signed_v4_row, verify_v4_row
+from cathedral.v4 import ValidationPayload, VerifyError, verify_v4_row
+from cathedral.v4.sign import build_signed_v4_row
 
 
 class _MockEvalSigner:

@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import re
 
-from cathedral.v4 import (
+from cathedral.v4 import ValidationPayload
+from cathedral.v4.cathedral_engine import (
     SIPHON_FLAG_ONE_SHOT,
     CathedralEngine,
-    ValidationPayload,
 )
 from cathedral.v4.oracle.patch_runner import (
     BOOKKEEPING_BUDGET_SECONDS,
@@ -257,7 +257,7 @@ def test_load_task_raises_without_corpus(vault_path) -> None:
 
     import pytest
 
-    from cathedral.v4 import EngineError
+    from cathedral.v4.cathedral_engine import EngineError
 
     saved = os.environ.pop("CATHEDRAL_V4_CORPUS_PATH", None)
     try:

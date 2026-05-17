@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cathedral.v4 import ArenaError, IsomorphicScrambler, MinerArena
+from cathedral.v4.arena import ArenaError, IsomorphicScrambler, MinerArena
 
 
 def test_tool_surface_is_exactly_three(tmp_path: Path, vault_path: Path) -> None:
