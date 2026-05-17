@@ -78,6 +78,12 @@ To persist the corpus on Railway:
 5. Redeploy. Confirm the loader logs `corpus_loaded path=... rows=N`
    in the boot logs, where `N` is the row count you uploaded.
 
+The publisher's lifespan startup preloads the corpus whenever
+`CATHEDRAL_V3_CORPUS_PATH` is set, so the log line appears
+immediately on restart, not only at first v3 evaluation. This is
+what makes the boot-log preflight reliable even when
+`CATHEDRAL_V3_FEED_ENABLED=false`.
+
 If you see `corpus_unavailable reason=file_missing` after a deploy,
 the path is not on a volume.
 

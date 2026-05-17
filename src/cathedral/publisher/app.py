@@ -155,6 +155,18 @@ def build_publisher_app(ctx_factory: Any, *, start_eval_loop: bool = True) -> Fa
         else:
             logger.info("stale_evaluating_rows_repaired", count=0)
 
+        # Preload the v3 bug-isolation private corpus so the operator can
+        # confirm a non-empty corpus from boot logs BEFORE flipping
+        # CATHEDRAL_V3_FEED_ENABLED. Without this, the loader is only
+        # called inside the feed-gated _maybe_run_v3_bug_isolation path
+        # and the operator's runbook preflight is impossible to satisfy.
+        # The call is a no-op (returns ()) when CATHEDRAL_V3_CORPUS_PATH
+        # is unset, which keeps test/dev runs quiet.
+        if os.environ.get("CATHEDRAL_V3_CORPUS_PATH"):
+            from cathedral.v3.corpus.private_loader import load_private_corpus
+
+            load_private_corpus()
+
         stop = asyncio.Event()
         if start_eval_loop:
             # Per-submission runner dispatch: polaris-tier rows go to
