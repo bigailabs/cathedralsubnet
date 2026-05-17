@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -355,19 +356,37 @@ def run_in_jail(
     }
 
     started = time.monotonic()
+    # Put the child in its own process group / session so we can kill
+    # the entire tree on timeout. Just SIGKILLing the unshare(1)
+    # wrapper is not enough: the workload python (the inner bootstrap
+    # interpreter and its execvp-replacement) lives inside a fresh PID
+    # namespace whose pid-1 dies on SIGKILL, but in our caller-visible
+    # process group the unshare wrapper, the bash setup, and the inner
+    # python are all distinct host-side processes. On timeout we send
+    # SIGKILL to the whole pgrp so a `time.sleep(0.5)` workload is
+    # killed promptly rather than running to completion while the
+    # outer wrapper exits early.
     proc = subprocess.Popen(  # noqa: S603 -- argv list, no shell, fixed binary
         argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
         shell=False,
+        start_new_session=True,
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
         timed_out = False
         returncode: int | None = proc.returncode
     except subprocess.TimeoutExpired:
-        proc.kill()
+        # Kill the entire process group (negative pid). start_new_session
+        # made `proc.pid` the pgrp leader, so this reaches every host
+        # process the jail spawned -- not just the unshare(1) wrapper.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # Race: the wrapper may have already exited cleanly.
+            proc.kill()
         try:
             stdout, stderr = proc.communicate(timeout=0.5)
         except subprocess.TimeoutExpired:
