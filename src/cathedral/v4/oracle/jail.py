@@ -180,15 +180,27 @@ def _build_setup_script(
     """
     # Convert paths to absolute strings; assume no shell-special chars
     # because they originate from tempfile.mkdtemp / sys.prefix.
+    #
+    # Read-only binds use the two-step flow (`mount --bind` then
+    # `mount -o remount,bind,ro`) rather than the one-shot
+    # `mount --bind --read-only` form. The one-shot form is rejected
+    # inside an unprivileged user namespace on Ubuntu 24.04 where
+    # `kernel.apparmor_restrict_unprivileged_userns=1` (the default
+    # since 23.10): the bind succeeds but the implicit remount-to-ro
+    # returns EPERM, leaving the jail half-assembled. The two-step
+    # workaround is portable across kernels we care about.
     return f"""set -euo pipefail
 
 # Inside the new mount namespace. Bind the host bits we want
 # visible. None of these touch the host's mount table because the
 # unshare(1) wrapper gave us a private mount namespace.
-mount --bind --read-only {python_prefix} {jail_root}/python
+mount --bind {python_prefix} {jail_root}/python
+mount -o remount,bind,ro {jail_root}/python
 mount --bind {workspace_dir} {jail_root}/work
-mount --bind --read-only /dev/null {jail_root}/dev/null
-mount --bind --read-only /dev/urandom {jail_root}/dev/urandom
+mount --bind /dev/null {jail_root}/dev/null
+mount -o remount,bind,ro {jail_root}/dev/null
+mount --bind /dev/urandom {jail_root}/dev/urandom
+mount -o remount,bind,ro {jail_root}/dev/urandom
 mount -t tmpfs -o size=64m,mode=1777 tmpfs {jail_root}/tmp
 
 # Pivot into the jail. After pivot_root the old root is at /old.
