@@ -884,6 +884,7 @@ async def list_eval_runs_recent(
     since: datetime,
     since_id: str | None = None,
     limit: int = 200,
+    include_v3: bool = True,
 ) -> list[dict[str, Any]]:
     """Cross-card recent feed used by the validator pull loop AND the
     public `/v1/leaderboard/recent` endpoint.
@@ -926,13 +927,15 @@ async def list_eval_runs_recent(
     the join is defense-in-depth in case a future code path inserts one.
     """
     since_str = _ms_z(since)
+    schema_gate = "" if include_v3 else "AND er.eval_output_schema_version != 3"
     if since_id is None:
         # Legacy v1.0.7-style cursor: strict `>` on ran_at only.
         cur = await conn.execute(
-            """
+            f"""
             SELECT er.* FROM eval_runs er
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE er.ran_at > ?
+              {schema_gate}
               AND sub.status != 'discovery'
               AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
               AND sub.discovery_only = 0
@@ -943,10 +946,11 @@ async def list_eval_runs_recent(
     else:
         # v1.1.0 tuple cursor: row-value comparison over (ran_at, id).
         cur = await conn.execute(
-            """
+            f"""
             SELECT er.* FROM eval_runs er
             JOIN agent_submissions sub ON sub.id = er.submission_id
             WHERE (er.ran_at, er.id) > (?, ?)
+              {schema_gate}
               AND sub.status != 'discovery'
               AND sub.attestation_mode IN ('polaris','polaris-deploy','ssh-probe','tee','bundle')
               AND sub.discovery_only = 0

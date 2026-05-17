@@ -25,6 +25,27 @@ Public-feed envelope policy:
     in ``challenge_id_public`` alongside the raw signed value.
     Surfaces that serve to miners/site should drop the raw field
     and keep only the hash; validator-facing endpoints keep both.
+  - ``challenge_id_public`` is itself in the signed subset, so a
+    man-in-the-middle cannot swap the public hash for a different
+    value without invalidating the signature.
+  - ``epoch_salt`` is also in the signed subset. The salt feeds
+    ``hash_challenge_id`` to derive ``challenge_id_public`` per
+    epoch; signing the literal salt closes the cross-epoch relabel
+    attack (an attacker rewriting which epoch a row came from while
+    keeping the public id intact). ``epoch_salt`` is ``None`` for
+    framework/scaffolding rows (signs as JSON ``null``); production
+    must always pass a real per-epoch salt before the feed flips on
+    via ``CATHEDRAL_V3_FEED_ENABLED=true``. See
+    ``src/cathedral/v3/corpus/CORPUS_TODO.md``.
+
+Persistence contract:
+  - Every key in the v3 signed subset must round-trip through the
+    publisher DB and back onto the wire, or validators that
+    re-canonicalize a stored row will fail verification. ``epoch_salt``
+    is stashed inside ``task_json`` by ``persist_bug_isolation_result``
+    and surfaced again by ``cathedral.publisher.reads._eval_run_to_output``.
+    The same wire-round-trip invariant is locked by
+    ``tests/v3/test_publisher_bug_isolation.py``.
 """
 
 from __future__ import annotations
@@ -47,8 +68,11 @@ _V3_SIGNED_KEYS: frozenset[str] = frozenset(
         "id",
         "agent_id",
         "agent_display_name",
+        "miner_hotkey",
         "task_type",
         "challenge_id",
+        "challenge_id_public",
+        "epoch_salt",
         "weighted_score",
         "score_parts",
         "claim",
@@ -95,6 +119,7 @@ def build_signed_v3_bug_isolation_row(
     eval_run_id: str,
     submission_id: str,
     agent_display_name: str,
+    miner_hotkey: str,
     challenge_id: str,
     dispatch_result: DispatchResult,
     ran_at_iso: str,
@@ -124,7 +149,11 @@ def build_signed_v3_bug_isolation_row(
     so the public id rotates per epoch and cannot be used for
     cross-miner answer-sharing.
     """
-    if dispatch_result.ok and dispatch_result.score is not None and dispatch_result.claim is not None:
+    if (
+        dispatch_result.ok
+        and dispatch_result.score is not None
+        and dispatch_result.claim is not None
+    ):
         weighted = dispatch_result.score.weighted_score
         score_parts = dispatch_result.score.to_parts_dict()
         claim_dict = dispatch_result.claim.to_dict()
@@ -142,12 +171,20 @@ def build_signed_v3_bug_isolation_row(
             else {"challenge_id": challenge_id, "_failure_reason": failure_reason}
         )
 
+    challenge_id_public = hash_challenge_id(challenge_id, epoch_salt=epoch_salt)
+    # epoch_salt is bound into the signed subset so the salt value
+    # used to derive challenge_id_public cannot be swapped post-sign.
+    # None is signed as a literal absence-of-salt (framework default);
+    # production must always pass a real per-epoch salt.
     signed_subset = {
         "id": eval_run_id,
         "agent_id": submission_id,
         "agent_display_name": agent_display_name,
+        "miner_hotkey": miner_hotkey,
         "task_type": "bug_isolation_v1",
         "challenge_id": challenge_id,
+        "challenge_id_public": challenge_id_public,
+        "epoch_salt": epoch_salt,
         "weighted_score": weighted,
         "score_parts": score_parts,
         "claim": claim_dict,
@@ -178,9 +215,7 @@ def build_signed_v3_bug_isolation_row(
     # Envelope (unsigned). Validators tolerate; site uses for UX.
     # When epoch_salt is None (framework PR), the hash is stable and
     # reversible; production must pass a real per-epoch salt.
-    row["challenge_id_public"] = hash_challenge_id(
-        challenge_id, epoch_salt=epoch_salt
-    )
+    row["challenge_id_public"] = challenge_id_public
     if shadow_metrics is not None:
         row["shadow_metrics"] = shadow_metrics
     if failure_reason is not None:

@@ -46,6 +46,13 @@ from cathedral.storage import (
     safe_extract_zip,
 )
 from cathedral.storage.bundle_extractor import BundleStructureError
+from cathedral.v3.corpus.sampler import sample_challenge_id_for_hotkey
+from cathedral.v3.corpus.seed_pilot import get_pilot_corpus
+from cathedral.v3.publisher import (
+    persist_bug_isolation_result,
+    score_and_sign_bug_isolation_stdout,
+    v3_feed_enabled,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -74,6 +81,13 @@ def _retry_backoffs() -> tuple[float, ...]:
     ).lower().startswith("stub"):
         return (0.0, 0.0, 0.0)
     return _RETRY_BACKOFFS
+
+
+def _ms_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    s = dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+    return s + "Z"
 
 
 @dataclass
@@ -205,7 +219,12 @@ class EvalOrchestrator:
             )
             return None
 
-    async def evaluate_one(self, submission: dict[str, Any]) -> None:
+    async def evaluate_one(
+        self,
+        submission: dict[str, Any],
+        *,
+        v3_active_hotkeys: list[str] | None = None,
+    ) -> None:
         log = logger.bind(submission_id=submission["id"], card_id=submission["card_id"])
 
         # Capture the entry status so failure paths know whether this is
@@ -394,6 +413,17 @@ class EvalOrchestrator:
                 polaris_manifest=polaris_result.manifest,
                 published_artifact=published_artifact,
             )
+            try:
+                await self._maybe_run_v3_bug_isolation(
+                    submission=submission,
+                    runner=runner,
+                    epoch=epoch,
+                    round_index=round_index,
+                    log=log,
+                    active_hotkeys=v3_active_hotkeys,
+                )
+            except Exception as exc:
+                log.exception("v3_bug_isolation_failed", error=str(exc))
             log.info("eval_run_complete", epoch=epoch, round_index=round_index)
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
@@ -402,6 +432,72 @@ class EvalOrchestrator:
             # zeroing, but losing the only reference is the closest we
             # get without ctypes-level memzero.
             plaintext = b""
+
+    async def _maybe_run_v3_bug_isolation(
+        self,
+        *,
+        submission: dict[str, Any],
+        runner: Any,
+        epoch: int,
+        round_index: int,
+        log: structlog.stdlib.BoundLogger,
+        active_hotkeys: list[str] | None = None,
+    ) -> None:
+        if not v3_feed_enabled():
+            return
+
+        run_challenge = getattr(runner, "run_bug_isolation_challenge", None)
+        if run_challenge is None:
+            log.info("v3_bug_isolation_skipped", reason="runner_unsupported")
+            return
+
+        corpus = get_pilot_corpus()
+        if not corpus:
+            log.info("v3_bug_isolation_skipped", reason="empty_corpus")
+            return
+
+        if active_hotkeys is None:
+            active_hotkeys = await _v3_active_hotkeys_snapshot(self.db)
+        miner_hotkey = str(submission["miner_hotkey"])
+        if miner_hotkey not in active_hotkeys:
+            active_hotkeys = [*active_hotkeys, miner_hotkey]
+
+        corpus_by_id = {row.id: row for row in corpus}
+        challenge_row_id = sample_challenge_id_for_hotkey(
+            hotkey=miner_hotkey,
+            active_hotkeys=active_hotkeys,
+            corpus_ids=list(corpus_by_id),
+            epoch_number=epoch,
+        )
+        challenge = corpus_by_id[challenge_row_id]
+        hermes_run = await run_challenge(
+            challenge=challenge,
+            miner_hotkey=miner_hotkey,
+            submission=submission,
+        )
+        signed = score_and_sign_bug_isolation_stdout(
+            challenge=challenge,
+            submission=submission,
+            stdout=hermes_run.stdout,
+            ran_at_iso=_ms_iso(datetime.now(UTC)),
+            signer=self.signer,
+            epoch_salt=f"epoch_{epoch}:bug_isolation_v1",
+        )
+        await persist_bug_isolation_result(
+            self.db,
+            submission=submission,
+            challenge=challenge,
+            signed=signed,
+            epoch=epoch,
+            round_index=round_index,
+            duration_ms=int(hermes_run.duration_ms),
+            trace_json=hermes_run.trace,
+        )
+        log.info(
+            "v3_bug_isolation_eval_complete",
+            challenge_id_public=signed.row.get("challenge_id_public"),
+            weighted_score=signed.row.get("weighted_score"),
+        )
 
     async def _on_retryable_failure(
         self,
@@ -600,11 +696,21 @@ async def run_eval_loop(
             queued_count=len(queued),
             cadence_count=len(due),
         )
+        try:
+            v3_active_hotkeys = (
+                await _v3_active_hotkeys_snapshot(db) if v3_feed_enabled() else None
+            )
+        except aiosqlite.Error as e:
+            logger.warning("v3_active_hotkeys_query_failed", error=str(e))
+            v3_active_hotkeys = None
 
-        async def _process(s: dict[str, Any]) -> None:
+        async def _process(
+            s: dict[str, Any],
+            active_hotkeys: list[str] | None = v3_active_hotkeys,
+        ) -> None:
             async with sem:
                 try:
-                    await orchestrator.evaluate_one(s)
+                    await orchestrator.evaluate_one(s, v3_active_hotkeys=active_hotkeys)
                 except Exception as e:
                     logger.exception("eval_one_crashed", submission_id=s["id"], error=str(e))
                     # An uncaught exception inside evaluate_one would
@@ -620,6 +726,20 @@ async def run_eval_loop(
                         )
 
         await asyncio.gather(*[_process(s) for s in batch])
+
+
+async def _v3_active_hotkeys_snapshot(db: aiosqlite.Connection) -> list[str]:
+    ranked, _total = await repository.list_submissions_all(
+        db,
+        verified_only=True,
+        ranked_only=True,
+        limit=10000,
+    )
+    return [
+        str(row["miner_hotkey"])
+        for row in ranked
+        if isinstance(row.get("miner_hotkey"), str) and row["miner_hotkey"]
+    ]
 
 
 async def _sleep_or_stop(stop: asyncio.Event, secs: float) -> None:

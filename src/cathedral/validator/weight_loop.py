@@ -16,6 +16,19 @@ from cathedral.validator.pull_loop import latest_pulled_score_per_hotkey
 logger = structlog.get_logger(__name__)
 
 
+def _resolve_v3_bug_isolation_weight(configured: float | None) -> float | None:
+    import os
+
+    raw = os.environ.get("CATHEDRAL_V3_BUG_ISOLATION_WEIGHT")
+    if raw is None:
+        return configured
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("v3_bug_isolation_weight_invalid", value=raw)
+        return configured
+
+
 async def run_weight_loop(
     conn: aiosqlite.Connection,
     chain: Chain,
@@ -24,6 +37,7 @@ async def run_weight_loop(
     disabled: bool = False,
     burn_uid: int = 204,
     forced_burn_percentage: float = 0.0,
+    v3_bug_isolation_weight: float | None = None,
     stop: asyncio.Event | None = None,
     initial_backfill_complete: asyncio.Event | None = None,
     initial_backfill_timeout_secs: float = 120.0,
@@ -106,7 +120,13 @@ async def run_weight_loop(
                 # lets a debugged miner climb within a day of shipping
                 # a real card, while still smoothing out single-eval
                 # noise. Full time-decayed mean is the next iteration.
-                pulled = await latest_pulled_score_per_hotkey(conn, since_days=7)
+                pulled = await latest_pulled_score_per_hotkey(
+                    conn,
+                    since_days=7,
+                    v3_bug_isolation_weight=_resolve_v3_bug_isolation_weight(
+                        v3_bug_isolation_weight
+                    ),
+                )
                 scores.update(pulled)
             except Exception as ex:
                 logger.debug("pulled_scores_unavailable", error=str(ex))

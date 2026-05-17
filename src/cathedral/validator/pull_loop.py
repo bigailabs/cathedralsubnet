@@ -107,6 +107,7 @@ async def upsert_pulled_eval(
     eval_run_id = str(eval_run["id"])
     weighted = float(eval_run["weighted_score"])
     ran_at = eval_run["ran_at"]
+    task_type = str(eval_run.get("task_type") or eval_run.get("card_id") or "unknown")
     if isinstance(ran_at, datetime):
         ran_at = ran_at.isoformat()
 
@@ -117,29 +118,19 @@ async def upsert_pulled_eval(
     synth_id = -(zlib.crc32(eval_run_id.encode("utf-8")) & 0x7FFFFFFF) - 1
 
     # Insert into a new pull-side table to avoid FK violations against `claims`.
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS pulled_eval_runs (
-            eval_run_id TEXT PRIMARY KEY,
-            miner_hotkey TEXT NOT NULL,
-            weighted_score REAL NOT NULL,
-            ran_at TEXT NOT NULL,
-            pulled_at TEXT NOT NULL,
-            synth_claim_id INTEGER NOT NULL
-        )
-        """
-    )
+    await _ensure_pulled_eval_runs_table(conn)
     await conn.execute(
         """
         INSERT INTO pulled_eval_runs (
             eval_run_id, miner_hotkey, weighted_score,
-            ran_at, pulled_at, synth_claim_id
+            ran_at, pulled_at, synth_claim_id, task_type
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(eval_run_id) DO UPDATE SET
             weighted_score=excluded.weighted_score,
             ran_at=excluded.ran_at,
-            pulled_at=excluded.pulled_at
+            pulled_at=excluded.pulled_at,
+            task_type=excluded.task_type
         """,
         (
             eval_run_id,
@@ -148,26 +139,91 @@ async def upsert_pulled_eval(
             ran_at,
             datetime.now(UTC).isoformat(),
             synth_id,
+            task_type,
         ),
     )
     await conn.commit()
 
 
 async def latest_pulled_score_per_hotkey(
-    conn: aiosqlite.Connection, *, since_days: int = 30
+    conn: aiosqlite.Connection,
+    *,
+    since_days: int = 30,
+    v3_bug_isolation_weight: float | None = None,
 ) -> dict[str, float]:
-    """Rolling 30-day mean per hotkey from the pull-side table."""
+    """Rolling mean per hotkey from the pull-side table.
+
+    v1 card scores remain primary. bug_isolation_v1 can contribute a
+    small configurable share once enabled, without letting v3 rows
+    dilute or replace EU AI Act scores by accident.
+    """
+    await _ensure_pulled_eval_runs_table(conn)
+    v3_weight = max(0.0, min(1.0, float(v3_bug_isolation_weight or 0.0)))
+    v1_weight = 1.0 - v3_weight
+
     since = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
     cur = await conn.execute(
         """
-        SELECT miner_hotkey, AVG(weighted_score) FROM pulled_eval_runs
+        SELECT
+            miner_hotkey,
+            CASE
+                WHEN task_type = 'bug_isolation_v1' THEN 'v3'
+                ELSE 'v1'
+            END AS score_bucket,
+            AVG(weighted_score)
+        FROM pulled_eval_runs
         WHERE ran_at >= ?
-        GROUP BY miner_hotkey
+        GROUP BY miner_hotkey, score_bucket
         """,
         (since,),
     )
     rows = await cur.fetchall()
-    return {str(r[0]): float(r[1]) for r in rows}
+    by_hotkey: dict[str, dict[str, float]] = {}
+    for row in rows:
+        hotkey = str(row[0])
+        score_bucket = str(row[1] or "v1")
+        score = float(row[2])
+        by_hotkey.setdefault(hotkey, {})[score_bucket] = score
+
+    out: dict[str, float] = {}
+    for hotkey, scores in by_hotkey.items():
+        v1_score = scores.get("v1")
+        v3_score = scores.get("v3")
+        if v1_score is not None:
+            if v3_score is None:
+                out[hotkey] = v1_score
+            else:
+                out[hotkey] = (v1_score * v1_weight) + (v3_score * v3_weight)
+        elif v3_score is not None and v3_weight > 0.0:
+            out[hotkey] = v3_score * v3_weight
+    return out
+
+
+async def _ensure_pulled_eval_runs_table(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pulled_eval_runs (
+            eval_run_id TEXT PRIMARY KEY,
+            miner_hotkey TEXT NOT NULL,
+            weighted_score REAL NOT NULL,
+            ran_at TEXT NOT NULL,
+            pulled_at TEXT NOT NULL,
+            synth_claim_id INTEGER NOT NULL,
+            task_type TEXT NOT NULL DEFAULT 'unknown'
+        )
+        """
+    )
+    cur = await conn.execute("PRAGMA table_info(pulled_eval_runs)")
+    cols = {str(row[1]) for row in await cur.fetchall()}
+    if "task_type" not in cols:
+        try:
+            await conn.execute(
+                "ALTER TABLE pulled_eval_runs ADD COLUMN task_type TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    await conn.commit()
 
 
 # Durable marker recording that a 7-day backfill has completed under the
@@ -576,6 +632,15 @@ def _rebuild_signed_payload(eval_output: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def _hotkey_for(eval_output: dict[str, Any]) -> str | None:
+    version_raw = eval_output.get("eval_output_schema_version", 1)
+    try:
+        version = int(version_raw)
+    except (TypeError, ValueError):
+        version = 1
+    if version == 3:
+        hk = eval_output.get("miner_hotkey")
+        return hk if isinstance(hk, str) and hk else None
+
     raw = eval_output.get("output_card") or {}
     if isinstance(raw, dict):
         hk = raw.get("worker_owner_hotkey")
@@ -674,8 +739,11 @@ _SIGNED_EVAL_OUTPUT_KEYS_V3 = frozenset(
         "id",
         "agent_id",
         "agent_display_name",
+        "miner_hotkey",
         "task_type",
         "challenge_id",
+        "challenge_id_public",
+        "epoch_salt",
         "weighted_score",
         "score_parts",
         "claim",

@@ -14,6 +14,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from cathedral.publisher import repository
+from cathedral.v3.publisher import v3_feed_enabled
 
 if TYPE_CHECKING:
     from cathedral.publisher.app import PublisherContext
@@ -469,8 +470,9 @@ async def get_leaderboard_recent(
     else:
         cursor_id = since_id
 
+    include_v3 = v3_feed_enabled()
     runs = await repository.list_eval_runs_recent(
-        ctx.db, since=since_dt, since_id=cursor_id, limit=limit
+        ctx.db, since=since_dt, since_id=cursor_id, limit=limit, include_v3=include_v3
     )
     items: list[dict[str, Any]] = []
     for r in runs:
@@ -598,7 +600,7 @@ async def get_health(request: Request) -> dict[str, Any]:
     if fatal:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=payload,  # type: ignore[arg-type]
+            detail=payload,
         )
     return payload
 
@@ -631,6 +633,30 @@ def _eval_run_to_output(run: dict[str, Any], sub: dict[str, Any]) -> dict[str, A
     part of the signed bytes.
     """
     schema_version = int(run.get("eval_output_schema_version") or 1)
+    if schema_version == 3:
+        task_json = run.get("task_json") or {}
+        output = run.get("output_card_json") or {}
+        return {
+            "id": run["id"],
+            "agent_id": sub["id"],
+            "agent_display_name": sub["display_name"],
+            "miner_hotkey": sub["miner_hotkey"],
+            "task_type": "bug_isolation_v1",
+            "challenge_id": task_json.get("challenge_id"),
+            "challenge_id_public": task_json.get("challenge_id_public")
+            or output.get("challenge_id_public"),
+            # epoch_salt is part of the signed subset; surface it
+            # back on the wire so validators can re-canonicalize.
+            "epoch_salt": task_json.get("epoch_salt"),
+            "weighted_score": run["weighted_score"],
+            "score_parts": run["score_parts"],
+            "claim": output.get("claim"),
+            "ran_at": run["ran_at"],
+            "eval_output_schema_version": 3,
+            "cathedral_signature": run["cathedral_signature"],
+            "failure_reason": output.get("failure_reason"),
+            "merkle_epoch": run.get("merkle_epoch"),
+        }
     if schema_version == 2:
         excerpt_raw = run.get("eval_card_excerpt")
         if isinstance(excerpt_raw, str):

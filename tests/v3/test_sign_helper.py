@@ -13,10 +13,8 @@ Locks:
 
 from __future__ import annotations
 
-import base64
 from typing import Any
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral.v3.dispatch import dispatch_bug_isolation_claim
@@ -56,7 +54,11 @@ def _good_stdout(challenge_id: str = "ch_seed_a") -> str:
     )
 
 
-def _sign_and_get_row(stdout: str, *, challenge_id: str = "ch_seed_a") -> tuple[dict[str, Any], _FakeSigner]:
+def _sign_and_get_row(
+    stdout: str,
+    *,
+    challenge_id: str = "ch_seed_a",
+) -> tuple[dict[str, Any], _FakeSigner]:
     sk = Ed25519PrivateKey.generate()
     signer = _FakeSigner(sk)
     dispatch = dispatch_bug_isolation_claim(
@@ -68,6 +70,7 @@ def _sign_and_get_row(stdout: str, *, challenge_id: str = "ch_seed_a") -> tuple[
         eval_run_id="00000000-0000-4000-8000-000000000001",
         submission_id="11111111-1111-4111-8111-000000000001",
         agent_display_name="Test Agent",
+        miner_hotkey="5FakeHotkey",
         challenge_id=challenge_id,
         dispatch_result=dispatch,
         ran_at_iso="2026-05-16T05:00:00.000Z",
@@ -196,6 +199,7 @@ def test_build_signed_v3_row_forwards_epoch_salt() -> None:
             eval_run_id="00000000-0000-4000-8000-000000000099",
             submission_id="11111111-1111-4111-8111-000000000099",
             agent_display_name="Salt Tester",
+            miner_hotkey="5SaltTesterHotkey",
             challenge_id="ch_alpha",
             dispatch_result=dispatch,
             ran_at_iso="2026-05-16T05:00:00.000Z",
@@ -214,11 +218,17 @@ def test_build_signed_v3_row_forwards_epoch_salt() -> None:
     assert row_e1["challenge_id_public"] == hash_challenge_id(
         "ch_alpha", epoch_salt="epoch_1"
     )
-    # Signed bytes are identical (epoch_salt is envelope-only); the
-    # cathedral_signature should remain consistent across salt
-    # changes because nothing in the signed subset moved.
-    assert row_no_salt["cathedral_signature"] == row_e1["cathedral_signature"]
-    assert row_e1["cathedral_signature"] == row_e2["cathedral_signature"]
+    # epoch_salt itself is also in the signed subset, so changing the
+    # salt changes the canonical bytes and the signature.
+    assert row_no_salt["epoch_salt"] is None
+    assert row_e1["epoch_salt"] == "epoch_1"
+    assert row_e2["epoch_salt"] == "epoch_2"
+    assert row_no_salt["cathedral_signature"] != row_e1["cathedral_signature"]
+    assert row_e1["cathedral_signature"] != row_e2["cathedral_signature"]
+    # All three rows still verify with the validator's own code path.
+    pk = signer._sk.public_key()
+    for row in (row_no_salt, row_e1, row_e2):
+        pull_loop_module.verify_eval_output_signature(row, pk)
 
 
 # --------------------------------------------------------------------------
@@ -237,8 +247,9 @@ def test_build_v3_row_refuses_to_emit_extra_signed_fields() -> None:
     # match is locked by tests/v3/test_sign_payload_v3.py.
     row, _ = _sign_and_get_row(_good_stdout())
     signed_keys = {
-        "id", "agent_id", "agent_display_name", "task_type",
-        "challenge_id", "weighted_score", "score_parts", "claim", "ran_at",
+        "id", "agent_id", "agent_display_name", "miner_hotkey", "task_type",
+        "challenge_id", "challenge_id_public", "epoch_salt", "weighted_score",
+        "score_parts", "claim", "ran_at",
     }
     # The row has more fields than the signed subset (envelope), but
     # the signed subset itself was complete.

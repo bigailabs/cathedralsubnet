@@ -26,7 +26,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cathedral.v1_types import canonical_json
 from cathedral.validator import pull_loop as pull_loop_module
 
-
 # v3 keyset, locked here so a future edit to either module's
 # _SIGNED_KEYS_BY_VERSION[3] will fail this test loudly.
 EXPECTED_V3_KEYS: frozenset[str] = frozenset(
@@ -34,8 +33,11 @@ EXPECTED_V3_KEYS: frozenset[str] = frozenset(
         "id",
         "agent_id",
         "agent_display_name",
+        "miner_hotkey",
         "task_type",
         "challenge_id",
+        "challenge_id_public",
+        "epoch_salt",
         "weighted_score",
         "score_parts",
         "claim",
@@ -51,8 +53,11 @@ def _build_v3_signed_record(sk: Ed25519PrivateKey, *, idx: int = 0) -> dict[str,
         "id": f"00000000-0000-4000-8000-{idx:012d}",
         "agent_id": f"11111111-1111-4111-8111-{idx:012d}",
         "agent_display_name": f"Agent {idx}",
+        "miner_hotkey": f"5FakeHotkey{idx}",
         "task_type": "bug_isolation_v1",
         "challenge_id": f"ch_seed_{idx}",
+        "challenge_id_public": f"public{idx:06d}",
+        "epoch_salt": f"epoch_{idx}",
         "weighted_score": 0.42 + 0.01 * idx,
         "score_parts": {
             "culprit_file": 1.0,
@@ -159,6 +164,37 @@ def test_v3_record_rejects_tampered_challenge_id() -> None:
     pk = sk.public_key()
     record = _build_v3_signed_record(sk, idx=13)
     record["challenge_id"] = "ch_attacker_substitute"
+    with pytest.raises(pull_loop_module.PullVerificationError):
+        pull_loop_module.verify_eval_output_signature(record, pk)
+
+
+def test_v3_record_rejects_tampered_challenge_id_public() -> None:
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+    record = _build_v3_signed_record(sk, idx=17)
+    record["challenge_id_public"] = "altered-public-id"
+    with pytest.raises(pull_loop_module.PullVerificationError):
+        pull_loop_module.verify_eval_output_signature(record, pk)
+
+
+def test_v3_record_rejects_tampered_epoch_salt() -> None:
+    """epoch_salt derives challenge_id_public; both are signed.
+    Swapping the salt post-sign must fail verification, otherwise an
+    attacker could relabel which epoch a row came from while keeping
+    the public id intact for cross-epoch answer-sharing."""
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+    record = _build_v3_signed_record(sk, idx=18)
+    record["epoch_salt"] = "epoch_attacker"
+    with pytest.raises(pull_loop_module.PullVerificationError):
+        pull_loop_module.verify_eval_output_signature(record, pk)
+
+
+def test_v3_record_rejects_tampered_miner_hotkey() -> None:
+    sk = Ed25519PrivateKey.generate()
+    pk = sk.public_key()
+    record = _build_v3_signed_record(sk, idx=16)
+    record["miner_hotkey"] = "5DifferentMinerHotkey"
     with pytest.raises(pull_loop_module.PullVerificationError):
         pull_loop_module.verify_eval_output_signature(record, pk)
 
