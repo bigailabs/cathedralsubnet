@@ -58,7 +58,7 @@ def test_good_patch_returns_passed() -> None:
     assert result.patch_applied is True
     assert result.passed is True, f"stdout={result.stdout!r} stderr={result.stderr!r}"
     assert result.duration_seconds < REPRO_BUDGET_SECONDS
-    assert result.isolation_mode in {"unshare_n", "monkeypatch_only"}
+    assert result.isolation_mode in {"jailed", "unshare_n_only", "monkeypatch_only"}
 
 
 def test_bad_patch_returns_failed() -> None:
