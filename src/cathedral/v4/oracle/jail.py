@@ -274,7 +274,11 @@ def run_in_jail(
     ]
 
     env = {
-        "PATH": "/usr/bin:/bin",
+        # /usr/sbin and /sbin are needed because `pivot_root(8)` lives
+        # there on Ubuntu (util-linux ships it as an admin tool); the
+        # other utilities (`mount`, `umount`, `mkdir`, `rmdir`) live in
+        # /usr/bin via the usrmerge symlinks.
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
         "PYTHONDONTWRITEBYTECODE": "1",
