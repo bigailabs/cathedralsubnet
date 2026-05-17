@@ -280,3 +280,89 @@ def test_resolve_isolation_mode_macos_returns_monkeypatch() -> None:
     if platform.system() != "Darwin":
         pytest.skip("macOS-only contract")
     assert resolve_isolation_mode() == "monkeypatch_only"
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="jail requires Linux unshare(1) >= 2.36")
+def test_jail_timeout_kills_sleeping_child_promptly() -> None:
+    """The jailed path kills a sleeping workload before its sleep ends.
+
+    Regression: previously the timeout fired against the outer unshare(1)
+    wrapper while the inner workload python kept running long enough that
+    a time.sleep(0.5) completed despite a 0.15s budget. The pgrp-kill
+    semantics in jail.run_in_jail must:
+
+      * report timed_out=True
+      * report passed=False
+      * complete in well under the sleep duration (we use 0.4s as a
+        generous ceiling -- the kernel needs a few ms to deliver SIGKILL
+        but we should be nowhere near 0.5s)
+      * never let the SHOULD_NEVER_PRINT marker reach stdout
+      * leave no orphan in our caller-visible process tree (waitpid
+        WNOHANG returns 0 immediately because the pgrp kill reaped
+        everything by the time communicate() returned)
+
+    The test dual-asserts isolation_mode='jailed' and patch_applied=True
+    so a regression that silently falls back to a weaker mode or rejects
+    the patch fails loudly rather than passing trivially.
+    """
+    sleep_test = textwrap.dedent(
+        """
+        import time
+        time.sleep(0.5)
+        print('SHOULD_NEVER_PRINT')
+        """
+    ).lstrip()
+    noop_diff = textwrap.dedent(
+        """\
+        --- a/m.py
+        +++ b/m.py
+        @@ -1,3 +1,3 @@
+         def compute(x, y):
+             # buggy: returns sum, hidden test expects product
+             return x + y
+        """
+    )
+    original = textwrap.dedent(
+        """\
+        def compute(x, y):
+            # buggy: returns sum, hidden test expects product
+            return x + y
+        """
+    )
+
+    result: PatchRunResult = run_patch_against_hidden_test(
+        original_repo_state={"m.py": original},
+        patch_str=noop_diff,
+        hidden_test_code=sleep_test,
+        timeout_seconds=0.15,
+    )
+
+    assert result.patch_applied is True, (
+        f"noop patch was rejected before subprocess fired; stderr={result.stderr[:400]!r}"
+    )
+    assert result.isolation_mode == "jailed", (
+        f"expected jail isolation, got {result.isolation_mode!r}"
+    )
+    assert result.timed_out is True, (
+        f"jailed sleep(0.5) was not killed; passed={result.passed} "
+        f"returncode={result.returncode} duration={result.duration_seconds} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert result.passed is False
+    assert result.duration_seconds < 0.4, (
+        f"jail kill was slow: {result.duration_seconds}s; pgrp kill should "
+        f"reap within a few ms of the 0.15s budget"
+    )
+    assert "SHOULD_NEVER_PRINT" not in result.stdout, (
+        f"workload print leaked despite timeout: stdout={result.stdout!r}"
+    )
+
+    # No orphan: any host-side child the jail spawned should already be
+    # reaped by the time communicate() returned. waitpid WNOHANG on -1
+    # returns (0, 0) when there are no zombie children to collect.
+    try:
+        pid, status = os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError:
+        # No children at all -- also a clean state.
+        pid, status = 0, 0
+    assert pid == 0, f"orphan child detected after jail kill: pid={pid} status={status}"
