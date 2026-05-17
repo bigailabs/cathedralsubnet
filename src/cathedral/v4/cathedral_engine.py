@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from pydantic import BaseModel, ConfigDict, Field
 
 from cathedral.v4.arena.sandbox import (
     IsomorphicScrambler,
@@ -78,6 +79,7 @@ from cathedral.v4.oracle.patch_runner import (
 )
 from cathedral.v4.schemas import (
     AgentTurn,
+    MinerBundle,
     MinerTrajectory,
     ValidationPayload,
 )
@@ -94,6 +96,42 @@ class EngineError(Exception):
     """Raised on operator/wiring errors that the engine cannot recover
     from (missing vault, missing corpus path, malformed task row).
     """
+
+
+class PublisherHandle(BaseModel):
+    """Publisher-internal handle held alongside every miner bundle.
+
+    Carries every field the publisher needs to drive the oracle
+    (clean_state, rename_map, hidden_test_code, winning_patch) and
+    that MUST NEVER cross the miner boundary. Pairs with the
+    wire-safe ``cathedral.v4.schemas.MinerBundle``.
+
+    The type system enforces the split: a transport that handles
+    ``MinerBundle`` cannot accidentally pick up the answer because
+    the answer lives in a different object that the engine returns
+    separately from ``build_publisher_handle``.
+
+    Added 2026-05-17 (Finding 2, PR #133 review). Previously the
+    engine returned a single ``dict`` containing both broken_state
+    and clean_state; the miner-facing method name made it easy for
+    a downstream transport to serialize the whole return value.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    task_id: str
+    base_repo: str
+    language: str
+    seed: int
+    workspace_path: str
+    clean_state: dict[str, str] = Field(
+        ..., description="Pre-bug scrambled file contents (the answer key)"
+    )
+    rename_map: dict[str, str] = Field(default_factory=dict)
+    file_rename_map: dict[str, str] = Field(default_factory=dict)
+    string_rotation: dict[str, str] = Field(default_factory=dict)
+    compile_command: list[str] = Field(default_factory=list)
+    test_entry_path: str | None = None
 
 
 class CathedralEngine:
@@ -229,33 +267,36 @@ class CathedralEngine:
     # ------------------------------------------------------------------
     # bundle for the miner (apply bug server-side)
     # ------------------------------------------------------------------
-    def build_miner_bundle(
+    def build_bundle_and_handle(
         self,
         base_repo: str,
         bug_patch: str,
         seed: int | None = None,
-    ) -> dict[str, Any]:
-        """Build the broken-state bundle the miner sees.
+        difficulty_tier: str = "bronze",
+        task_id: str | None = None,
+    ) -> tuple[MinerBundle, PublisherHandle]:
+        """Scramble, apply the bug, return the (bundle, handle) pair.
+
+        This is the single source of truth for "what the miner gets"
+        vs "what the publisher keeps". Two distinct typed objects;
+        every call site that needs both names them both explicitly.
+
+          * ``MinerBundle`` -- broken-state workspace + public task
+            descriptors. Wire safe. Send to the miner.
+          * ``PublisherHandle`` -- clean state + rename maps. Stays
+            on the publisher. Never serialized to the miner.
 
         Server-side, we:
 
           1. Load ``base_repo`` from the vault.
           2. Scramble it deterministically under ``seed``.
           3. Apply the ``bug_patch`` to the scrambled state.
-          4. Return the ``{relpath: content}`` map PLUS the rename
-             maps so the publisher can later rewrite the hidden test
-             template against scrambled identifiers.
-
-        The returned bundle deliberately does NOT include
-        ``bug_patch``. The miner only sees broken-state files; the
-        raw bug diff would leak the fault location and trivialize
-        the challenge. The publisher's bundle-shipping path
-        (a separate transport concern) is what hands the bundle to
-        the miner — the engine just emits it.
 
         Raises ``EngineError`` if ``bug_patch`` fails to apply (a
         publisher-side wiring bug; the bug patch must always apply
         to its declared base).
+
+        Added 2026-05-17 (Finding 2, PR #133 review).
         """
         seed = seed if seed is not None else secrets.randbits(64)
         scrambled = self._scrambler.scramble(
@@ -277,19 +318,88 @@ class CathedralEngine:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content)
 
-        return {
-            "seed": seed,
-            "base_repo": base_repo,
-            "language": scrambled.language,
-            "workspace_path": str(scrambled.workspace_path),
-            "broken_state": broken,
-            "clean_state": dict(scrambled.files),
-            "rename_map": dict(scrambled.rename_map),
-            "file_rename_map": dict(scrambled.file_rename_map),
-            "string_rotation": dict(scrambled.string_rotation),
-            "compile_command": list(scrambled.compile_command),
-            "test_entry_path": scrambled.test_entry_path,
-        }
+        resolved_task_id = task_id or f"v4t_{seed:016x}"
+        bundle = MinerBundle(
+            task_id=resolved_task_id,
+            base_repo=base_repo,
+            language=scrambled.language,
+            difficulty_tier=difficulty_tier,
+            seed=seed,
+            workspace_files=broken,
+            compile_command=list(scrambled.compile_command),
+            test_entry_path=scrambled.test_entry_path,
+        )
+        handle = PublisherHandle(
+            task_id=resolved_task_id,
+            base_repo=base_repo,
+            language=scrambled.language,
+            seed=seed,
+            workspace_path=str(scrambled.workspace_path),
+            clean_state=dict(scrambled.files),
+            rename_map=dict(scrambled.rename_map),
+            file_rename_map=dict(scrambled.file_rename_map),
+            string_rotation=dict(scrambled.string_rotation),
+            compile_command=list(scrambled.compile_command),
+            test_entry_path=scrambled.test_entry_path,
+        )
+        return bundle, handle
+
+    def build_miner_bundle(
+        self,
+        base_repo: str,
+        bug_patch: str,
+        seed: int | None = None,
+        difficulty_tier: str = "bronze",
+        task_id: str | None = None,
+    ) -> MinerBundle:
+        """Build the broken-state bundle the miner sees.
+
+        Thin wrapper around ``build_bundle_and_handle`` that returns
+        ONLY the wire-safe ``MinerBundle``. Callers that also need
+        the publisher-internal handle (clean state, rename maps,
+        scrambler seed for replay) must call
+        ``build_bundle_and_handle`` and bind both halves explicitly.
+
+        The returned bundle deliberately does NOT include
+        ``bug_patch``, ``clean_state``, or any rename map. The miner
+        only sees broken-state files; the raw bug diff or the
+        pre-bug clean state would leak the fault location and
+        trivialize the challenge.
+
+        Raises ``EngineError`` if ``bug_patch`` fails to apply.
+        """
+        bundle, _handle = self.build_bundle_and_handle(
+            base_repo=base_repo,
+            bug_patch=bug_patch,
+            seed=seed,
+            difficulty_tier=difficulty_tier,
+            task_id=task_id,
+        )
+        return bundle
+
+    def build_publisher_handle(
+        self,
+        base_repo: str,
+        bug_patch: str,
+        seed: int | None = None,
+        difficulty_tier: str = "bronze",
+        task_id: str | None = None,
+    ) -> PublisherHandle:
+        """Build the publisher-internal handle (clean state + maps).
+
+        Thin wrapper around ``build_bundle_and_handle`` that returns
+        ONLY the ``PublisherHandle``. Use this when the calling site
+        is explicitly server-side -- the oracle or the audit logger
+        -- and never wants the miner-facing bundle in scope.
+        """
+        _bundle, handle = self.build_bundle_and_handle(
+            base_repo=base_repo,
+            bug_patch=bug_patch,
+            seed=seed,
+            difficulty_tier=difficulty_tier,
+            task_id=task_id,
+        )
+        return handle
 
     # ------------------------------------------------------------------
     # verification (publisher worker)
@@ -448,5 +558,6 @@ __all__ = [
     "SIPHON_FLAG_ONE_SHOT",
     "CathedralEngine",
     "EngineError",
+    "PublisherHandle",
     "ScrambledRepo",
 ]

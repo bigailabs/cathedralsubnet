@@ -42,7 +42,9 @@ def test_build_miner_bundle_applies_bug_server_side(
     """The bundle the miner sees must be the BROKEN state.
 
     Critically, the raw bug patch must NOT appear in the returned
-    dict; only the post-bug-apply file content is shipped.
+    bundle; only the post-bug-apply file content is shipped. The
+    publisher-internal clean_state lives on ``PublisherHandle``,
+    NOT on ``MinerBundle``.
     """
     # Build a synthetic bug patch: change the working `apply_tax`
     # function to subtract instead of add. (Independent of the
@@ -63,27 +65,29 @@ def test_build_miner_bundle_applies_bug_server_side(
         f"+    return amount - amount * tax_rate\n"
     )
 
-    bundle = engine.build_miner_bundle("python_fastapi_base", bug_patch=bug_patch, seed=seed)
-    # Raw bug patch is NOT in the returned dict.
-    for v in bundle.values():
-        if isinstance(v, str):
-            assert "amount + amount * tax_rate" not in v or "amount - amount * tax_rate" in v
+    bundle, handle = engine.build_bundle_and_handle(
+        "python_fastapi_base", bug_patch=bug_patch, seed=seed
+    )
     # The broken state reflects the applied bug.
-    broken_src = bundle["broken_state"]["app/calculator.py"]
+    broken_src = bundle.workspace_files["app/calculator.py"]
     assert "amount - amount * tax_rate" in broken_src
     assert "amount + amount * tax_rate" not in broken_src
-    # Clean state is preserved separately for the publisher's oracle.
-    clean_src = bundle["clean_state"]["app/calculator.py"]
+    # Clean state is preserved separately on the publisher handle,
+    # NOT in the miner-facing bundle.
+    clean_src = handle.clean_state["app/calculator.py"]
     assert "amount + amount * tax_rate" in clean_src
-    # Hard-block: the bug_patch string itself must NEVER appear in
-    # any miner-facing field of the bundle.
-    miner_facing = {"broken_state", "compile_command", "test_entry_path"}
-    for field in miner_facing:
-        serialized = json.dumps(bundle[field], default=str)
-        assert "+    return amount - amount * tax_rate" not in serialized or field == "broken_state"
+
+    # Hard-block: the bundle JSON must not carry the pre-bug clean
+    # state nor the rename map (both would leak the answer).
+    bundle_json = bundle.model_dump_json()
+    assert "amount + amount * tax_rate" not in bundle_json, (
+        "MinerBundle JSON leaked the clean (pre-bug) expression; "
+        "clean_state must stay on PublisherHandle"
+    )
+    assert "clean_state" not in bundle_json
+    assert "rename_map" not in bundle_json
     # And literally: the bug patch header must not be in any value.
-    full = json.dumps(bundle, default=str)
-    assert "--- a/app/calculator.py\\n+++ b/app/calculator.py\\n@@" not in full
+    assert "--- a/app/calculator.py\\n+++ b/app/calculator.py\\n@@" not in bundle_json
     # Use of `apply_tax_scrambled` keeps the linter happy.
     _ = apply_tax_scrambled
 

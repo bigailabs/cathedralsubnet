@@ -41,34 +41,34 @@ def test_synthetic_row_end_to_end(corpus_engine: CathedralEngine, task_id: str) 
     task = corpus_engine.load_task(task_id)
     assert task["task_id"] == task_id
 
-    bundle = corpus_engine.build_miner_bundle(
+    bundle, handle = corpus_engine.build_bundle_and_handle(
         base_repo=task["base_repo"],
         bug_patch=task["bug_patch"],
         seed=task["seed"],
     )
     # Broken state must differ from clean state.
-    assert bundle["broken_state"] != bundle["clean_state"], (
-        f"build_miner_bundle did not apply bug for {task_id}"
+    assert bundle.workspace_files != handle.clean_state, (
+        f"build_bundle_and_handle did not apply bug for {task_id}"
     )
 
-    # Render hidden test against scrambled rename_map.
-    hidden_test = _render(task["hidden_test_template"], bundle["rename_map"])
-    winning_patch = _render(task["winning_patch_template"], bundle["rename_map"])
+    # Render hidden test against scrambled rename_map (publisher-side).
+    hidden_test = _render(task["hidden_test_template"], handle.rename_map)
+    winning_patch = _render(task["winning_patch_template"], handle.rename_map)
 
     # Verify the broken bundle FAILS the hidden test.
     noop_diff = "--- a/_pin\n+++ a/_pin\n"  # malformed -> patch_applied=False
     failed_broken, _ = corpus_engine.verify_miner_submission(
-        original_repo_state=bundle["broken_state"],
+        original_repo_state=bundle.workspace_files,
         patch_str=noop_diff,
         hidden_test_code=hidden_test,
     )
     assert failed_broken is False, (
-        f"hidden test passed against BROKEN state for {task_id} — bug_patch may not be biting"
+        f"hidden test passed against BROKEN state for {task_id}, bug_patch may not be biting"
     )
 
     # Verify the winning patch FIXES the broken bundle.
     fixed, duration = corpus_engine.verify_miner_submission(
-        original_repo_state=bundle["broken_state"],
+        original_repo_state=bundle.workspace_files,
         patch_str=winning_patch,
         hidden_test_code=hidden_test,
     )
