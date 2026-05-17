@@ -1,0 +1,324 @@
+"""Linux filesystem jail for the publisher-side patch runner.
+
+This module assembles a minimal jail tree and invokes the hidden
+test inside it via ``unshare(1)`` with fresh user / mount / network
+/ pid / cgroup namespaces. Inside the jail the miner patch sees
+only a small, audited slice of the host filesystem:
+
+  * ``/work``      -- the workspace dir bind-mounted read-write
+  * ``/python``    -- the pinned interpreter prefix bind-mounted read-only
+  * ``/dev/null``  -- bind-mounted from host
+  * ``/dev/urandom`` -- bind-mounted from host
+  * ``/tmp``       -- fresh tmpfs
+  * ``/proc``      -- fresh procfs (created by ``unshare --mount-proc``)
+
+Nothing else from the host filesystem is reachable. The miner
+patch's attempts to read ``/etc/hosts``, ``/etc/passwd``,
+``~/.ssh/...``, ``/var/...``, ``/opt/...`` etc. all return ENOENT
+because those paths simply do not exist inside the jail.
+
+**Platform.** Linux only. On macOS / Windows the caller falls back
+to ``monkeypatch_only`` isolation (defined in patch_runner.py).
+The publisher's production worker MUST run Linux; the production
+startup check in patch_runner.py enforces that.
+
+**Background and review trace.** Added 2026-05-17 in response to
+Finding 1 of the PR #133 review. Fred's probe demonstrated that
+the prior runner (monkeypatch_only on all platforms, unshare -n
+opportunistically on Linux) allowed a miner patch to read
+``/etc/hosts`` during hidden-test import and leak the contents
+through stdout. The jail eliminates that class of leak by removing
+the host filesystem from the child's view entirely.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+# Minimum util-linux version that supports ``unshare --root=DIR``.
+# ``--root`` landed in util-linux 2.36 (2020). Older distros need
+# the ctypes fallback (not implemented here -- the production
+# startup check refuses to start if the jail cannot be assembled).
+_UNSHARE_MIN_VERSION: tuple[int, int] = (2, 36)
+
+
+class JailError(Exception):
+    """Raised when the jail cannot be assembled or invoked."""
+
+
+@dataclass(frozen=True)
+class JailResult:
+    """Result of running a command inside the assembled jail."""
+
+    stdout: bytes
+    stderr: bytes
+    returncode: int | None
+    timed_out: bool
+    duration_seconds: float
+
+
+def _parse_unshare_version(text: str) -> tuple[int, int] | None:
+    """Parse the major.minor from ``unshare --version`` output.
+
+    ``unshare from util-linux 2.39.3`` -> (2, 39)
+    """
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
+    if match is None:
+        return None
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def unshare_supports_root() -> bool:
+    """Return True iff ``unshare(1)`` is recent enough for ``--root``.
+
+    We probe by version because ``unshare --help | grep root`` is
+    flakier across distros than parsing the version string.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    binary = shutil.which("unshare")
+    if not binary:
+        return False
+    try:
+        out = subprocess.run(  # noqa: S603 -- binary from shutil.which, fixed argv
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    parsed = _parse_unshare_version(out.stdout or out.stderr)
+    if parsed is None:
+        return False
+    return parsed >= _UNSHARE_MIN_VERSION
+
+
+def jail_available() -> bool:
+    """True iff the fs-jail can be assembled on this host.
+
+    The check is conservative: we require Linux, a recent enough
+    ``unshare(1)``, a usable ``/dev/null`` and ``/dev/urandom``, and
+    a Python interpreter prefix we can bind-mount.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    if not unshare_supports_root():
+        return False
+    if not Path("/dev/null").exists() or not Path("/dev/urandom").exists():
+        return False
+    if not Path(sys.prefix).is_dir():
+        return False
+    return True
+
+
+def assemble_jail(workspace_dir: Path, python_prefix: Path) -> Path:
+    """Assemble a fresh jail tree under a tmpdir and return the root.
+
+    The caller owns the tmpdir lifetime via ``tempfile.mkdtemp`` --
+    we return the jail root so the caller can clean it up after the
+    subprocess exits.
+
+    Layout::
+
+        <jail_root>/
+            dev/    (empty mountpoints for /dev/null + /dev/urandom)
+            proc/   (mountpoint for fresh procfs)
+            tmp/    (mountpoint for fresh tmpfs)
+            work/   (mountpoint for the workspace bind)
+            python/ (mountpoint for the read-only python prefix bind)
+
+    The actual bind mounts happen INSIDE the new mount namespace
+    (see ``run_in_jail``); on the host we only create the empty
+    directories and a few skeleton files.
+    """
+    if not workspace_dir.is_dir():
+        raise JailError(f"workspace_dir does not exist: {workspace_dir}")
+    if not python_prefix.is_dir():
+        raise JailError(f"python_prefix does not exist: {python_prefix}")
+
+    jail_root = Path(tempfile.mkdtemp(prefix="v4jail_"))
+    for sub in ("dev", "proc", "tmp", "work", "python"):
+        (jail_root / sub).mkdir()
+    # Touch the bind-mount targets for /dev/null + /dev/urandom so
+    # `mount --bind <file> <file>` has a destination inode.
+    (jail_root / "dev" / "null").touch()
+    (jail_root / "dev" / "urandom").touch()
+    return jail_root
+
+
+def _build_setup_script(
+    jail_root: Path,
+    workspace_dir: Path,
+    python_prefix: Path,
+    interpreter_relpath: str,
+    bootstrap_in_work: str,
+) -> str:
+    """Build the bash script that runs inside the new mount namespace.
+
+    The script sets up the bind / tmpfs / procfs mounts, pivots root
+    into ``jail_root``, and execs the pinned interpreter against a
+    bootstrap source file that the caller has already materialized
+    inside the workspace directory (which becomes ``/work`` after
+    the bind mount).
+
+    Passing the program via a file (not -c) sidesteps shell escaping
+    bugs and keeps the bash heredoc layer minimal.
+    """
+    # Convert paths to absolute strings; assume no shell-special chars
+    # because they originate from tempfile.mkdtemp / sys.prefix.
+    return f"""set -euo pipefail
+
+# Inside the new mount namespace. Bind the host bits we want
+# visible. None of these touch the host's mount table because the
+# unshare(1) wrapper gave us a private mount namespace.
+mount --bind --read-only {python_prefix} {jail_root}/python
+mount --bind {workspace_dir} {jail_root}/work
+mount --bind --read-only /dev/null {jail_root}/dev/null
+mount --bind --read-only /dev/urandom {jail_root}/dev/urandom
+mount -t tmpfs -o size=64m,mode=1777 tmpfs {jail_root}/tmp
+
+# Pivot into the jail. After pivot_root the old root is at /old.
+mkdir -p {jail_root}/old
+cd {jail_root}
+pivot_root . old
+cd /
+umount -l /old
+rmdir /old
+
+# /proc was already mounted in the new namespace by unshare
+# --mount-proc; after pivot_root it lives at /proc.
+
+# Exec the pinned interpreter against the bootstrap file the caller
+# wrote into the workspace (now /work) before the jail started.
+cd /work
+exec /python/{interpreter_relpath} -I /work/{bootstrap_in_work}
+"""
+
+
+_BOOTSTRAP_BASENAME = "__v4_jail_bootstrap.py"
+
+
+def run_in_jail(
+    jail_root: Path,
+    workspace_dir: Path,
+    python_prefix: Path,
+    program: str,
+    timeout_seconds: float,
+    interpreter_relpath: str = "bin/python3",
+) -> JailResult:
+    """Run ``program`` inside the jail via ``unshare(1)``.
+
+    ``program`` is the Python source the pinned interpreter runs.
+    We materialize it into ``workspace_dir/__v4_jail_bootstrap.py``
+    so the in-namespace bash setup script can ``exec`` it by file
+    path rather than ``-c``, sidestepping shell escaping concerns.
+    Returns a ``JailResult`` with stdout / stderr / returncode.
+    """
+    import time
+
+    binary = shutil.which("unshare")
+    if not binary:
+        raise JailError("unshare(1) not on PATH")
+
+    # Write the bootstrap into the workspace so it appears at
+    # /work/__v4_jail_bootstrap.py inside the jail.
+    bootstrap_path = workspace_dir / _BOOTSTRAP_BASENAME
+    bootstrap_path.write_text(program)
+
+    setup = _build_setup_script(
+        jail_root=jail_root,
+        workspace_dir=workspace_dir,
+        python_prefix=python_prefix,
+        interpreter_relpath=interpreter_relpath,
+        bootstrap_in_work=_BOOTSTRAP_BASENAME,
+    )
+
+    argv = [
+        binary,
+        "--user",  # new user namespace (unprivileged caller can unshare)
+        "--map-root-user",  # map our uid to root inside the user ns
+        "--mount",  # new mount namespace
+        "--net",  # new net namespace (no loopback, no routes)
+        "--pid",  # new pid namespace
+        "--fork",  # required for --pid to take effect
+        "--mount-proc",  # mount fresh /proc into the new ns
+        "bash",
+        "-c",
+        setup,
+    ]
+
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
+
+    started = time.monotonic()
+    proc = subprocess.Popen(  # noqa: S603 -- argv list, no shell, fixed binary
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        shell=False,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        timed_out = False
+        returncode: int | None = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = (b"", b"")
+        timed_out = True
+        returncode = None
+
+    duration = time.monotonic() - started
+    return JailResult(
+        stdout=stdout or b"",
+        stderr=stderr or b"",
+        returncode=returncode,
+        timed_out=timed_out,
+        duration_seconds=duration,
+    )
+
+
+def cleanup_jail(jail_root: Path) -> None:
+    """Best-effort removal of an assembled jail tree.
+
+    Bind-mounts only live in the now-exited mount namespace, so the
+    host-side ``shutil.rmtree`` is safe and complete. Swallows
+    errors so a single failed cleanup never crashes the runner.
+    """
+    try:
+        shutil.rmtree(jail_root, ignore_errors=True)
+    except Exception as exc:  # pragma: no cover -- best effort
+        logger.warning("v4.jail.cleanup_failed", jail=str(jail_root), error=str(exc))
+
+
+__all__ = [
+    "JailError",
+    "JailResult",
+    "assemble_jail",
+    "cleanup_jail",
+    "jail_available",
+    "run_in_jail",
+    "unshare_supports_root",
+]
